@@ -186,23 +186,27 @@ def connect_backend(path: Path, process: subprocess.Popen, identity):
 
 def stop_backend(process: subprocess.Popen) -> None:
     """Signal only the process group that this wrapper created."""
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+    def send(signum):
+        try:
+            os.killpg(process.pid, signum)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            # macOS may return EPERM after the leader has exited and the
+            # group is empty. Never ignore it for a live or uninspectable group.
+            if sys.platform != 'darwin' or process.poll() is None:
+                raise
+            from .macos_process import MacOSProcesses
+            if not MacOSProcesses().group_is_empty(process.pid):
+                raise
+    send(signal.SIGTERM)
     try:
         process.wait(timeout=STOP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        send(signal.SIGKILL)
         process.wait(timeout=STOP_TIMEOUT_SECONDS)
     # The child may have exited before descendants which inherited its pipes.
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    send(signal.SIGKILL)
 
 
 def dispatcher_command(env: Mapping[str, str], path: Path) -> list[str] | None:

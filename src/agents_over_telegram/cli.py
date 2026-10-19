@@ -196,8 +196,8 @@ def parser():
     dispatch.add_argument("--duration", type=float, default=55, help="Listening seconds; 0 continues until explicitly stopped")
     dispatch.add_argument("--collect", action="store_true", help="Also collect Telegram updates; never flush or acknowledge work")
     desktop = sub.add_parser("relay-desktop", help="Wake mapped local chats in an already running, normally launched desktop")
-    desktop.add_argument("--codex-binary", type=Path, default=Path("/usr/lib/chatgpt/resources/codex"),
-                         help="Pinned bundled native Codex CLI; supported Linux build only")
+    desktop.add_argument("--codex-binary", type=Path,
+                         help="Bundled native Codex CLI (auto-detected on Linux/macOS)")
     desktop.add_argument("--codex-home", type=Path, help="Existing Codex home used by the running desktop")
     desktop.add_argument("--duration", type=float, default=55, help="Listening seconds; 0 continues until explicitly stopped")
     desktop.add_argument("--collect", action="store_true", help="Also collect Telegram updates; never flush or acknowledge work")
