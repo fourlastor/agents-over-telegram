@@ -13,7 +13,7 @@ You need Codex on Linux and **Python 3.11+ with virtual-environment support**. T
    codex plugin add agents-over-telegram@agents-over-telegram
    ```
 
-   These are Codex CLI commands. The release repository is `fourlastor/agents-over-telegram`; publication and fresh GitHub installation verification are pending. Local marketplace discovery and installation have already been checked.
+   These are Codex CLI commands. Fresh installation from the public [fourlastor/agents-over-telegram repository](https://github.com/fourlastor/agents-over-telegram) has been verified.
 2. **Prepare Telegram.** Create a bot with `@BotFather` if you do not already have one for this setup, and add it to a dedicated group or forum topic. Reuse that bot for later agents. Keep its token private; the wizard asks for it in a hidden terminal prompt. Direct-message pairing is not supported.
 3. **Open the intended project in Codex and ask “Connect this agent to Telegram.”** The setup skill prepares the runtime from the installed plugin and gives you the private pairing command. Run the terminal wizard, send its exact `/pair@YourBotUsername …` command in the intended group/topic, then confirm the observed destination in the terminal. First registration also confirms that this bot has no other receiver. Adding another project reuses the registered bot without entering its token again.
 4. **Load the connection.** Open/add the prepared project, make Codex's normal project-trust decision, then reload/reopen its chat. Ask **“Telegram status”** to verify the actual bot and destination through the loaded tools.
@@ -43,7 +43,7 @@ History covers captured local records, not a complete prior-day Telegram transcr
 
 ## Validation and setup details
 
-The 0.7.1 first-run check passed with **no uv executable available**: native CLI installation, automatic pip bootstrap, repeat reuse and runtime operation after removing source/cache copies. Fresh fake Alpha/Beta pairing and scoped MCP checks passed too. The offline pip path passed the same onboarding checks. The full 0.7.1 suite passed **561 tests in 21.95 seconds**. Earlier live Telegram checks covered peer delivery, pause/resume and normal-desktop wake/reply/ack. Published GitHub installation, the desktop plugin UI and its onboarding button remain untested. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for the evidence and limits.
+Version 0.7.2 passed a fresh install from the public GitHub repository with **no uv executable available**, followed by automatic pip bootstrap, repeat reuse, cache-independent runtime operation and fresh fake Alpha/Beta scoped MCP checks. The release suite passed **572 tests in 21.71 seconds**. Earlier live Telegram checks covered peer delivery, pause/resume and normal-desktop wake/reply/ack. The desktop plugin UI, automatic onboarding button and a fresh real-bot registration remain untested. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for the evidence and limits.
 
 - [Guided setup, local controls and advanced CLI](docs/OPERATIONS.md)
 - [Listen with the normally opened desktop](docs/DIRECT_DISPATCH.md)

@@ -13,7 +13,7 @@ codex plugin marketplace add fourlastor/agents-over-telegram
 codex plugin add agents-over-telegram@agents-over-telegram
 ```
 
-The release repository is `fourlastor/agents-over-telegram`. Publication and fresh remote-install verification are pending. Local marketplace discovery and installation were verified with a clean Codex home; the desktop install UI remains a separate check. The marketplace name and plugin name are both `agents-over-telegram`.
+The public release repository is [fourlastor/agents-over-telegram](https://github.com/fourlastor/agents-over-telegram). Fresh GitHub marketplace registration, plugin installation and runtime bootstrap passed in a clean Codex home; the desktop install UI remains a separate check. The marketplace name and plugin name are both `agents-over-telegram`.
 
 Ask **“Connect this agent to Telegram”** in the intended project. The setup skill first reuses that project's configured runtime, if present. For a new project it runs the bundled bootstrap with a compatible Python interpreter. You do not need to clone and maintain another checkout.
 
