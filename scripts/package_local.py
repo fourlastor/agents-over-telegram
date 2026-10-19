@@ -8,7 +8,8 @@ import zipfile
 def package(root, output):
     selected = []
     for name in ("src", "tests", "skills", "scripts", "docs", ".codex-plugin", ".agents/plugins/marketplace.json", "plugin.json", "mcp.json",
-                 ".mcp.json", "pyproject.toml", "uv.lock", "README.md", "PROPOSAL.md", "HANDOFF.md"):
+                 ".mcp.json", "pyproject.toml", "uv.lock", "requirements/runtime.txt", "requirements/build.txt",
+                 "README.md", "PROPOSAL.md", "HANDOFF.md"):
         path = root/name
         candidates = path.rglob("*") if path.is_dir() else [path]
         for file in candidates:

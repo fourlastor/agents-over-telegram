@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = spec_from_file_location("bootstrap_runtime", ROOT / "scripts" / "bootstrap_runtime.py")
 bootstrap = module_from_spec(spec)
 spec.loader.exec_module(bootstrap)
+REAL_RUN_CHECKED = bootstrap.run_checked
 
 
 @pytest.fixture
@@ -22,6 +23,9 @@ def package(tmp_path):
     source.mkdir(parents=True)
     (root / "pyproject.toml").write_text('[project]\nname = "agents-over-telegram"\nversion = "0.7.0"\n')
     (root / "uv.lock").write_text("version = 1\n")
+    (root / "requirements").mkdir()
+    (root / "requirements" / "runtime.txt").write_text("# hashed runtime requirements\n")
+    (root / "requirements" / "build.txt").write_text("# hashed build requirements\n")
     (source / "__init__.py").write_text('__version__ = "0.7.0"\n')
     return root
 
@@ -138,9 +142,9 @@ def test_runtime_root_must_be_private(tmp_path, package, root_kind):
         bootstrap.bootstrap(package, root, environ={})
 
 
-def test_missing_uv_is_actionable_and_does_not_download(tmp_path, package):
-    with pytest.raises(bootstrap.BootstrapError, match="Install uv.*No software was downloaded"):
-        bootstrap.bootstrap(package, tmp_path / "runtimes", environ={"PATH": "/does-not-exist"})
+def test_explicit_missing_uv_is_actionable_without_fallback(tmp_path, package):
+    with pytest.raises(bootstrap.BootstrapError, match="requested uv installer is unavailable"):
+        bootstrap.bootstrap(package, tmp_path / "runtimes", installer="uv", environ={"PATH": "/does-not-exist"})
     assert not list((tmp_path / "runtimes").rglob(".ready.json"))
 
 
@@ -269,3 +273,157 @@ def test_ready_venv_symlink_is_not_followed(tmp_path, package, fake_uv):
     venv.symlink_to(elsewhere, target_is_directory=True)
     with pytest.raises(bootstrap.BootstrapError, match="link or non-directory"):
         bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
+
+
+@pytest.fixture
+def fake_pip(monkeypatch):
+    calls = []
+
+    def run(command, *, env, cwd, timeout, error):
+        calls.append({"command": command, "env": env, "cwd": cwd, "timeout": timeout, "error": error})
+        if "venv" in command:
+            binary = cwd / ".venv" / "bin"
+            binary.mkdir(parents=True, mode=0o700)
+            binary.parent.chmod(0o700)
+            (binary / "python").write_text("fake Python for mocked subprocess")
+        elif "pip" in command and "install" in command and "--no-build-isolation" in command:
+            executable = cwd / ".venv" / "bin" / "aot"
+            executable.write_text("fake CLI for mocked subprocess")
+            executable.chmod(0o700)
+        elif "-c" in command:
+            return "0.7.0\n"
+        elif "--help" in command:
+            return "usage: aot setup relay-desktop\n"
+        return ""
+
+    monkeypatch.setattr(bootstrap, "run_checked", run)
+    return calls
+
+
+def test_no_uv_selects_python_venv_pip_without_installer_dependency(tmp_path, package, fake_pip):
+    result = bootstrap.bootstrap(package, tmp_path / "runtimes", environ={"PATH": "/absent", "PIP_INDEX_URL": "SECRET"})
+    assert result["installer"] == "pip" and not result["reused"]
+    commands = [call["command"] for call in fake_pip]
+    assert commands[0][1:] == ["-I", "-m", "venv", "--without-pip", str(Path(result["runtime_dir"]) / ".venv")]
+    assert commands[1][1:] == ["-I", "-m", "ensurepip", "--upgrade", "--default-pip"]
+    dependencies, local, check = commands[2:5]
+    for flag in ("--isolated", "--no-input", "--require-hashes", "--only-binary=:all:"):
+        assert flag in dependencies
+    assert dependencies[dependencies.index("--index-url") + 1] == "https://pypi.org/simple"
+    assert dependencies.count("-r") == 2
+    assert "--no-index" in local and "--no-deps" in local and "--no-build-isolation" in local
+    assert check[-1] == "check"
+    for call in fake_pip[2:5]:
+        assert call["env"]["PIP_CONFIG_FILE"] == os.devnull
+        assert "PIP_INDEX_URL" not in call["env"]
+        assert "SECRET" not in repr(call)
+
+
+def test_explicit_pip_does_not_look_for_uv(tmp_path, package, fake_pip, monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("explicit pip must not depend on uv lookup")
+    monkeypatch.setattr(bootstrap.shutil, "which", unexpected)
+    result = bootstrap.bootstrap(package, tmp_path / "runtimes", installer="pip", environ={})
+    assert result["installer"] == "pip"
+
+
+def test_offline_pip_requires_explicit_wheelhouse_before_subprocess(tmp_path, package, fake_pip):
+    with pytest.raises(bootstrap.BootstrapError, match="Offline pip installation requires --wheelhouse"):
+        bootstrap.bootstrap(package, tmp_path / "runtimes", installer="pip", offline=True, environ={})
+    assert fake_pip == []
+
+
+def test_offline_pip_never_supplies_an_index_or_build_isolation(tmp_path, package, fake_pip):
+    wheelhouse = tmp_path / "wheels"
+    wheelhouse.mkdir()
+    result = bootstrap.bootstrap(package, tmp_path / "runtimes", installer="pip", offline=True, wheelhouse=wheelhouse, environ={})
+    assert result["installer"] == "pip"
+    dependencies = fake_pip[2]["command"]
+    assert "--no-index" in dependencies and "--index-url" not in dependencies
+    assert dependencies[dependencies.index("--find-links") + 1] == str(wheelhouse)
+    assert all("https://" not in repr(call["command"]) for call in fake_pip)
+    assert "--no-index" in fake_pip[3]["command"]
+
+
+def test_auto_wheelhouse_selects_pip_even_when_uv_exists(tmp_path, package, fake_pip, fake_uv):
+    wheelhouse = tmp_path / "wheels"
+    wheelhouse.mkdir()
+    result = bootstrap.bootstrap(package, tmp_path / "runtimes", wheelhouse=wheelhouse, environ=environment(fake_uv))
+    assert result["installer"] == "pip"
+    dependencies = fake_pip[2]["command"]
+    assert "--find-links" in dependencies and "--index-url" in dependencies
+
+
+def test_explicit_uv_wheelhouse_is_rejected(tmp_path, package, fake_pip):
+    with pytest.raises(bootstrap.BootstrapError, match="requires --installer pip or auto"):
+        bootstrap.bootstrap(package, tmp_path / "runtimes", installer="uv", wheelhouse=tmp_path, environ={})
+    assert fake_pip == []
+
+
+def test_missing_ensurepip_gives_system_package_guidance_without_pip_install(tmp_path, package, monkeypatch):
+    calls = []
+    def run(command, *, env, cwd, timeout, error):
+        calls.append(command)
+        if "ensurepip" in command:
+            raise bootstrap.BootstrapError(error)
+        return ""
+    monkeypatch.setattr(bootstrap, "run_checked", run)
+    with pytest.raises(bootstrap.BootstrapError, match="python3-venv.*optional uv"):
+        bootstrap.bootstrap(package, tmp_path / "runtimes", installer="pip", environ={})
+    assert len(calls) == 2 and not any("pip" in command for command in calls)
+
+
+def test_pip_failure_does_not_emit_subprocess_credentials(tmp_path, package, fake_pip, monkeypatch):
+    real_run = bootstrap.run_checked
+    def run(command, **kwargs):
+        if "pip" in command:
+            with pytest.raises(bootstrap.BootstrapError) as caught:
+                REAL_RUN_CHECKED(command, **kwargs)
+            assert "SECRET" not in str(caught.value)
+            raise caught.value
+        return real_run(command, **kwargs)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, "SECRET", "SECRET"))
+    monkeypatch.setattr(bootstrap, "run_checked", run)
+    with pytest.raises(bootstrap.BootstrapError, match="pip runtime installation failed"):
+        bootstrap.bootstrap(package, tmp_path / "runtimes", installer="pip", environ={})
+    assert not list((tmp_path / "runtimes").rglob(".ready.json"))
+
+
+def test_pip_runtime_reuse_does_not_need_wheelhouse_or_installers(tmp_path, package, fake_pip, monkeypatch):
+    wheelhouse = tmp_path / "wheels"
+    wheelhouse.mkdir()
+    first = bootstrap.bootstrap(package, tmp_path / "runtimes", offline=True, wheelhouse=wheelhouse, environ={})
+    shutil.rmtree(wheelhouse)
+    fake_pip.clear()
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda *args, **kwargs: pytest.fail("reuse must not check installers"))
+    second = bootstrap.bootstrap(package, tmp_path / "runtimes", offline=True, environ={})
+    assert second == dict(first, reused=True)
+    assert len(fake_pip) == 2  # Version and CLI help only.
+
+
+def test_requirement_lock_change_gets_new_runtime_address(package):
+    before, _ = bootstrap.snapshot_source(package)
+    (package / "requirements" / "runtime.txt").write_text("changed locked dependency hashes\n")
+    after, _ = bootstrap.snapshot_source(package)
+    assert bootstrap.content_address(before) != bootstrap.content_address(after)
+    assert "requirements/build.txt" in before and "requirements/runtime.txt" in before
+
+
+def test_requirements_directory_link_is_rejected(tmp_path, package):
+    target = tmp_path / "external-requirements"
+    (package / "requirements").rename(target)
+    (package / "requirements").symlink_to(target, target_is_directory=True)
+    with pytest.raises(bootstrap.BootstrapError, match="requirements directory is unsafe"):
+        bootstrap.snapshot_source(package)
+
+
+@pytest.mark.parametrize("kind", ["relative", "missing", "symlink"])
+def test_invalid_wheelhouse_rejected_before_installer(tmp_path, package, fake_pip, kind):
+    wheelhouse = tmp_path / "wheels"
+    if kind == "relative":
+        wheelhouse = Path("relative-wheels")
+    elif kind == "symlink":
+        wheelhouse.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(bootstrap.BootstrapError, match="wheelhouse"):
+        bootstrap.bootstrap(package, tmp_path / "runtimes", installer="pip", wheelhouse=wheelhouse, environ={})
+    assert fake_pip == []

@@ -1,8 +1,10 @@
 # Implementation handoff
 
-## Current continuation: 0.7.0 first-time setup
+## Current continuation: 0.7.1 optional uv
 
 The committed 0.6.0 checkpoint is `0a6db68`. The preferred listener is `relay-desktop`: ChatGPT opens normally, and native queueing plus its wake URL starts an existing local chat. The live Telegram round trip and duplicate check passed. Do not resume custom-launch or replacement-backend work as the default path.
+
+Version 0.7.1 removes uv as a first-time prerequisite. The default bootstrap chooses uv when available, otherwise Python 3.11+ venv/ensurepip and pip inside the private runtime. The pip path pins and hash-checks both runtime and build dependencies; the uv path retains its existing frozen runtime resolution. Stable runtime paths remain unchanged. Explicit installer selection and a populated wheelhouse support offline pip installation. It does not use global pip or install uv automatically. The real online uv-free first-run check passed through native CLI install, pip bootstrap, repeat reuse, source/cache removal and fresh fake scoped MCP onboarding. The offline pip path also passed with a 35-wheel compatible wheelhouse, and the existing uv path passed a fresh offline bootstrap. The full 0.7.1 suite passed **561 tests in 21.95 seconds**, including 39 bootstrap tests. Keep previous-release evidence distinct.
 
 Version 0.7.0 adds the repository marketplace, a bundled bootstrap that creates a stable runtime outside plugin caches, updated setup guidance and accurate listener-status wording. Native CLI installation, cache-independent runtime preparation and fresh fake-project MCP onboarding passed; 534 automated tests passed. GitHub transport and desktop plugin UI/onboarding still need a real repository and UI acceptance check. No remote repository has been created or published. Read [implementation status](docs/IMPLEMENTATION_STATUS.md) for the current evidence.
 

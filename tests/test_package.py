@@ -86,7 +86,7 @@ def test_launcher_uses_one_explicit_profile_without_shell(tmp_path):
 
 def copy_package(tmp_path):
     tmp_path.mkdir(parents=True, exist_ok=True)
-    for name in ("plugin.json", ".codex-plugin", ".agents", "skills", "scripts"):
+    for name in ("plugin.json", ".codex-plugin", ".agents", "skills", "scripts", "requirements", "pyproject.toml", "uv.lock"):
         source, target = ROOT / name, tmp_path / name
         if source.is_dir():
             shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__"))
@@ -135,6 +135,8 @@ def test_source_archive_does_not_restore_global_mcp(tmp_path):
         assert "mcpServers" not in json.loads(package.read(".codex-plugin/plugin.json"))
         marketplace = json.loads(package.read(".agents/plugins/marketplace.json"))
         assert marketplace["plugins"][0]["source"] == {"source": "local", "path": "./"}
+        assert "requirements/runtime.txt" in package.namelist()
+        assert "requirements/build.txt" in package.namelist()
 
 
 @pytest.mark.parametrize("source", [
@@ -166,7 +168,7 @@ def test_marketplace_identity_must_match_plugin(tmp_path):
 def test_archive_includes_only_marketplace_manifest_from_agents(tmp_path):
     from zipfile import ZipFile
     root = copy_package(tmp_path / "source")
-    for relative in (".agents/private.json", ".venv/private.json", "runtime/private.json", "state/credentials.json"):
+    for relative in (".agents/private.json", ".venv/private.json", "runtime/private.json", "state/credentials.json", "requirements/private.json"):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("not packaged")
@@ -177,6 +179,15 @@ def test_archive_includes_only_marketplace_manifest_from_agents(tmp_path):
         assert ".agents/plugins/marketplace.json" in names
         assert not any(name.startswith((".venv/", "runtime/", "state/")) for name in names)
         assert [name for name in names if name.startswith(".agents/")] == [".agents/plugins/marketplace.json"]
+        assert sorted(name for name in names if name.startswith("requirements/")) == ["requirements/build.txt", "requirements/runtime.txt"]
+
+
+@pytest.mark.parametrize("kind", ["runtime", "build"])
+def test_onboarding_package_requires_both_dependency_exports(tmp_path, kind):
+    root = copy_package(tmp_path)
+    (root / "requirements" / f"{kind}.txt").unlink()
+    with pytest.raises(ValueError, match="requirements are missing"):
+        validator.validate_package(root)
 
 
 def set_onboarding(root, value, *, both=True):

@@ -4,7 +4,7 @@ Connect a Codex project to a Telegram group or forum topic. Register **one bot o
 
 ## First-time setup
 
-You need Codex on Linux, **Python 3.11+** and **uv**. If a prerequisite is missing, follow the official [Python downloads](https://www.python.org/downloads/) or [uv installation guide](https://docs.astral.sh/uv/getting-started/installation/). The plugin prepares its own stable runtime; you do not need a separate source checkout or virtual environment.
+You need Codex on Linux and **Python 3.11+ with virtual-environment support**. The plugin prepares its own stable runtime; **uv is optional**. If Python is missing, follow the official [Python downloads](https://www.python.org/downloads/). On Linux distributions that package virtual-environment support separately, install the matching package, such as `python3-venv` on Debian/Ubuntu. Then ask Codex to connect the project; you do not need a separate source checkout or virtual environment.
 
 1. **Install the plugin from its GitHub marketplace.** No GitHub repository has been published for this package yet. Once it is published, replace the `OWNER/REPO` placeholder below with that repository; do not run the placeholder literally:
 
@@ -43,7 +43,7 @@ History covers captured local records, not a complete prior-day Telegram transcr
 
 ## Validation and setup details
 
-The first-run check passed from a clean local Codex CLI installation: bootstrap ran from the installed plugin cache, reused the same runtime on repetition, and the runtime still worked after both source and plugin-cache copies were moved away. Fresh fake Alpha/Beta setup and scoped native MCP checks passed. The full suite passed **534 tests in 21.15 seconds**. Earlier live Telegram checks also covered peer delivery, pause/resume and normal-desktop wake/reply/ack. Published GitHub installation, the desktop plugin UI and its onboarding button remain untested. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for the evidence and limits.
+The 0.7.1 first-run check passed with **no uv executable available**: native CLI installation, automatic pip bootstrap, repeat reuse and runtime operation after removing source/cache copies. Fresh fake Alpha/Beta pairing and scoped MCP checks passed too. The offline pip path passed the same onboarding checks. The full 0.7.1 suite passed **561 tests in 21.95 seconds**. Earlier live Telegram checks covered peer delivery, pause/resume and normal-desktop wake/reply/ack. Published GitHub installation, the desktop plugin UI and its onboarding button remain untested. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for the evidence and limits.
 
 - [Guided setup, local controls and advanced CLI](docs/OPERATIONS.md)
 - [Listen with the normally opened desktop](docs/DIRECT_DISPATCH.md)
@@ -55,7 +55,7 @@ The first-run check passed from a clean local Codex CLI installation: bootstrap 
 
 ## Offline development
 
-Python 3.11+ is required; Linux with Python 3.13.7 was tested. From the source root:
+Python 3.11+ is required; Linux with Python 3.13.7 was tested. The development workflow below uses uv, although ordinary plugin setup does not require it. From the source root:
 
 ```sh
 uv sync --frozen --extra dev --python /usr/bin/python3.13

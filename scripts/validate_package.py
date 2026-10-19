@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from importlib.util import module_from_spec, spec_from_file_location
 import json
 from pathlib import Path
 
@@ -101,6 +102,13 @@ def validate_package(root: Path, schema_root: Path | None = None) -> None:
         header = text.split("---", 2)[1]
         if "name:" not in header or "description:" not in header:
             raise ValueError("Skill frontmatter is incomplete")
+    if onboarding is not None:
+        # Private profiles reuse an already configured runtime and have no onboarding.
+        # The distributable plugin must carry both installer-independent lock exports.
+        spec = spec_from_file_location("export_requirements", Path(__file__).with_name("export_requirements.py"))
+        exports = module_from_spec(spec)
+        spec.loader.exec_module(exports)
+        exports.validate_exports(root)
 
 
 def main() -> int:
@@ -108,7 +116,7 @@ def main() -> int:
     parser.add_argument("root", nargs="?", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     validate_package(args.root)
-    print("Package valid: portable schemas, compatibility parity, marketplace and local component paths")
+    print("Package valid: schemas, compatibility, marketplace, component paths and locked runtime requirements")
     return 0
 
 
