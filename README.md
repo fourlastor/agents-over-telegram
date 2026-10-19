@@ -41,7 +41,7 @@ On Linux with bundled Codex **0.163.0-alpha.10.2**, the live `relay-desktop` che
 
 History covers captured local records, not a complete prior-day Telegram transcript. Messages consumed elsewhere or missed before binding and the old bridge's archive are not imported.
 
-On macOS, the listener discovers the bundled native CLI inside ChatGPT.app or Codex.app, validates the running app and its direct local backend with libproc/sysctl, and opens the wake URL in that same app. The macOS check covered native process discovery, queue acceptance and OS URL handoff; a full Telegram → idle chat → reply/ack round trip remains a separate acceptance check. See [macOS validation](docs/COMPATIBILITY.md#macos-native-queue-validation).
+On macOS, the listener discovers the bundled native CLI inside ChatGPT.app or Codex.app, validates the running app and its direct local backend with libproc/sysctl, and opens the wake URL in that same app. The macOS check covered native process discovery, queue acceptance, OS URL handoff and automatic notice delivery after a busy turn finished; a full Telegram → idle chat → reply/ack round trip remains a separate acceptance check. See [macOS validation](docs/COMPATIBILITY.md#macos-native-queue-validation).
 
 ## Validation and setup details
 
