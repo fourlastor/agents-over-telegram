@@ -32,16 +32,17 @@ Ask Codex:
 - **“Show recent Telegram context”** — read captured messages from the last 24 hours, including handled messages.
 - **“Send Beta this testing result…”** — send within the recipient and purpose you authorize.
 - **“Listen for Telegram”** — start a bounded listener for a chosen local chat while ChatGPT is open normally.
+- **“Leave Telegram listening”** — keep the listener running until stopped. Automatic restart after login requires an explicit service request; see the [macOS service procedure](docs/MACOS_SERVICE.md).
 
 Status and history do not contact Telegram or send messages. Collection is **on demand** by default: asking for new messages polls the shared collector and may progress previously authorized queued sends. Setup starts no listener or background service.
 
-The optional [desktop listener](docs/DIRECT_DISPATCH.md) uses native Codex queueing and a wake URL to notify an existing local chat. **Open ChatGPT from the app list as usual.** No custom app launcher, protocol wrapper or relay model is required. Listening is explicit and bounded; the target uses its own scoped Telegram tools to handle pending work.
+The optional [desktop listener](docs/DIRECT_DISPATCH.md) uses native Codex queueing and a wake URL to notify an existing local chat. **Open ChatGPT from the app list as usual.** No custom app launcher, protocol wrapper or relay model is required. Listening follows the requested duration or runs continuously when explicitly requested; the target uses its own scoped Telegram tools to handle pending work. Without a duration or ongoing-listening request, the default check lasts 55 seconds.
 
 On Linux with bundled Codex **0.163.0-alpha.10.2**, the live `relay-desktop` check passed with ChatGPT opened normally: Telegram marker `normal-idle-1` woke the existing local Alpha chat, which polled once, sent one reply and acknowledged the delivery after publication was recorded as sent. No model forwarded the wake after the marker arrived, and Alpha returned to zero pending messages. Native tool and ledger evidence confirm the round trip; the user also confirmed the reply is visible in Telegram. The [compatibility record](docs/COMPATIBILITY.md) separates this result from earlier relay and shared-backend experiments.
 
 History covers captured local records, not a complete prior-day Telegram transcript. Messages consumed elsewhere or missed before binding and the old bridge's archive are not imported.
 
-On macOS, the listener discovers the bundled native CLI inside ChatGPT.app or Codex.app, validates the running app and its direct local backend with libproc/sysctl, and opens the wake URL in that same app. The macOS check covered native process discovery, queue acceptance, OS URL handoff and automatic notice delivery after a busy turn finished; a full Telegram → idle chat → reply/ack round trip remains a separate acceptance check. See [macOS validation](docs/COMPATIBILITY.md#macos-native-queue-validation).
+On macOS, the listener discovers the bundled native CLI inside ChatGPT.app or Codex.app, validates the running app and its direct local backend with libproc/sysctl, and opens the wake URL in that same app. Follow-up live checks passed a full Telegram → idle chat → reply/ack round trip. Responding during an active work turn was verified with a separate, operator-installed hook that is not shipped in the plugin; the native queue alone can wait until that turn ends. See [macOS follow-up validation](docs/COMPATIBILITY.md#macos-follow-up-idle-and-busy-tests).
 
 ## Validation and setup details
 

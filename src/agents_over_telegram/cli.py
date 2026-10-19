@@ -91,7 +91,7 @@ def render_plugin(state_dir, client_file, output, name):
     if not (source / "plugin.json").is_file():
         raise CredentialError("plugin_template_missing_use_source_checkout")
     output.mkdir(parents=True, mode=0o700)
-    for relative in ("plugin.json", ".codex-plugin", "skills", "docs/OPERATIONS.md", "docs/LIVE_VALIDATION.md", "docs/COMPATIBILITY.md", "docs/RELAY.md", "docs/DIRECT_DISPATCH.md"):
+    for relative in ("plugin.json", ".codex-plugin", "skills", "docs/OPERATIONS.md", "docs/LIVE_VALIDATION.md", "docs/COMPATIBILITY.md", "docs/RELAY.md", "docs/DIRECT_DISPATCH.md", "docs/MACOS_SERVICE.md"):
         src, dst = source / relative, output / relative
         if src.is_dir():
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))

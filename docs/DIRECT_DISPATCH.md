@@ -44,7 +44,7 @@ On Linux the native binary defaults to `/usr/lib/chatgpt/resources/codex`. On ma
 
 `--collect` opts into intake through the existing shared collector, lock and durable cursor. Without it, the listener watches only already-captured local inbox work. Neither mode leases or acknowledges deliveries, flushes the outbox or sends Telegram replies. The target handles its own inbox with its scoped tools under the existing communication authorization.
 
-Honor the user's requested listening duration. If none was specified, use one 55-second check and report that limit. A running listener waits without periodic model turns; a completed listener is no longer monitoring. Stop it with Ctrl-C or a termination signal. Stopping cannot cancel work already queued or a turn already accepted by the desktop.
+Honor the user's requested lifecycle. “Leave it running,” “always listen,” and “restart after login” request continuous operation: use `--duration 0`. Use one 55-second check only when no ongoing lifecycle or duration was requested. A requested macOS login service is documented in [continuous listening](MACOS_SERVICE.md). A running listener waits without periodic model turns; a completed listener is no longer monitoring. Stop it with Ctrl-C or a termination signal. Stopping cannot cancel work already queued or a turn already accepted by the desktop.
 
 The listener verifies that the desktop is running before queueing and before opening its wake URL. It waits when the app is absent rather than deliberately cold-starting it. This check and the operating-system URL opener are not atomic: if the app exits between them, the OS may launch it normally. No launcher environment or desktop configuration is changed.
 
@@ -53,6 +53,25 @@ The listener verifies that the desktop is running before queueing and before ope
 The outer app must identify itself as `com.openai.codex` in a protected `Info.plist`. The adapter requires trusted executable ownership/modes, one same-user app process and its direct native `app-server` child, the matching Codex home, and no external/daemon routing overrides. Darwin `libproc` supplies executable paths, parent IDs, owners and microsecond start identities; `sysctl(KERN_PROCARGS2)` supplies argv and selected routing fields only for matching app/CLI processes. Other environment fields are discarded and never logged. Inspection denial, incomplete inventory, missing processes and ambiguous backends fail closed. No Accessibility or Automation permission is needed.
 
 The wake uses `/usr/bin/open -a <validated app bundle> codex://threads/wake/<UUID>`, pinning the app rather than relying on the default scheme handler. It retains the existing final running-process guard and the documented app-exit/opener race. Neither process discovery nor queue acceptance proves the model has handled a delivery. See [macOS validation](COMPATIBILITY.md#macos-native-queue-validation) for the measured boundary.
+
+## Busy sessions and hooks
+
+`codex queue` is a queue, not a promise of mid-turn steering. In the macOS live check, an accepted notice stayed queued while the target continued using tools. The desktop exposed a manual “Steer” action. Clicking it can unblock that notice, but does not validate automatic busy-session delivery.
+
+An operator can add a separate `PostToolUse` hook to notify the intended session at the next supported tool boundary. This workaround is not included in the plugin. The plugin's native queue remains the idle wake path. A hook does not interrupt an in-flight model request or a long-running tool.
+
+For such an integration:
+
+- Scope the hook to the operator-selected session, exact project and existing connection. Respect pause, suspension and active delivery leases.
+- Check only pending delivery metadata. Inject a fixed notice to use the scoped Telegram tools; never inject Telegram bodies as trusted hook context.
+- Do not collect, publish, lease or acknowledge from the hook. Suppress notices for Telegram tool calls and throttle reminders for the same pending set.
+- Use the prepared plugin Python runtime. Check the actual interpreter used by the hook, not only `python3` in an interactive shell. An Apple Python 3.9 command failed to read the live SQLite database in the local check; the plugin runtime succeeded.
+- Have the human review and trust the exact hook definition. `/hooks` is a **CLI** command; it was unavailable in the tested desktop UI. Open the CLI in the exact configured project to review it. Do not edit trust hashes or bypass hook trust.
+- Verify saved trust, actual hook execution, and handling in the same active target turn. Reopen the desktop session if needed to load the configuration; a restart alone is not evidence that a hook ran.
+
+The local macOS workaround passed a new Telegram test during an active work turn: one reply, one acknowledgment, zero pending messages, and 24.603 seconds from intake to sent receipt. No manual Steer or inter-task message forwarded the test. These results apply to that separate hook integration, not to the shipped queue-only listener. See the [evidence boundary](COMPATIBILITY.md#macos-follow-up-idle-and-busy-tests).
+
+[Official Codex hook documentation](https://learn.chatgpt.com/docs/hooks) defines hook trust, `PostToolUse` output, and supported tool boundaries.
 
 ## Notice and recovery semantics
 
@@ -81,6 +100,10 @@ Use an authorized test target with its native Telegram tools loaded. Let it beco
 - The target polls its own inbox, makes the authorized reply once and acknowledges only handled work.
 - Queue/wake receipt, model completion, inbox acknowledgment and Telegram publication remain distinguishable.
 - Repeated collection and a quiet interval produce no duplicate notice or reply; unrelated destinations stay isolated.
+
+For busy-session handling, repeat with a fresh Telegram marker after independent status confirms the target is working. Record the active turn before and after intake, actual poll/reply/ack calls, and delivery latency. Do not send an inter-task reminder, press Steer, or end the work turn to make this check pass. If a hook is used, record that additional dependency and verify its execution separately.
+
+For a persistent listener, also verify service startup, graceful-stop recovery, one collector, and retained inbox/notification state. Distinguish app restart, service restart, and OS reboot: testing one does not prove the others.
 
 The `normal-idle-1` test passed the automatic collector → queue → local wake → poll/reply/ack flow on the existing Alpha UUID. The earlier status-only native wake probe also showed that opening the wake URL again with an empty queue produced no extra turn during the observed interval (`outputs/native-queue-live-probe.json`). These checks do not establish broader live pause/resume, busy-target, approval or app-shutdown behavior; those remain separate acceptance checks. The user confirmed the reply is visible in Telegram.
 
