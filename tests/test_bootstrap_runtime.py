@@ -23,6 +23,7 @@ def package(tmp_path):
     source.mkdir(parents=True)
     (root / "pyproject.toml").write_text('[project]\nname = "agents-over-telegram"\nversion = "0.7.0"\n')
     (root / "uv.lock").write_text("version = 1\n")
+    (root / "LICENSE").write_text("License fixture\n")
     (root / "requirements").mkdir()
     (root / "requirements" / "runtime.txt").write_text("# hashed runtime requirements\n")
     (root / "requirements" / "build.txt").write_text("# hashed build requirements\n")
@@ -427,3 +428,11 @@ def test_invalid_wheelhouse_rejected_before_installer(tmp_path, package, fake_pi
     with pytest.raises(bootstrap.BootstrapError, match="wheelhouse"):
         bootstrap.bootstrap(package, tmp_path / "runtimes", installer="pip", wheelhouse=wheelhouse, environ={})
     assert fake_pip == []
+
+
+def test_license_is_snapshotted_and_changes_runtime_address(package):
+    before, _ = bootstrap.snapshot_source(package)
+    assert before["LICENSE"] == (package / "LICENSE").read_bytes()
+    (package / "LICENSE").write_text("Updated license fixture\n")
+    after, _ = bootstrap.snapshot_source(package)
+    assert bootstrap.content_address(before) != bootstrap.content_address(after)

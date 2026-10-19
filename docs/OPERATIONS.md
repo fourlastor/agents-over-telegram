@@ -6,14 +6,14 @@ The commands below use the absolute `aot` executable returned by the plugin's ru
 
 ## Codex setup
 
-The package contains a Codex marketplace entry for its root plugin. After publication, register the GitHub repository and install the plugin with the Codex CLI:
+The package contains a Codex marketplace entry for its root plugin. Register the release repository and install the plugin with the Codex CLI:
 
 ```sh
-codex plugin marketplace add OWNER/REPO
+codex plugin marketplace add fourlastor/agents-over-telegram
 codex plugin add agents-over-telegram@agents-over-telegram
 ```
 
-`OWNER/REPO` is a placeholder: this package does not yet have a published GitHub repository URL. Local marketplace discovery and install were verified with a clean Codex home; remote GitHub retrieval and the desktop install UI remain separate checks. The marketplace name and plugin name are both `agents-over-telegram`.
+The release repository is `fourlastor/agents-over-telegram`. Publication and fresh remote-install verification are pending. Local marketplace discovery and installation were verified with a clean Codex home; the desktop install UI remains a separate check. The marketplace name and plugin name are both `agents-over-telegram`.
 
 Ask **“Connect this agent to Telegram”** in the intended project. The setup skill first reuses that project's configured runtime, if present. For a new project it runs the bundled bootstrap with a compatible Python interpreter. You do not need to clone and maintain another checkout.
 
@@ -85,7 +85,7 @@ Use the [shared binding procedure](RELAY.md#select-the-target), then run:
 "$AOT_BIN" --state-dir "$AOT_STATE" relay-desktop --duration 55 --collect
 ```
 
-`--collect` opts into Telegram intake through the existing shared collector. Without it, the listener watches captured local work only. It does not flush queued sends, lease inbox messages or acknowledge them. The target uses its existing scoped Telegram tools for handling and authorized replies. The current adapter is limited to Linux with bundled Codex **0.163.0-alpha.10.2**; the native binary defaults to `/usr/lib/chatgpt/resources/codex`.
+`--collect` opts into Telegram intake through the existing shared collector. Without it, the listener watches captured local work only. It does not flush queued sends, lease inbox messages or acknowledge them. The target uses its existing scoped Telegram tools for handling and authorized replies. The adapter supports Linux and checks that the installed `codex queue --help` exposes `--thread` and `--message`; the native binary defaults to `/usr/lib/chatgpt/resources/codex`. Version numbers are not an allowlist. The existing desktop process, local schema and target-routing checks still apply. Live validation used bundled Codex **0.163.0-alpha.10.2**; a successful capability check on another build is not a completed live round-trip test.
 
 The listener checks that the desktop is running and validates the exact target and project before submitting. A fixed trusted notice enters the native queue as a user message; Telegram bodies and sender instructions never enter that notice. A known enqueue receipt permits retrying only the wake URL. Ambiguous enqueue results remain held until inspected. Native queueing, OS URL acceptance, model completion, inbox acknowledgment and Telegram publication are distinct outcomes.
 

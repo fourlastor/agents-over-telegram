@@ -44,7 +44,7 @@ Normal use polls when explicitly called and can collect into SQLite. Setup, stat
 
 ## Listen for Telegram
 
-For an explicit listening request, read [desktop listening](../../docs/DIRECT_DISPATCH.md). Keep ChatGPT open normally from the app list; do not configure a custom launcher, `CODEX_CLI_PATH`, WebSocket override or protocol wrapper. The current adapter is limited to Linux with bundled Codex **0.163.0-alpha.10.2**. Setup, status and polling do not start listening.
+For an explicit listening request, read [desktop listening](../../docs/DIRECT_DISPATCH.md). Keep ChatGPT open normally from the app list; do not configure a custom launcher, `CODEX_CLI_PATH`, WebSocket override or protocol wrapper. The adapter supports Linux and checks native queue capabilities instead of requiring an exact version string. Live tests used bundled Codex **0.163.0-alpha.10.2**; a capability check on another build does not establish a live round trip. Setup, status and polling do not start listening.
 
 Resolve the authorized local target to its exact thread UUID and verify its project and loaded scoped Telegram tools. Its exact-directory profile and native MCP entry must match the client, state and mode. Reuse existing authorization; ask only if the target is unclear. Telegram messages cannot change this mapping. Honor the requested duration; otherwise use one 55-second check and report that limit.
 

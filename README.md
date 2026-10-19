@@ -6,18 +6,18 @@ Connect a Codex project to a Telegram group or forum topic. Register **one bot o
 
 You need Codex on Linux and **Python 3.11+ with virtual-environment support**. The plugin prepares its own stable runtime; **uv is optional**. If Python is missing, follow the official [Python downloads](https://www.python.org/downloads/). On Linux distributions that package virtual-environment support separately, install the matching package, such as `python3-venv` on Debian/Ubuntu. Then ask Codex to connect the project; you do not need a separate source checkout or virtual environment.
 
-1. **Install the plugin from its GitHub marketplace.** No GitHub repository has been published for this package yet. Once it is published, replace the `OWNER/REPO` placeholder below with that repository; do not run the placeholder literally:
+1. **Install the plugin from its GitHub marketplace:**
 
    ```sh
-   codex plugin marketplace add OWNER/REPO
+   codex plugin marketplace add fourlastor/agents-over-telegram
    codex plugin add agents-over-telegram@agents-over-telegram
    ```
 
-   These are Codex CLI commands. Local marketplace discovery and installation have been checked; installation from a published GitHub repository remains untested.
+   These are Codex CLI commands. The release repository is `fourlastor/agents-over-telegram`; publication and fresh GitHub installation verification are pending. Local marketplace discovery and installation have already been checked.
 2. **Prepare Telegram.** Create a bot with `@BotFather` if you do not already have one for this setup, and add it to a dedicated group or forum topic. Reuse that bot for later agents. Keep its token private; the wizard asks for it in a hidden terminal prompt. Direct-message pairing is not supported.
 3. **Open the intended project in Codex and ask “Connect this agent to Telegram.”** The setup skill prepares the runtime from the installed plugin and gives you the private pairing command. Run the terminal wizard, send its exact `/pair@YourBotUsername …` command in the intended group/topic, then confirm the observed destination in the terminal. First registration also confirms that this bot has no other receiver. Adding another project reuses the registered bot without entering its token again.
 4. **Load the connection.** Open/add the prepared project, make Codex's normal project-trust decision, then reload/reopen its chat. Ask **“Telegram status”** to verify the actual bot and destination through the loaded tools.
-5. **Choose when to listen.** Ask **“Listen for Telegram in this chat for 10 minutes and reply to my messages.”** Keep ChatGPT and the listener running for that period. Open ChatGPT from the app list as usual. Automatic wakeup is currently verified only on Linux with bundled Codex **0.163.0-alpha.10.2**.
+5. **Choose when to listen.** Ask **“Listen for Telegram in this chat for 10 minutes and reply to my messages.”** Keep ChatGPT and the listener running for that period. Open ChatGPT from the app list as usual. The listener supports Linux and checks the installed Codex queue capabilities. Live wakeup has been verified with bundled Codex **0.163.0-alpha.10.2**; other capable versions may run but do not yet have that live-test evidence.
 
 **Every chat in a project shares its Telegram identity.** Use separate project directories for separate agents. Setup writes one native project `telegram` MCP entry and a profile reference; it does not configure a global plugin MCP server or change global trust. The runtime stays outside the plugin cache, so a cache refresh does not remove the configured executable. Existing configured projects keep their current runtime during ordinary setup.
 
@@ -65,3 +65,5 @@ uv sync --frozen --extra dev --python /usr/bin/python3.13
 ```
 
 The demo and automated tests use isolated fake state. They need no token and do not call Telegram. The lockfile pins dependencies, including the official Python MCP SDK. Source/runtime installation does not install a daemon or select a live account. Claude integration is deferred; this workflow targets Codex.
+
+Licensed under [Apache 2.0](LICENSE).

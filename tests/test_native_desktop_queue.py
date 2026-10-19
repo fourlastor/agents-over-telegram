@@ -38,7 +38,8 @@ def adapter(tmp_path, monkeypatch):
                'notice': 'INJECTED BINDING NOTICE MUST NOT BECOME PROMPT'}
     queue = desktop.NativeDesktopQueue(binary, home)
     monkeypatch.setattr(queue, '_desktop_identity', lambda: (12345, '67890'))
-    state = {'calls': [], 'exit': 0, 'version': desktop.SUPPORTED_CODEX_VERSION,
+    state = {'calls': [], 'exit': 0, 'version': 'codex-cli 0.163.0-alpha.10.2',
+             'queue_help': 'Usage: codex queue --thread <THREAD> --message <TEXT>\n',
              'stdout': f'Queued message {QUEUE_ID} for thread {ALPHA_THREAD}.\n', 'error': None,
              'spawn_error': None, 'communicate_error': None, 'processes': [],
              'communicate_timeouts': [], 'wait_timeouts': [], 'kills': 0}
@@ -46,8 +47,8 @@ def adapter(tmp_path, monkeypatch):
         state['calls'].append((command, kwargs))
         if state['error']:
             raise state['error']
-        stdout = (state['version'] + '\n'
-                  if command[-1] == '--version' else state['stdout'])
+        stdout = (state['version'] + '\n' if command[-1] == '--version' else
+                  state['queue_help'] if command[-2:] == ['queue', '--help'] else state['stdout'])
         return subprocess.CompletedProcess(command, state['exit'], stdout, 'SECRET STDERR')
     monkeypatch.setattr(desktop.subprocess, 'run', subprocess_run)
 
@@ -212,8 +213,8 @@ def test_wake_url_contains_only_uuid_and_no_prompt(adapter):
     assert 'INJECTED BINDING' not in json.dumps(command)
 
 
-def test_capability_gate_rejects_untested_version(adapter, monkeypatch):
-    queue, _, state = adapter
+@pytest.fixture
+def capability_adapter(adapter, monkeypatch):
     # Container UID mapping can expose host root as nobody; this unit fixture
     # supplies its own trusted-opener metadata instead of requiring host layout.
     path_stat = Path.stat
@@ -223,11 +224,46 @@ def test_capability_gate_rejects_untested_version(adapter, monkeypatch):
         if path == Path('/usr/bin/xdg-open') else path_stat(path, **kwargs))
     monkeypatch.setattr(os, 'access', lambda path, mode:
         True if path == Path('/usr/bin/xdg-open') else file_access(path, mode))
+    return adapter
+
+
+@pytest.mark.parametrize('version', ['codex-cli 0.163.0-alpha.10.2',
+                                     'codex-cli 999.0.0-untested', 'codex-cli future-build'])
+def test_capabilities_accept_codex_versions_without_an_allowlist(capability_adapter, version):
+    queue, _, state = capability_adapter
+    state['version'] = version
     queue.check_capability()
-    state['version'] = 'codex-cli 999.0.0-untested'
-    with pytest.raises(desktop.DesktopQueueError, match='desktop_queue_unsupported_version'):
+    assert [command for command, _ in state['calls']] == [[str(queue.binary), 'queue', '--help']]
+    assert state['processes'] == []
+
+
+@pytest.mark.parametrize('help_text,exit_code', [
+    ('error: unrecognized subcommand queue', 2),
+    ('Usage: codex queue --thread <THREAD> --message <TEXT>', 2),
+    ('Usage: codex queue --message <TEXT>', 0),
+    ('Usage: codex queue --thread <THREAD>', 0),
+    ('Usage: codex queue --thread-id <THREAD> --message-file <PATH>', 0),
+])
+def test_missing_queue_capabilities_reject_before_enqueue(capability_adapter, help_text, exit_code):
+    queue, _, state = capability_adapter
+    state['queue_help'], state['exit'] = help_text, exit_code
+    with pytest.raises(desktop.DesktopQueueError, match='desktop_queue_unsupported_capability'):
         queue.check_capability()
-    assert all(command[-1] == '--version' for command, _ in state['calls'])
+    assert [command for command, _ in state['calls']] == [[str(queue.binary), 'queue', '--help']]
+    assert state['processes'] == []
+
+
+@pytest.mark.parametrize('schema', ['missing_database', 'missing_required_column'])
+def test_capability_check_keeps_local_state_schema_guard(capability_adapter, schema):
+    queue, _, state = capability_adapter
+    if schema == 'missing_database':
+        (queue.home / 'state_5.sqlite').unlink()
+    else:
+        with sqlite3.connect(queue.home / 'state_5.sqlite') as db:
+            db.execute('ALTER TABLE threads DROP COLUMN archived')
+    with pytest.raises(desktop.DesktopQueueError, match='desktop_queue_unavailable'):
+        queue.check_capability()
+    assert state['processes'] == []
 
 
 def test_custom_launch_routing_variables_are_not_propagated(tmp_path, monkeypatch):

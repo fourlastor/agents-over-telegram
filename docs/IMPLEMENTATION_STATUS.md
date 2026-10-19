@@ -1,6 +1,6 @@
 # Implementation status and validation evidence
 
-Date: 2026-10-19. Version: 0.7.1. Source root: `/home/daniele/Documents/agents-over-telegram`.
+Date: 2026-10-19. Version: 0.7.2. Source root: `/home/daniele/Documents/agents-over-telegram`.
 
 **Working local implementation with offline tests and scoped live checks.** The automated suite uses one fake bot reused by two isolated clients. Separate live checks on 2026-10-19 exercised native Codex tools and the shared-bot workflow described below. Native CLI marketplace installation, runtime bootstrap and fresh-project MCP onboarding have been tested in isolated profiles. Published GitHub retrieval, desktop plugin UI installation and automatic onboarding invocation remain untested. No background service is installed by this package. The original proposal and handoff are preserved.
 
@@ -26,6 +26,12 @@ Date: 2026-10-19. Version: 0.7.1. Source root: `/home/daniele/Documents/agents-o
 | Desktop listener | Native queue plus desktop wake URL wakes an existing local chat while ChatGPT opens normally; live Telegram poll/reply/ack passed. Earlier shared-backend launch experiments remain secondary. |
 | First-time runtime | Bundled bootstrap prepares a stable runtime from the installed plugin; native CLI marketplace install and fresh fake-project MCP onboarding passed. Python 3.11+ is required; uv is optional, with a venv/ensurepip and private-pip fallback. |
 
+## Version 0.7.2: public release and capability-based compatibility
+
+The selected public repository is `fourlastor/agents-over-telegram`, under Apache-2.0. Installation documentation now uses that exact Codex marketplace source. Publication and fresh remote installation are pending; earlier local-install evidence is preserved below. The release suite passed **572 tests in 21.71 seconds**. Focused checks passed **73 queue/dispatcher tests** and **79 license/bootstrap/package/requirements tests**. A real offline pip bootstrap of 0.7.2 passed, and the wheel, source archive and plugin ZIP all contained the canonical Apache-2.0 license. The stable runtime snapshot also retains `LICENSE`.
+
+The desktop listener no longer requires one exact version string. It performs a read-only `codex queue --help` check for the required `--thread` and `--message` options. An unknown version can proceed when those capabilities and the existing Linux process, schema and target-routing guards pass. This change does not claim live compatibility with every future build, macOS or Windows. The previous real desktop/Telegram evidence remains tied to the tested bundled Codex **0.163.0-alpha.10.2**.
+
 ## Version 0.7.1: optional uv
 
 First-time setup no longer requires uv. The bootstrap defaults to `--installer auto`, selecting an existing uv installation when available and otherwise using Python's `venv`/`ensurepip` plus pip inside the private runtime. Explicit `--installer uv` and `--installer pip` modes support operator choice. Providing `--wheelhouse` selects pip in auto mode; combining it with explicit uv is rejected. The receipt reports the installer used, and reuse preserves that original receipt. The required interpreter remains Python 3.11+; the fallback needs its virtual-environment and pip bootstrap support. No global pip installation, automatic uv installation or change to Telegram authorization is introduced.
@@ -40,7 +46,7 @@ A fresh offline pip install and the same scoped MCP checks also passed using a 3
 
 ## Version 0.7.0: first-time installation and runtime setup
 
-The repository includes `.agents/plugins/marketplace.json` with one root plugin. The installed native Codex CLI successfully registered this catalog and installed `agents-over-telegram@agents-over-telegram` into a disposable Codex home. The same CLI supports GitHub `OWNER/REPO` marketplace sources. No remote repository has been selected or published, so GitHub download and desktop UI installation are not claimed as tested.
+The repository includes `.agents/plugins/marketplace.json` with one root plugin. The installed native Codex CLI successfully registered this catalog and installed `agents-over-telegram@agents-over-telegram` into a disposable Codex home. The same CLI supports GitHub `OWNER/REPO` marketplace sources. At that release, no remote repository had been selected or published, so those results did not establish GitHub download or desktop UI installation.
 
 Version 0.7.0 introduced runtime preparation directly from the installed plugin using `scripts/bootstrap_runtime.py`; that version required existing Python 3.11+ and uv. It copies only the runtime sources and locked package metadata into a private directory selected by package contents and interpreter identity, installs non-editably, validates the executable and returns its absolute path. Plugin cache refreshes do not invalidate that executable. Matching successful installations are reused; interrupted installation can be retried, and older runtimes remain available. Existing configured projects keep their selected executable instead of silently migrating on a plugin update. No credentials, project configuration or listener are created by bootstrap.
 

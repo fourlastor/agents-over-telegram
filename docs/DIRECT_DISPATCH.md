@@ -2,7 +2,7 @@
 
 Open ChatGPT from the app list as usual. The optional `relay-desktop` listener can wake an explicitly mapped **existing local Codex chat** through the installed native Codex queue and the app's wake URL. It needs no relay model, special desktop launch command, wrapper, replacement backend or WebSocket endpoint.
 
-This route is currently limited to Linux and the tested bundled Codex build **0.163.0-alpha.10.2**. The live `relay-desktop` test passed on the normally launched desktop: marker `normal-idle-1` triggered collection, native queueing and automatic wake of the existing local Alpha chat, followed by one native poll, one reply and acknowledgment after the publication was recorded as sent. Alpha returned to zero pending messages. No model forwarded the wake after the Telegram marker arrived. Native tool and ledger evidence confirm this round trip; the user also confirmed the reply is visible in Telegram. See the [recorded result](COMPATIBILITY.md#normal-launch-local-desktop-boundary) for message/turn receipts and validation scope.
+This route supports Linux. It checks the installed Codex queue capabilities instead of requiring one exact version string. The recorded live test used bundled Codex **0.163.0-alpha.10.2**; other capable builds remain eligible but have not been live-validated here. The live `relay-desktop` test passed on the normally launched desktop: marker `normal-idle-1` triggered collection, native queueing and automatic wake of the existing local Alpha chat, followed by one native poll, one reply and acknowledgment after the publication was recorded as sent. Alpha returned to zero pending messages. No model forwarded the wake after the Telegram marker arrived. Native tool and ledger evidence confirm this round trip; the user also confirmed the reply is visible in Telegram. See the [recorded result](COMPATIBILITY.md#normal-launch-local-desktop-boundary) for message/turn receipts and validation scope.
 
 ```text
 Telegram → shared collector → durable inbox → relay-desktop
@@ -40,7 +40,7 @@ Keep ChatGPT open normally and run:
   --duration 55 --collect
 ```
 
-The native binary defaults to `/usr/lib/chatgpt/resources/codex`; `--codex-binary` selects an explicit installed binary. `--codex-home` defaults to the current `CODEX_HOME` or `~/.codex` and must identify the same native home used by the desktop. Do not point it at a copied home or a second backend. The adapter checks the supported installed version before submitting.
+The native binary defaults to `/usr/lib/chatgpt/resources/codex`; `--codex-binary` selects an explicit installed binary. `--codex-home` defaults to the current `CODEX_HOME` or `~/.codex` and must identify the same native home used by the desktop. Do not point it at a copied home or a second backend. Before submitting, the adapter runs the read-only `codex queue --help` check and requires `--thread` and `--message`. A new version string alone does not block the listener. Linux process ownership, the expected local data layout and exact target/project checks remain required; CLI help support does not establish complete desktop wake behavior on an untested build.
 
 `--collect` opts into intake through the existing shared collector, lock and durable cursor. Without it, the listener watches only already-captured local inbox work. Neither mode leases or acknowledges deliveries, flushes the outbox or sends Telegram replies. The target handles its own inbox with its scoped tools under the existing communication authorization.
 

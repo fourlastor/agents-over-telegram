@@ -86,7 +86,7 @@ def test_launcher_uses_one_explicit_profile_without_shell(tmp_path):
 
 def copy_package(tmp_path):
     tmp_path.mkdir(parents=True, exist_ok=True)
-    for name in ("plugin.json", ".codex-plugin", ".agents", "skills", "scripts", "requirements", "pyproject.toml", "uv.lock"):
+    for name in ("plugin.json", ".codex-plugin", ".agents", "skills", "scripts", "requirements", "pyproject.toml", "uv.lock", "LICENSE"):
         source, target = ROOT / name, tmp_path / name
         if source.is_dir():
             shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__"))
@@ -137,6 +137,7 @@ def test_source_archive_does_not_restore_global_mcp(tmp_path):
         assert marketplace["plugins"][0]["source"] == {"source": "local", "path": "./"}
         assert "requirements/runtime.txt" in package.namelist()
         assert "requirements/build.txt" in package.namelist()
+        assert package.read("LICENSE") == (ROOT / "LICENSE").read_bytes()
 
 
 @pytest.mark.parametrize("source", [
@@ -230,3 +231,15 @@ def test_onboarding_compatibility_must_match(tmp_path):
     set_onboarding(root, "./skills/telegram-coordinate/SKILL.md", both=False)
     with pytest.raises(ValueError, match="onboarding skills differ"):
         validator.validate_package(root)
+
+
+def test_release_metadata_declares_the_canonical_apache_license():
+    import hashlib
+    import tomllib
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    assert project["license"] == "Apache-2.0"
+    assert project["license-files"] == ["LICENSE"]
+    assert project["urls"]["Repository"] == "https://github.com/fourlastor/agents-over-telegram"
+    assert project["urls"]["Issues"] == "https://github.com/fourlastor/agents-over-telegram/issues"
+    # Official https://www.apache.org/licenses/LICENSE-2.0.txt, unchanged.
+    assert hashlib.sha256((ROOT / "LICENSE").read_bytes()).hexdigest() == "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"

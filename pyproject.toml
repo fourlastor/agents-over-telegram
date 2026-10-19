@@ -4,10 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agents-over-telegram"
-version = "0.7.1"
+version = "0.7.2"
 description = "One human-owned Telegram bot, multiple isolated logical agent conversations"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = ["mcp==1.30.0", "jsonschema==4.26.0", "anyio==4.15.1", "websockets==15.0.1"]
+
+[project.urls]
+Homepage = "https://github.com/fourlastor/agents-over-telegram"
+Repository = "https://github.com/fourlastor/agents-over-telegram"
+Issues = "https://github.com/fourlastor/agents-over-telegram/issues"
 
 [project.optional-dependencies]
 dev = ["pytest==8.4.2", "pytest-asyncio==1.4.0", "jsonschema==4.26.0", "PyYAML==6.0.3"]
@@ -27,4 +34,4 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/", "tests/", "skills/", "scripts/", "docs/", "requirements/runtime.txt", "requirements/build.txt", "plugin.json", ".codex-plugin/", ".agents/plugins/marketplace.json", "pyproject.toml", "uv.lock", "README.md", "PROPOSAL.md", "HANDOFF.md"]
+include = ["src/", "tests/", "skills/", "scripts/", "docs/", "requirements/runtime.txt", "requirements/build.txt", "plugin.json", ".codex-plugin/", ".agents/plugins/marketplace.json", "pyproject.toml", "uv.lock", "README.md", "PROPOSAL.md", "HANDOFF.md", "LICENSE"]

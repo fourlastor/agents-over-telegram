@@ -27,7 +27,6 @@ from .core import CoreError
 from .relay import WAKE_NOTICE
 
 DEFAULT_CODEX_BINARY = Path('/usr/lib/chatgpt/resources/codex')
-SUPPORTED_CODEX_VERSION = 'codex-cli 0.163.0-alpha.10.2'
 PROC_ROOT = Path('/proc')
 
 
@@ -50,7 +49,7 @@ class DesktopQueueError(CoreError):
 
 
 class NativeDesktopQueue:
-    """Narrow Linux adapter for the bundled CLI/version validated with the app."""
+    """Linux adapter for a bundled CLI exposing the native queue capabilities."""
 
     def __init__(self, codex_binary=DEFAULT_CODEX_BINARY, codex_home=None):
         self.binary = Path(codex_binary)
@@ -76,11 +75,14 @@ class NativeDesktopQueue:
                 if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid())
                         or info.st_mode & 0o022 or not os.access(executable, os.X_OK)):
                     raise ValueError
-            result = subprocess.run([str(self.binary), '--version'], stdin=subprocess.DEVNULL,
+            result = subprocess.run([str(self.binary), 'queue', '--help'], stdin=subprocess.DEVNULL,
                                     capture_output=True, text=True, timeout=10, check=False, env=self.env)
-            if result.returncode != 0 or result.stdout.strip() != SUPPORTED_CODEX_VERSION:
-                raise DesktopQueueError('desktop_queue_unsupported_version')
-            # Explicit opt-in to this tested local-state schema, not broad history discovery.
+            help_text = result.stdout + '\n' + result.stderr
+            if result.returncode != 0 or any(
+                    re.search(r'(?<![\w-])' + option + r'(?![\w-])', help_text) is None
+                    for option in ('--thread', '--message')):
+                raise DesktopQueueError('desktop_queue_unsupported_capability')
+            # Check only the local-state fields this adapter needs; do not scan history.
             with sqlite3.connect((self.home / 'state_5.sqlite').as_uri() + '?mode=ro', uri=True) as db:
                 db.execute('SELECT id,cwd,archived FROM threads WHERE id=?', ('',)).fetchone()
         except DesktopQueueError:

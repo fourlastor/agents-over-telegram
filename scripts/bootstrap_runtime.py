@@ -80,7 +80,7 @@ def snapshot_source(plugin_root: Path) -> tuple[dict[str, bytes], str]:
 
     if (plugin_root / "requirements").is_symlink():
         raise BootstrapError("The packaged requirements directory is unsafe; reinstall the plugin.")
-    files = {name: regular_bytes(plugin_root / name) for name in ("pyproject.toml", "uv.lock", "requirements/runtime.txt", "requirements/build.txt")}
+    files = {name: regular_bytes(plugin_root / name) for name in ("pyproject.toml", "uv.lock", "LICENSE", "requirements/runtime.txt", "requirements/build.txt")}
     package_root = plugin_root / "src" / PACKAGE
     if (plugin_root / "src").is_symlink() or package_root.is_symlink() or not package_root.is_dir():
         raise BootstrapError("The packaged source directory is missing or unsafe; reinstall the plugin.")
