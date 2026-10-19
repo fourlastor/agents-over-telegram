@@ -2,27 +2,26 @@
 
 Connect a Codex project to a Telegram group or forum topic. Register **one bot once**, then reuse it for multiple logical agents in separate project conversations. Telegram shows the actual shared bot; messages label the logical agent clearly.
 
-## Connect from Codex
+## First-time setup
 
-Install the Python runtime first (Python 3.11+), from a stable source checkout:
+You need Codex on Linux, **Python 3.11+** and **uv**. If a prerequisite is missing, follow the official [Python downloads](https://www.python.org/downloads/) or [uv installation guide](https://docs.astral.sh/uv/getting-started/installation/). The plugin prepares its own stable runtime; you do not need a separate source checkout or virtual environment.
 
-```sh
-uv sync --frozen --python /usr/bin/python3.13
-```
+1. **Install the plugin from its GitHub marketplace.** No GitHub repository has been published for this package yet. Once it is published, replace the `OWNER/REPO` placeholder below with that repository; do not run the placeholder literally:
 
-Use an available Python 3.11+ interpreter path on another host. The plugin cache does not provide an installed `aot` runtime; keep the checkout and its virtual environment available.
+   ```sh
+   codex plugin marketplace add OWNER/REPO
+   codex plugin add agents-over-telegram@agents-over-telegram
+   ```
 
-With the plugin installed, ask **“Connect this agent to Telegram.”** Its `telegram-setup` onboarding skill guides the local setup. Normal installation adds the setup and coordination skills. Setup then creates one native `telegram` MCP entry in the chosen project's configuration. No global plugin MCP server or `AOT_*` launcher environment is needed. The bot token stays in a hidden terminal prompt and never belongs in the chat.
+   These are Codex CLI commands. Local marketplace discovery and installation have been checked; installation from a published GitHub repository remains untested.
+2. **Prepare Telegram.** Create a bot with `@BotFather` if you do not already have one for this setup, and add it to a dedicated group or forum topic. Reuse that bot for later agents. Keep its token private; the wizard asks for it in a hidden terminal prompt. Direct-message pairing is not supported.
+3. **Open the intended project in Codex and ask “Connect this agent to Telegram.”** The setup skill prepares the runtime from the installed plugin and gives you the private pairing command. Run the terminal wizard, send its exact `/pair@YourBotUsername …` command in the intended group/topic, then confirm the observed destination in the terminal. First registration also confirms that this bot has no other receiver. Adding another project reuses the registered bot without entering its token again.
+4. **Load the connection.** Open/add the prepared project, make Codex's normal project-trust decision, then reload/reopen its chat. Ask **“Telegram status”** to verify the actual bot and destination through the loaded tools.
+5. **Choose when to listen.** Ask **“Listen for Telegram in this chat for 10 minutes and reply to my messages.”** Keep ChatGPT and the listener running for that period. Open ChatGPT from the app list as usual. Automatic wakeup is currently verified only on Linux with bundled Codex **0.163.0-alpha.10.2**.
 
-The setup command is also available directly from this source checkout's installed environment:
+**Every chat in a project shares its Telegram identity.** Use separate project directories for separate agents. Setup writes one native project `telegram` MCP entry and a profile reference; it does not configure a global plugin MCP server or change global trust. The runtime stays outside the plugin cache, so a cache refresh does not remove the configured executable. Existing configured projects keep their current runtime during ordinary setup.
 
-```sh
-"/home/daniele/Documents/agents-over-telegram/.venv/bin/aot" setup --label Alpha --project-dir "/absolute/path/to/alpha-project"
-```
-
-Choose the actual project path. The wizard reuses the registered bot, pairs the project with its destination, and prepares its local Codex configuration. Add `--state-dir /actual/shared/state` before `setup` if the account already uses a different state directory. For first registration, the wizard asks you to confirm that the selected bot has no other receiver before its hidden token prompt. You can supply that assertion with `--receiver-handoff-confirmed`; adding agents to an existing registration needs no repeat token entry. Keep every agent for that bot on the same state directory and host.
-
-**Every chat in that project shares its Telegram identity.** Use separate dedicated project directories for separate agents. Open/add the prepared project in Codex and make the normal project-trust decision yourself. Reload/reopen the project chat so Codex loads its native MCP entry, then ask for Telegram status to verify the actual bot and destination. Plugin setup does not change global trust settings.
+For the terminal commands, offline bootstrap and existing-account options, see [local setup](docs/OPERATIONS.md#codex-setup).
 
 ## Everyday use
 
@@ -44,7 +43,7 @@ History covers captured local records, not a complete prior-day Telegram transcr
 
 ## Validation and setup details
 
-Live checks on 2026-10-19 exercised Codex's scoped tools, same-bot peer delivery and duplicate suppression, and Alpha's pause/queued intake/resume/reply/ack flow while Beta remained usable. Installing this package through the Codex plugin UI and its onboarding button remain untested. The 0.3.1 installation wiring correction and its validation status are tracked in [implementation status](docs/IMPLEMENTATION_STATUS.md). Earlier runtime tests do not establish clean-machine installation or plugin UI behavior.
+The first-run check passed from a clean local Codex CLI installation: bootstrap ran from the installed plugin cache, reused the same runtime on repetition, and the runtime still worked after both source and plugin-cache copies were moved away. Fresh fake Alpha/Beta setup and scoped native MCP checks passed. The full suite passed **534 tests in 21.15 seconds**. Earlier live Telegram checks also covered peer delivery, pause/resume and normal-desktop wake/reply/ack. Published GitHub installation, the desktop plugin UI and its onboarding button remain untested. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for the evidence and limits.
 
 - [Guided setup, local controls and advanced CLI](docs/OPERATIONS.md)
 - [Listen with the normally opened desktop](docs/DIRECT_DISPATCH.md)

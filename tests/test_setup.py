@@ -68,6 +68,8 @@ def test_prepare_only_is_idempotent_does_not_collect_and_writes_no_secrets(tmp_p
         assert 'client_secret' not in payload
     with sqlite3.connect(Path(first['state_dir']) / 'state.sqlite3') as db:
         assert db.execute('select count(*) from clients').fetchone()[0] == 1
+    assert 'dedicated Telegram group or topic' in first['next_step']
+    assert 'add @' + first['connection']['bot']['username'] in first['next_step']
     assert shlex.split(first['next_step'].split('then run: ', 1)[1])[0].startswith('/')
 
 
@@ -129,6 +131,9 @@ def test_connected_rerun_preserves_connection_pause_and_no_intake(tmp_path):
     assert rerun['client_id'] == first['client_id']
     assert fake_path.read_bytes() == before
     assert 'pairing_command' not in rerun
+    assert 'Reopen its chat' in rerun['next_step']
+    assert '"Telegram status"' in rerun['next_step']
+    assert 'Setup does not start a listener' in rerun['next_step']
 
 
 def test_exact_project_short_commands_and_no_parent_scope_bleed(tmp_path, monkeypatch):
@@ -221,6 +226,7 @@ def test_wizard_confirms_only_explicit_local_yes_and_reuses_observation(tmp_path
     assert 'No destination was confirmed' in declined['next_step']
     captured = capsys.readouterr().err
     assert '"sender_id": 456' in captured and '"chat_id": -200' in captured
+    assert 'add @' + result['connection']['bot']['username'] in captured
     fake_path = Path(result['state_dir']) / 'fake-transport.json'
     polls = read_private_json(fake_path)['poll_offsets']
     monkeypatch.setattr('builtins.input', lambda: 'yes')
@@ -229,6 +235,10 @@ def test_wizard_confirms_only_explicit_local_yes_and_reuses_observation(tmp_path
     assert accepted['connection']['destination']['owner_id'] == 456
     assert accepted['connection']['destination']['thread_id'] == 7
     assert accepted['client_id'] == result['client_id']
+    assert accepted['automatic_delivery'] is False
+    assert 'native Telegram tools are loaded and connected' in accepted['next_step']
+    assert 'Listen for Telegram in this chat for one hour and reply to my messages.' in accepted['next_step']
+    assert 'Setup does not start a listener' in accepted['next_step']
     assert read_private_json(fake_path)['poll_offsets'] == polls
 
 
@@ -423,6 +433,9 @@ def test_interactive_handoff_assertion_and_human_completion(tmp_path, monkeypatc
     output = capsys.readouterr().out
     assert output.startswith('Alpha: connected\n')
     assert 'Next:' in output and 'profile_file' not in output
+    assert 'Reopen its chat' in output
+    assert 'Listen for Telegram in this chat for one hour' in output
+    assert 'Listener: not checked by connection status.' in output
 
 
 def test_project_flush_only_sends_its_client_and_legacy_global_scope_remains(tmp_path, monkeypatch):

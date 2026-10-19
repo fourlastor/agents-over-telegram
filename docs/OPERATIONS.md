@@ -2,22 +2,41 @@
 
 One human registers one bot once in one private state directory. Every logical agent reuses that account through its own protected client file and dedicated group or forum topic. All clients using that state share one transactional collector cursor; they have separate delivery leases, acknowledgments, outbound idempotency records and permissions.
 
-The commands below use the `aot` executable installed from this checkout. It may not be on `PATH`; use its quoted absolute path when working in another project. No OpenAI API key is needed to transport messages. Runtime installation does not install a daemon, enable a plugin, or start collection. The normal plugin contains setup and coordination skills, with no global MCP declaration; guided setup creates the native MCP entry for the selected project.
+The commands below use the absolute `aot` executable returned by the plugin's runtime bootstrap, or the runtime already configured for an existing project. Set `AOT_BIN` to that path; it need not be on `PATH`. No OpenAI API key is needed to transport messages. Runtime installation does not install a daemon, enable a plugin, or start collection. The normal plugin contains setup and coordination skills, with no global MCP declaration; guided setup creates the native MCP entry for the selected project.
 
 ## Codex setup
 
-First install the Python runtime from a stable source checkout (Python 3.11+):
+The package contains a Codex marketplace entry for its root plugin. After publication, register the GitHub repository and install the plugin with the Codex CLI:
 
 ```sh
-uv sync --frozen --python /usr/bin/python3.13
+codex plugin marketplace add OWNER/REPO
+codex plugin add agents-over-telegram@agents-over-telegram
 ```
 
-Use an available Python 3.11+ interpreter path on another host. An installed plugin copy in Codex's cache still needs this separate installed `aot` executable; a cache directory is not an installed Python environment. Keep the runtime directory available because the project configuration refers to its absolute executable path. There is no automatic runtime bootstrap.
+`OWNER/REPO` is a placeholder: this package does not yet have a published GitHub repository URL. Local marketplace discovery and install were verified with a clean Codex home; remote GitHub retrieval and the desktop install UI remain separate checks. The marketplace name and plugin name are both `agents-over-telegram`.
 
-In a Codex chat with this plugin available, ask **“Connect this agent to Telegram.”** The packaged `telegram-setup` onboarding skill locates that executable, helps select the project and reuses the existing bot. The local terminal wizard performs private token entry and destination confirmation:
+Ask **“Connect this agent to Telegram”** in the intended project. The setup skill first reuses that project's configured runtime, if present. For a new project it runs the bundled bootstrap with a compatible Python interpreter. You do not need to clone and maintain another checkout.
+
+### Prepare the runtime
+
+The bootstrap needs **Python 3.11+** and **uv** available locally. It does not install either prerequisite automatically. Use the official [Python downloads](https://www.python.org/downloads/) or [uv installation guide](https://docs.astral.sh/uv/getting-started/installation/) if one is missing. A manual invocation looks like this, using the actual installed plugin path:
 
 ```sh
-AOT_BIN="/home/daniele/Documents/agents-over-telegram/.venv/bin/aot"
+python3 "/absolute/path/to/installed/plugin/scripts/bootstrap_runtime.py"
+```
+
+Use a different Python executable if `python3` is older than 3.11. The script copies the package's runtime source into a private stable runtime directory, creates a virtual environment with frozen dependencies and installs the package non-editably. Its default root is `$XDG_DATA_HOME/agents-over-telegram/runtimes`, or `~/.local/share/agents-over-telegram/runtimes` when `XDG_DATA_HOME` is unset; `--runtime-root /absolute/private/path` selects another location. The package contents and Python interpreter identity select each runtime, and a validated matching runtime is reused even if uv is no longer available. The executable therefore stays available when the plugin cache changes.
+
+On success, stdout is one JSON object with `status: "ready"`, `version`, `executable`, `runtime_dir` and `reused`. An error exits with status 2 and reports an actionable JSON message on stderr. Use the returned absolute `executable` path; do not assume a `.venv` inside the plugin cache. `--offline` prohibits dependency downloads and succeeds only when a matching runtime or the necessary cached dependencies are available. Bootstrap does not read bot credentials, write project configuration, collect messages or start listening.
+
+For an existing project, keep using the command already configured in its `[mcp_servers.telegram]` entry. A plugin upgrade does not automatically migrate that command or discard the old runtime. If its executable is unavailable, report the broken path and follow a deliberate repair rather than silently pointing the project at a different installation.
+
+### Pair the project
+
+Use the returned executable for the terminal wizard:
+
+```sh
+AOT_BIN="/absolute/path/from/bootstrap/executable"
 "$AOT_BIN" setup --label Alpha --project-dir "/absolute/path/to/alpha-project"
 ```
 
@@ -90,8 +109,8 @@ Use these lower-level commands when guided setup is unsuitable. Select the inten
 
 ```sh
 AOT_STATE="$HOME/.local/share/agents-over-telegram"
-.venv/bin/aot --state-dir "$AOT_STATE" account-register --receiver-handoff-confirmed
-.venv/bin/aot --state-dir "$AOT_STATE" account-status
+"$AOT_BIN" --state-dir "$AOT_STATE" account-register --receiver-handoff-confirmed
+"$AOT_BIN" --state-dir "$AOT_STATE" account-status
 ```
 
 `account-register` prompts for the token with hidden local terminal input. It checks `getMe` and webhook metadata; it does not poll, send, or remove webhooks. Existing webhook configuration is refused. An existing registered credential is reused. The receiver-handoff flag is a deliberate owner assertion that another long-poll consumer is not running; Telegram cannot prove this by a read-only inspection. Stop an old receiver through its owner before confirming handoff.
@@ -99,22 +118,22 @@ AOT_STATE="$HOME/.local/share/agents-over-telegram"
 Create the first client and start pairing:
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" client-create --label Alpha --client-file "$AOT_STATE/clients/alpha.json"
-.venv/bin/aot --state-dir "$AOT_STATE" pair-begin --client-file "$AOT_STATE/clients/alpha.json"
+"$AOT_BIN" --state-dir "$AOT_STATE" client-create --label Alpha --client-file "$AOT_STATE/clients/alpha.json"
+"$AOT_BIN" --state-dir "$AOT_STATE" pair-begin --client-file "$AOT_STATE/clients/alpha.json"
 ```
 
 The returned pairing command expires after ten minutes and is single-use. The human sends that exact addressed command in Alpha's intended group/topic. Then collect one bounded page and inspect the pending observation:
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" collect
-.venv/bin/aot --state-dir "$AOT_STATE" pair-confirm --pairing-id PAIRING_ID
+"$AOT_BIN" --state-dir "$AOT_STATE" collect
+"$AOT_BIN" --state-dir "$AOT_STATE" pair-confirm --pairing-id PAIRING_ID
 ```
 
 Review the observed numeric sender, chat and topic IDs locally. Confirm that observation, not a display label or a claim in a message:
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" pair-confirm --pairing-id PAIRING_ID --confirm
-.venv/bin/aot --state-dir "$AOT_STATE" status --client-file "$AOT_STATE/clients/alpha.json"
+"$AOT_BIN" --state-dir "$AOT_STATE" pair-confirm --pairing-id PAIRING_ID --confirm
+"$AOT_BIN" --state-dir "$AOT_STATE" status --client-file "$AOT_STATE/clients/alpha.json"
 ```
 
 For Beta, repeat `client-create`, `pair-begin`, collection and confirmation with `beta.json` and a different group/topic. Do not repeat bot creation or token registration. Only one logical agent can own a destination in this MVP. Group IDs and topic IDs are not interchangeable; no ordinary channel or private-bot-DM setup is promised.
@@ -122,8 +141,8 @@ For Beta, repeat `client-create`, `pair-begin`, collection and confirmation with
 Additional senders and same-bot peers require local owner grants:
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" allow-sender --client-file "$AOT_STATE/clients/alpha.json" --sender-id 123456
-.venv/bin/aot --state-dir "$AOT_STATE" grant-peer --source-client-file "$AOT_STATE/clients/alpha.json" --target-client-file "$AOT_STATE/clients/beta.json"
+"$AOT_BIN" --state-dir "$AOT_STATE" allow-sender --client-file "$AOT_STATE/clients/alpha.json" --sender-id 123456
+"$AOT_BIN" --state-dir "$AOT_STATE" grant-peer --source-client-file "$AOT_STATE/clients/alpha.json" --target-client-file "$AOT_STATE/clients/beta.json"
 ```
 
 Use `allow-sender --bot` only for an intended external bot's verified numeric ID. A peer grant is directional; grant the reverse direction separately only when wanted. A message text such as “I am Beta” cannot create a grant. These grants permit transport routing; the agent still needs user authorization for the communication task.
@@ -131,7 +150,7 @@ Use `allow-sender --bot` only for an intended external bot's verified numeric ID
 For an external bot already present in the same bound destination, the owner can configure its addressed command convention. This prefixes normal publications in that destination; it does not choose another Telegram chat or grant the external sender access:
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" configure-peer --client-file "$AOT_STATE/clients/alpha.json" --bot-username PeerBot --command review
+"$AOT_BIN" --state-dir "$AOT_STATE" configure-peer --client-file "$AOT_STATE/clients/alpha.json" --bot-username PeerBot --command review
 ```
 
 This produces an addressed `/review@PeerBot` prefix. Numeric sender allowance remains separate. Cross-human bot discovery, remote relay and end-to-end interoperability are not automated.
@@ -139,7 +158,7 @@ This produces an addressed `/review@PeerBot` prefix. Numeric sender allowance re
 ## Launch one scoped MCP client
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" mcp --client-file "$AOT_STATE/clients/alpha.json"
+"$AOT_BIN" --state-dir "$AOT_STATE" mcp --client-file "$AOT_STATE/clients/alpha.json"
 ```
 
 MCP uses stdin/stdout, so the host must launch this process. The private capability file pins its identity; no MCP argument selects a different agent. Never print that file into chat. A second host configuration launches the same command with `beta.json`. Both use the same state directory and bot registration.
@@ -155,7 +174,7 @@ Rendered profiles are already configured and have no onboarding action. If their
 Generate this optional private package for an existing live client:
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" plugin-render --client-file "$AOT_STATE/clients/alpha.json" --output /absolute/private/path/agents-over-telegram-alpha --name agents-over-telegram-alpha
+"$AOT_BIN" --state-dir "$AOT_STATE" plugin-render --client-file "$AOT_STATE/clients/alpha.json" --output /absolute/private/path/agents-over-telegram-alpha --name agents-over-telegram-alpha
 .venv/bin/python scripts/validate_package.py /absolute/private/path/agents-over-telegram-alpha
 ```
 
@@ -168,8 +187,8 @@ Use `messages_history` when starting or rejoining a connected client's work to r
 The equivalent local command is:
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" history --client-file "$AOT_STATE/clients/alpha.json" --limit 20
-.venv/bin/aot --state-dir "$AOT_STATE" history --client-file "$AOT_STATE/clients/alpha.json" --limit 20 --cursor RETURNED_CURSOR
+"$AOT_BIN" --state-dir "$AOT_STATE" history --client-file "$AOT_STATE/clients/alpha.json" --limit 20
+"$AOT_BIN" --state-dir "$AOT_STATE" history --client-file "$AOT_STATE/clients/alpha.json" --limit 20 --cursor RETURNED_CURSOR
 ```
 
 The first read fixes the snapshot's 24-hour window. Telegram entries use their valid message/edit timestamp, falling back to local receipt time for records without one; outbound and broker entries use local creation time. Continue with the returned opaque cursor to page through that snapshot. Cursors expire after 15 minutes; omit an expired cursor, or omit it when new activity may have arrived, to start a fresh snapshot. History reads do not contact Telegram, collect updates, flush sends, claim leases, acknowledge deliveries, or replay work. Use `messages_poll` separately for new pending work and acknowledge only deliveries obtained through that flow.
@@ -191,7 +210,7 @@ Collection preserves the whole batch transaction: a full pending inbox rolls bac
 The owner can inspect bounded unassigned metadata:
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" unassigned
+"$AOT_BIN" --state-dir "$AOT_STATE" unassigned
 ```
 
 Only the latest 100 update IDs, chat IDs, reason codes and timestamps are retained, with 20 shown per call. Message bodies from unconfigured destinations or unapproved senders are not stored in this queue. It is diagnostic evidence, not a replayable message archive; after fixing setup, ask the intended sender to resend if needed.
@@ -209,15 +228,15 @@ Only the latest 100 update IDs, chat IDs, reason codes and timestamps are retain
 For `unknown`, the operator checks the intended Telegram destination and correlates the publication. Then choose exactly one local resolution:
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" resolve --outbox-id OUTBOX_ID --resolution accepted --message-id MESSAGE_ID
-.venv/bin/aot --state-dir "$AOT_STATE" resolve --outbox-id OUTBOX_ID --resolution cancel
-.venv/bin/aot --state-dir "$AOT_STATE" resolve --outbox-id OUTBOX_ID --resolution retry
+"$AOT_BIN" --state-dir "$AOT_STATE" resolve --outbox-id OUTBOX_ID --resolution accepted --message-id MESSAGE_ID
+"$AOT_BIN" --state-dir "$AOT_STATE" resolve --outbox-id OUTBOX_ID --resolution cancel
+"$AOT_BIN" --state-dir "$AOT_STATE" resolve --outbox-id OUTBOX_ID --resolution retry
 ```
 
 These are alternatives, not a sequence. `accepted` records a verified publication. `cancel` stops further attempts while preserving the record. `retry` is an explicit decision to permit another attempt when the operator accepts duplication risk; it changes the original record to `queued` and does not send immediately. Continue the original intent/key. A later `messages_poll`, repeated `message_send` with that same intent/key, or explicit scoped flush can attempt the now-due record:
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" flush --client-file "$AOT_STATE/clients/alpha.json"
+"$AOT_BIN" --state-dir "$AOT_STATE" flush --client-file "$AOT_STATE/clients/alpha.json"
 ```
 
 The owner may omit `--client-file` to flush due sends across all clients. Flush attempts up to 20 due queued records; it never retries records still marked `unknown`. `collect` only takes in updates and does not flush the outbox. There is no timer: without a later poll/send/flush call, a delayed queued send remains queued. Neither a timeout nor an absent recent update proves Telegram rejected a publication. There is no exactly-once Telegram guarantee.
@@ -231,9 +250,9 @@ The bot token lives in `credentials.json` under the private state root. Each cli
 ## Pause, disconnect and uninstall
 
 ```sh
-.venv/bin/aot --state-dir "$AOT_STATE" pause --client-file "$AOT_STATE/clients/alpha.json"
-.venv/bin/aot --state-dir "$AOT_STATE" pause --client-file "$AOT_STATE/clients/alpha.json" --resume
-.venv/bin/aot --state-dir "$AOT_STATE" disconnect --client-file "$AOT_STATE/clients/alpha.json"
+"$AOT_BIN" --state-dir "$AOT_STATE" pause --client-file "$AOT_STATE/clients/alpha.json"
+"$AOT_BIN" --state-dir "$AOT_STATE" pause --client-file "$AOT_STATE/clients/alpha.json" --resume
+"$AOT_BIN" --state-dir "$AOT_STATE" disconnect --client-file "$AOT_STATE/clients/alpha.json"
 ```
 
 Pause retains incoming work, blocks new claims/sends, and prevents queued publications for that connection while other clients continue. Authorized intake still queues its messages up to the bound. The paired human owner can also send the exact addressed `/pause@YourBotUsername` command in that destination; it pauses only after the collector observes it. This transport pause has no authority to execute arbitrary Telegram commands. Resume only when requested by the owner. Disconnect revokes the selected client, marks queued outbound work from/to it `rejected`, preserves inbox/history records, and does not revoke the shared bot token. A send already in flight can finish after a pause/disconnect request; inspect its recorded result. Retained history is not automatically transferred to a newly paired client. The scoped `history` command reads the current active client's recent captured context; it does not provide a revoked-client archive export or replay path. Reconnecting requires a fresh client/pairing flow; do not reuse a revoked capability. Review pending and uncertain outgoing work before disconnecting.

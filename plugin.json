@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agents-over-telegram",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Coordinate logical agents through one human-owned Telegram bot and separate scoped local inboxes.",
   "extensions": {
     "com.openai": {

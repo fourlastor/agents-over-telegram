@@ -7,3 +7,6 @@ outputs/
 *.sqlite*
 *.db*
 .env
+.env.*
+.aot-profile.json
+.codex/config.toml

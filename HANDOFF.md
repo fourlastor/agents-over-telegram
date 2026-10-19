@@ -1,6 +1,12 @@
 # Implementation handoff
 
-## Current continuation: 0.5.1 direct dispatcher
+## Current continuation: 0.7.0 first-time setup
+
+The committed 0.6.0 checkpoint is `0a6db68`. The preferred listener is `relay-desktop`: ChatGPT opens normally, and native queueing plus its wake URL starts an existing local chat. The live Telegram round trip and duplicate check passed. Do not resume custom-launch or replacement-backend work as the default path.
+
+Version 0.7.0 adds the repository marketplace, a bundled bootstrap that creates a stable runtime outside plugin caches, updated setup guidance and accurate listener-status wording. Native CLI installation, cache-independent runtime preparation and fresh fake-project MCP onboarding passed; 534 automated tests passed. GitHub transport and desktop plugin UI/onboarding still need a real repository and UI acceptance check. No remote repository has been created or published. Read [implementation status](docs/IMPLEMENTATION_STATUS.md) for the current evidence.
+
+## Historical 0.5.1 direct dispatcher
 
 The local MVP and the bounded 0.4.0 model-mediated relay have been implemented and tested. The current optional integration is documented in [DIRECT_DISPATCH.md](docs/DIRECT_DISPATCH.md): `relay-dispatch` joins the desktop's deliberately shared backend, submits fixed tool output for an authorized mapped thread and retains separate notification/processing/publication outcomes. `aot-codex-bridge` preserves the exact desktop stdio owner while adding a private Unix WebSocket. Setup does not enable it automatically.
 
@@ -33,4 +39,3 @@ Keep platform claims separate from design decisions. Test on this Linux host fir
 ## First concrete deliverable
 
 Implement and test the durable one-bot/two-agents routing core, then wire it into a minimal MCP server and local plugin. Include setup instructions, test commands and an implementation status document. Continue until the local MVP and meaningful offline tests are working, or report a concrete blocker with preserved work. No need to request the already-supplied live bot token: it is deliberately out of scope for this isolated build.
-

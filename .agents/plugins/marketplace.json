@@ -1,0 +1,20 @@
+{
+  "name": "agents-over-telegram",
+  "interface": {
+    "displayName": "Agents over Telegram"
+  },
+  "plugins": [
+    {
+      "name": "agents-over-telegram",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

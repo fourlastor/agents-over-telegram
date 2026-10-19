@@ -1,8 +1,8 @@
 # Implementation status and validation evidence
 
-Date: 2026-10-19. Version: 0.5.1. Source root: `/home/daniele/Documents/agents-over-telegram`.
+Date: 2026-10-19. Version: 0.7.0. Source root: `/home/daniele/Documents/agents-over-telegram`.
 
-**Working local implementation with offline tests and scoped live checks.** The automated suite uses one fake bot reused by two isolated clients. Separate live checks on 2026-10-19 exercised native Codex tools and the shared-bot workflow described below. Plugin UI installation and onboarding invocation remain untested. No background service is installed by this package. The original proposal and handoff are preserved.
+**Working local implementation with offline tests and scoped live checks.** The automated suite uses one fake bot reused by two isolated clients. Separate live checks on 2026-10-19 exercised native Codex tools and the shared-bot workflow described below. Native CLI marketplace installation, runtime bootstrap and fresh-project MCP onboarding have been tested in isolated profiles. Published GitHub retrieval, desktop plugin UI installation and automatic onboarding invocation remain untested. No background service is installed by this package. The original proposal and handoff are preserved.
 
 ## Implemented
 
@@ -23,7 +23,29 @@ Date: 2026-10-19. Version: 0.5.1. Source root: `/home/daniele/Documents/agents-o
 | MCP/plugin | Eleven scoped tools using official Python MCP SDK 1.30.0, explicit schemas and annotations, structured results and sanitized wire/validation errors. Skills-only portable and compatibility plugin manifests; setup creates one native project MCP entry. An explicit advanced renderer generates a private one-client MCP package. |
 | Skill/docs | Codex onboarding skill and routine status/pause/resume/history/coordination guidance, credential and lifecycle instructions, source/schema evidence and deliberate receiver handoff/rollback procedure. |
 | Optional relay prototype | Exact-project client-to-thread mapping, bounded pending-inbox watcher and separate wake-notification outcomes. A running Codex chat performs the native host handoff; one bounded live idle-target wake/reply/ack test passed. Setup starts no listener. |
-| Optional direct dispatcher | Shared-backend client submits fixed tool output for the mapped thread without a relay model. A bounded process launched manually on the actual desktop passed live idle wake/reply/ack. Corrected automatic GUI startup remains pending one final restart check. |
+| Desktop listener | Native queue plus desktop wake URL wakes an existing local chat while ChatGPT opens normally; live Telegram poll/reply/ack passed. Earlier shared-backend launch experiments remain secondary. |
+| First-time runtime | Bundled bootstrap prepares a stable runtime from the installed plugin; native CLI marketplace install and fresh fake-project MCP onboarding passed. Python 3.11+ and uv remain prerequisites. |
+
+## Version 0.7.0: first-time installation and runtime setup
+
+The repository includes `.agents/plugins/marketplace.json` with one root plugin. The installed native Codex CLI successfully registered this catalog and installed `agents-over-telegram@agents-over-telegram` into a disposable Codex home. The same CLI supports GitHub `OWNER/REPO` marketplace sources. No remote repository has been selected or published, so GitHub download and desktop UI installation are not claimed as tested.
+
+The setup skill can now prepare its runtime directly from the installed plugin using `scripts/bootstrap_runtime.py`, requiring existing Python 3.11+ and uv. It copies only the runtime sources and locked package metadata into a private directory selected by package contents and interpreter identity, installs non-editably, validates the executable and returns its absolute path. Plugin cache refreshes do not invalidate that executable. Matching successful installations are reused; interrupted installation can be retried, and older runtimes remain available. Existing configured projects keep their selected executable instead of silently migrating on a plugin update. No credentials, project configuration or listener are created by bootstrap.
+
+Status now distinguishes the inbox core's on-demand behavior from a desktop listener whose status has not been checked. Pairing guidance explains adding the actual bot to a dedicated group/topic, and completion points to native tool verification and an explicit listening period.
+
+Validation on 2026-10-19:
+
+- **534 automated tests passed in 21.15 seconds**, including 25 bootstrap tests; package and setup-skill validation passed.
+- Real uv installed the locked dependencies into a fresh temporary runtime. Repeated offline setup reused it. A fresh offline installation also passed with a long runtime path containing spaces.
+- An end-to-end check used a disposable HOME/CODEX_HOME to install the plugin through the native Codex CLI, bootstrapped the installed cache copy, and removed both package locations from their original paths. The runtime continued to work and imported its installed code from its own virtual environment.
+- That new runtime prepared and paired two fake projects, launched both generated native MCP commands, verified their separate identities, read-only status, pause/resume and history. Setup reruns preserved profile/configuration bytes. An unconfigured child project did not inherit its parent's identity. No live Telegram, real credentials, existing project settings or live Codex profile were used.
+
+Evidence in the implementation workspace: `outputs/first-run-smoke.json`. The local plugin/UI is not a portable Python installer: Python and uv remain prerequisites, private token entry and destination review remain terminal steps, project trust/reload remains a host step, and listening remains explicitly started. No custom ChatGPT startup, background service or autostart entry was added.
+
+## Version 0.6.0: normal desktop wake
+
+The preferred listener is `relay-desktop`, using native queueing and the existing desktop wake URL while ChatGPT opens normally. Live Telegram marker `normal-idle-1` woke the existing local Alpha chat and produced exactly one reply followed by acknowledgment; the user confirmed it in Telegram. The quiet check showed no duplicate turn. Version 0.6.0 passed 502 tests. This route supersedes the custom-launch experiments retained below; see [compatibility](COMPATIBILITY.md#normal-launch-local-desktop-boundary) for precise scope and receipts.
 
 ## Version 0.5.1: desktop startup compatibility and live direct validation
 
@@ -138,7 +160,7 @@ uv build --out-dir work/dist
 
 `--python /usr/bin/python3.13` identifies the actual interpreter tested here; adapt the path on another host. Initial dependency installation may need network access. The existing `.venv` in this checkout is ready for the offline test and demo commands.
 
-The local source-plugin ZIP contains an explicit allowlist of source, tests, manifests, skill, scripts and documentation. It excludes the virtual environment, local state and credentials. It installs the setup and coordination skills. Install the Python runtime separately and run guided setup to create the native project MCP entry, as documented in [operations](OPERATIONS.md). A clean wheel supplies the runtime; advanced `plugin-render` specifically requires the source checkout containing the plugin templates and generates a separate private package.
+The local source-plugin ZIP contains an explicit allowlist of source, tests, manifests, skill, scripts and documentation. It excludes the virtual environment, local state and credentials. It installs the setup and coordination skills. The setup skill can prepare a stable runtime from the installed package and then run guided setup to create the native project MCP entry, as documented in [operations](OPERATIONS.md). A clean wheel supplies the runtime; advanced `plugin-render` specifically requires the source checkout containing the plugin templates and generates a separate private package.
 
 ## Material limits and deliberate choices
 

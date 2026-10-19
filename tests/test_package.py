@@ -26,6 +26,7 @@ launcher = load_script("launch_mcp")
 
 def test_shipped_package_uses_current_schemas():
     validator.validate_package(ROOT)
+    assert (ROOT / ".agents/plugins/marketplace.json").is_file()
 
 
 def test_normal_install_has_no_global_mcp_connection():
@@ -85,7 +86,7 @@ def test_launcher_uses_one_explicit_profile_without_shell(tmp_path):
 
 def copy_package(tmp_path):
     tmp_path.mkdir(parents=True, exist_ok=True)
-    for name in ("plugin.json", ".codex-plugin", "skills", "scripts"):
+    for name in ("plugin.json", ".codex-plugin", ".agents", "skills", "scripts"):
         source, target = ROOT / name, tmp_path / name
         if source.is_dir():
             shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__"))
@@ -132,6 +133,50 @@ def test_source_archive_does_not_restore_global_mcp(tmp_path):
         assert "mcp.json" not in package.namelist()
         assert ".mcp.json" not in package.namelist()
         assert "mcpServers" not in json.loads(package.read(".codex-plugin/plugin.json"))
+        marketplace = json.loads(package.read(".agents/plugins/marketplace.json"))
+        assert marketplace["plugins"][0]["source"] == {"source": "local", "path": "./"}
+
+
+@pytest.mark.parametrize("source", [
+    {"source": "local", "path": "../outside"},
+    {"source": "local", "path": "/tmp/plugin"},
+    {"source": "local", "path": "./missing"},
+    {"source": "github", "repo": "example/not-published"},
+])
+def test_marketplace_rejects_non_repository_sources(tmp_path, source):
+    root = copy_package(tmp_path)
+    path = root / ".agents/plugins/marketplace.json"
+    marketplace = json.loads(path.read_text())
+    marketplace["plugins"][0]["source"] = source
+    path.write_text(json.dumps(marketplace))
+    with pytest.raises(ValueError, match="Marketplace source"):
+        validator.validate_package(root)
+
+
+def test_marketplace_identity_must_match_plugin(tmp_path):
+    root = copy_package(tmp_path)
+    path = root / ".agents/plugins/marketplace.json"
+    marketplace = json.loads(path.read_text())
+    marketplace["plugins"][0]["name"] = "unrelated-plugin"
+    path.write_text(json.dumps(marketplace))
+    with pytest.raises(ValueError, match="Marketplace and plugin identity"):
+        validator.validate_package(root)
+
+
+def test_archive_includes_only_marketplace_manifest_from_agents(tmp_path):
+    from zipfile import ZipFile
+    root = copy_package(tmp_path / "source")
+    for relative in (".agents/private.json", ".venv/private.json", "runtime/private.json", "state/credentials.json"):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not packaged")
+    archive = tmp_path / "plugin.zip"
+    load_script("package_local").package(root, archive)
+    with ZipFile(archive) as package:
+        names = package.namelist()
+        assert ".agents/plugins/marketplace.json" in names
+        assert not any(name.startswith((".venv/", "runtime/", "state/")) for name in names)
+        assert [name for name in names if name.startswith(".agents/")] == [".agents/plugins/marketplace.json"]
 
 
 def set_onboarding(root, value, *, both=True):

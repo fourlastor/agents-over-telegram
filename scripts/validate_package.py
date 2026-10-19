@@ -10,6 +10,31 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 
+def validate_marketplace(root: Path, plugin_name: str) -> None:
+    """Check this repository's optional, single-plugin distribution catalog."""
+    path = root / ".agents" / "plugins" / "marketplace.json"
+    if not path.exists():
+        # Private per-profile packages are installable without a marketplace.
+        return
+    if not path.resolve().is_relative_to(root):
+        raise ValueError("Marketplace manifest escapes the package")
+    marketplace = json.loads(path.read_text())
+    if marketplace.get("name") != "agents-over-telegram":
+        raise ValueError("Marketplace name must be agents-over-telegram")
+    if marketplace.get("interface", {}).get("displayName") != "Agents over Telegram":
+        raise ValueError("Marketplace display name is missing or invalid")
+    entries = marketplace.get("plugins")
+    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+        raise ValueError("Marketplace must contain exactly one plugin")
+    entry = entries[0]
+    if entry.get("name") != plugin_name:
+        raise ValueError("Marketplace and plugin identity differ")
+    if entry.get("source") != {"source": "local", "path": "./"}:
+        raise ValueError("Marketplace source must point to the repository root with ./")
+    if entry.get("policy") != {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}:
+        raise ValueError("Marketplace must allow user-controlled installation")
+
+
 def validate_package(root: Path, schema_root: Path | None = None) -> None:
     root = root.resolve()
     schema_root = schema_root or Path(__file__).resolve().parents[1] / "docs" / "schemas"
@@ -26,6 +51,7 @@ def validate_package(root: Path, schema_root: Path | None = None) -> None:
             continue
         data[kind] = json.loads(path.read_text())
         Draft202012Validator(schema).validate(data[kind])
+    validate_marketplace(root, data["plugin"]["name"])
     compat = json.loads((root / ".codex-plugin" / "plugin.json").read_text())
     for key in ("name", "version", "description"):
         if compat.get(key) != data["plugin"].get(key):
@@ -82,7 +108,7 @@ def main() -> int:
     parser.add_argument("root", nargs="?", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     validate_package(args.root)
-    print("Package valid: portable schemas, compatibility parity and local component paths")
+    print("Package valid: portable schemas, compatibility parity, marketplace and local component paths")
     return 0
 
 

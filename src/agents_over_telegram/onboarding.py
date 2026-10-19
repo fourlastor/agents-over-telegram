@@ -16,6 +16,12 @@ from .credentials import CredentialError, private_directory, read_private_json, 
 
 PROFILE_NAME = '.aot-profile.json'
 SHORT_COMMANDS = {'status', 'history', 'pause', 'resume'}
+CONNECTED_NEXT_STEP = (
+    'Open this exact project folder in Codex and trust it if prompted. Reopen its chat, then ask '
+    '"Telegram status" to verify that the native Telegram tools are loaded and connected. '
+    'To enable automatic wakeups, ask "Listen for Telegram in this chat for one hour and reply to my messages." '
+    'Setup does not start a listener.'
+)
 
 
 def default_state_dir():
@@ -265,7 +271,7 @@ def setup(args):
               'host_trust_changed': False, 'automatic_delivery': False}
     if status['connected']:
         result['connection'] = status
-        result['next_step'] = 'Add and trust this exact project folder in Codex, then ask its chat to check Telegram connection_status.'
+        result['next_step'] = CONNECTED_NEXT_STEP
         return result
     cache_path = state / 'setup' / (client_id + '.json')
     pairing = status.get('pairing')
@@ -282,8 +288,11 @@ def setup(args):
     if command:
         result['pairing_command'] = command
         result['pairing']['command'] = command
+    bot_username = (status.get('bot') or {}).get('username')
+    bot_name = '@' + bot_username if bot_username else 'the bot'
+    destination_step = f'Create or choose this agent\'s dedicated Telegram group or topic and add {bot_name} to its group if it is not already there. '
     if args.prepare_only:
-        result['next_step'] = ('Send the pairing_command in this agent\'s Telegram group/topic, then run: ' + next_setup
+        result['next_step'] = (destination_step + 'Send the pairing_command there, then run: ' + next_setup
                                if command else 'Complete the existing pairing locally, then run: ' + next_setup)
         return result
     _say(f'Setting up {args.label}. The bot registration is shared; this project selects one agent.')
@@ -291,7 +300,7 @@ def setup(args):
         if not command:
             result['next_step'] = 'Complete the existing pairing locally, then run: ' + next_setup
             return result
-        _say('Send this exact command in the dedicated Telegram group or topic:\n' + command)
+        _say(destination_step + 'Send this exact command in that group or topic:\n' + command)
         if _answer('Press Enter after sending it, or type cancel to stop:').lower() in {'cancel', 'q', 'quit'}:
             raise KeyboardInterrupt()
         intake = core.collect()
@@ -305,8 +314,7 @@ def setup(args):
         result['next_step'] = 'No destination was confirmed. To review it again, run: ' + next_setup
         return result
     status = core.confirm_pairing(pairing['id'])
-    result.update(connected=True, connection=status,
-                  next_step='Add and trust this exact project folder in Codex, then ask its chat to check Telegram connection_status.')
+    result.update(connected=True, connection=status, next_step=CONNECTED_NEXT_STEP)
     return result
 
 
@@ -325,7 +333,8 @@ def human_status(value):
     senders = value.get('allowed_senders', [])
     lines.append('Allowed senders: ' + (', '.join(str(row['sender_id']) + (' (bot)' if row.get('is_bot') else '') for row in senders) or 'none'))
     lines.append(f"Pending: {value.get('pending_messages', 0)} | outgoing: " + json.dumps(value.get('outbox', {}), sort_keys=True))
-    lines.append('Delivery: on demand; an idle chat does not wake automatically.')
+    lines.append('Delivery: on demand, or automatically through a running listener.')
+    lines.append('Listener: not checked by connection status.')
     lines.append('History: captured context from the last 24 hours.')
     if intake.get('error'):
         lines.append('Intake: ' + str(intake['error']))

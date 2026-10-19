@@ -173,7 +173,8 @@ async def check(aot):
                 require(status["client_id"] == prepared[label]["client_id"]
                         and status["destination"]["chat_id"] == destinations[label],
                         "MCP server has the wrong scoped identity")
-                require(status["delivery"] == {"mode": "on_demand", "automatic": False}
+            require(status["delivery"] == {"mode": "on_demand", "automatic": False,
+                                          "scope": "inbox_core", "listener_status": "not_checked"}
                         and status["history"]["window_hours"] == 24,
                         "MCP status has unexpected delivery or history behavior")
             checks.append("Both newly generated native MCP commands launch with the installed package version and intended identity")

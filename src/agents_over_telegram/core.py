@@ -391,7 +391,7 @@ class Core:
                     message = 'Captured history may have a gap. Check for new messages when ready and allow for missing context.'
                 else:
                     action = 'check_messages'
-                    message = 'Check for new messages when you want to read this conversation; automatic delivery is off.'
+                    message = 'Check for new messages when ready. For automatic wakeups, ask to listen for Telegram in this chat for a chosen duration; listener status is not checked here.'
             return {
                 'client_id': client_id, 'label': client['label'],
                 'connected': row is not None, 'paused': bool(row['paused']) if row else False,
@@ -405,7 +405,8 @@ class Core:
                 'intake': {'last_success_at': account['last_intake'], 'last_attempt_at': account['last_attempt'],
                            'error': account['intake_error'], 'last_gap_at': account['last_gap_at'],
                            'possible_offline_gap': bool(gap)},
-                'delivery': {'mode': 'on_demand', 'automatic': False},
+                'delivery': {'mode': 'on_demand', 'automatic': False, 'scope': 'inbox_core',
+                             'listener_status': 'not_checked'},
                 'history': {'window_hours': self.HISTORY_WINDOW // 3600, 'kind': 'captured_only'},
                 'state': state, 'next_action': {'code': action, 'message': message},
             }

@@ -7,6 +7,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from agents_over_telegram.core import Core, CoreError
 from agents_over_telegram.mcp_server import create_server
+from agents_over_telegram.onboarding import human_status
 from agents_over_telegram.transport import FakeTransport
 
 
@@ -67,7 +68,8 @@ def test_unpaired_status_explains_shared_bot_and_on_demand_delivery(environment)
     assert status['next_action']['code'] == 'begin_pairing'
     assert 'existing shared bot' in status['next_action']['message']
     assert status['bot'] == {'id': transport.bot_id, 'username': transport.username}
-    assert status['delivery'] == {'mode': 'on_demand', 'automatic': False}
+    assert status['delivery'] == {'mode': 'on_demand', 'automatic': False,
+                                  'scope': 'inbox_core', 'listener_status': 'not_checked'}
     assert status['history'] == {'window_hours': 24, 'kind': 'captured_only'}
     assert status['destination'] is None and status['connected'] is False
     assert status['allowed_senders'] == []
@@ -124,7 +126,25 @@ def test_connected_status_identifies_topic_and_numeric_allowlist(environment):
         {'sender_id': 55, 'is_bot': True}, {'sender_id': 77, 'is_bot': False}, {'sender_id': 101, 'is_bot': False}]
     assert status['intake']['last_success_at'] == 1000.0
     assert status['next_action']['code'] == 'check_messages'
-    assert 'automatic delivery is off' in status['next_action']['message']
+    assert 'listener status is not checked here' in status['next_action']['message']
+
+
+def test_connection_status_does_not_infer_or_start_a_listener(environment, monkeypatch):
+    core, transport, _ = environment
+    client = bind(core, transport)['client_id']
+    before = snapshot(core)
+    for method in ('collect', 'flush', 'poll', 'ack', 'send'):
+        monkeypatch.setattr(core, method, never_called)
+    status = core.connection_status(client)
+    assert status['connected']
+    assert status['delivery']['scope'] == 'inbox_core'
+    assert status['delivery']['listener_status'] == 'not_checked'
+    human = human_status(status)
+    assert 'automatically through a running listener' in human
+    assert 'Listener: not checked by connection status.' in human
+    assert 'automatic delivery is off' not in human
+    assert 'does not wake automatically' not in human
+    assert snapshot(core) == before
 
 
 def test_pause_resume_keeps_binding_and_guidance_does_not_request_reconnection(environment):
