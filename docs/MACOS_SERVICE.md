@@ -7,7 +7,7 @@ Use this procedure only when the operator asks for a permanent listener or autom
 1. Verify the existing target UUID, exact project, private state and configured runtime with `relay-status`. Keep the existing client and pairing.
 2. Stop any temporary listener for that state. Run only one notification driver. Do not start another `getUpdates` consumer.
 3. Use `relay-desktop --duration 0 --collect` for indefinite listening. Keep the stable absolute runtime path outside the plugin cache.
-4. Check existing power management with the operator. Reuse tools such as Amphetamine when already configured. Do not add `caffeinate` or change sleep settings as an incidental service dependency.
+4. Check the host app's built-in keep-awake option and existing operator power management first. Reuse an enabled app option or an already installed and configured tool such as Amphetamine; Amphetamine is optional, not a prerequisite. An app option may already manage `caffeinate`. Add a separate sleep blocker only if one is still needed for the requested operation, and avoid redundant blockers or incidental changes to sleep settings.
 
 A LaunchAgent runs after the user logs in. It does not run before login, unlock FileVault, or start the desktop app. The listener waits when the desktop is absent. The Mac must remain awake and online, and the normal Codex desktop must be open for target wakeups.
 
