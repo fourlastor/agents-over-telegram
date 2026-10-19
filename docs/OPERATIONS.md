@@ -144,7 +144,9 @@ Review the observed numeric sender, chat and topic IDs locally. Confirm that obs
 
 For Beta, repeat `client-create`, `pair-begin`, collection and confirmation with `beta.json` and a different group/topic. Do not repeat bot creation or token registration. Only one logical agent can own a destination in this MVP. Group IDs and topic IDs are not interchangeable; no ordinary channel or private-bot-DM setup is promised.
 
-Additional senders and same-bot peers require local owner grants:
+### Additional senders and peers
+
+Pairing authorizes the observed owner. Group membership and BotFather visibility settings do not authorize other senders in this plugin. Existing grants from a different bot or retired receiver do not transfer automatically. Use the operator's intended scope and verified numeric identities for local grants:
 
 ```sh
 "$AOT_BIN" --state-dir "$AOT_STATE" allow-sender --client-file "$AOT_STATE/clients/alpha.json" --sender-id 123456

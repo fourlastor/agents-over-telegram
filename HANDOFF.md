@@ -10,6 +10,12 @@ Version 0.7.1 removes uv as a first-time prerequisite. The default bootstrap cho
 
 Version 0.7.0 adds the repository marketplace, a bundled bootstrap that creates a stable runtime outside plugin caches, updated setup guidance and accurate listener-status wording. Native CLI installation, cache-independent runtime preparation and fresh fake-project MCP onboarding passed; 534 automated tests passed. At 0.7.0, GitHub transport and desktop plugin UI/onboarding remained unverified, and no remote repository had been published. Read [implementation status](docs/IMPLEMENTATION_STATUS.md) for the current evidence.
 
+## Follow-up operating evidence
+
+The macOS follow-up passed a real idle Telegram round trip and a busy-target round trip with a separate local hook. The native queue alone held busy notices until the active turn ended. Keep these evidence boundaries distinct; the hook is not shipped. See [compatibility](docs/COMPATIBILITY.md#macos-follow-up-idle-and-busy-tests).
+
+Continuous listening is explicitly selected with `--duration 0`. An operator-requested LaunchAgent passed graceful-stop recovery; OS reboot and multi-day operation remain untested. See the [macOS service procedure](docs/MACOS_SERVICE.md). An ongoing-listening request must not silently become a 55-second check.
+
 ## Historical 0.5.1 direct dispatcher
 
 The local MVP and the bounded 0.4.0 model-mediated relay have been implemented and tested. The current optional integration is documented in [DIRECT_DISPATCH.md](docs/DIRECT_DISPATCH.md): `relay-dispatch` joins the desktop's deliberately shared backend, submits fixed tool output for an authorized mapped thread and retains separate notification/processing/publication outcomes. `aot-codex-bridge` preserves the exact desktop stdio owner while adding a private Unix WebSocket. Setup does not enable it automatically.
