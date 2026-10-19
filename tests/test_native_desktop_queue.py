@@ -21,6 +21,7 @@ QUEUE_ID = '01a154d9-6676-7dd1-b4b2-d1accff1d4df'
 
 @pytest.fixture
 def adapter(tmp_path, monkeypatch):
+    monkeypatch.setattr(desktop.sys, 'platform', 'linux')
     install = tmp_path / 'application'
     binary = install / 'resources' / 'codex'
     binary.parent.mkdir(parents=True)
@@ -218,6 +219,9 @@ def capability_adapter(adapter, monkeypatch):
     # Container UID mapping can expose host root as nobody; this unit fixture
     # supplies its own trusted-opener metadata instead of requiring host layout.
     path_stat = Path.stat
+    path_is_file = Path.is_file
+    monkeypatch.setattr(Path, 'is_file', lambda path:
+        True if path == Path('/proc/self/stat') else path_is_file(path))
     file_access = os.access
     monkeypatch.setattr(Path, 'stat', lambda path, **kwargs:
         SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)

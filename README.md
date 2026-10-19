@@ -4,7 +4,7 @@ Connect a Codex project to a Telegram group or forum topic. Register **one bot o
 
 ## First-time setup
 
-You need Codex on Linux and **Python 3.11+ with virtual-environment support**. The plugin prepares its own stable runtime; **uv is optional**. If Python is missing, follow the official [Python downloads](https://www.python.org/downloads/). On Linux distributions that package virtual-environment support separately, install the matching package, such as `python3-venv` on Debian/Ubuntu. Then ask Codex to connect the project; you do not need a separate source checkout or virtual environment.
+You need Codex on Linux or macOS and **Python 3.11+ with virtual-environment support**. The plugin prepares its own stable runtime; **uv is optional**. If Python is missing, follow the official [Python downloads](https://www.python.org/downloads/). On Linux distributions that package virtual-environment support separately, install the matching package, such as `python3-venv` on Debian/Ubuntu. Then ask Codex to connect the project; you do not need a separate source checkout or virtual environment.
 
 1. **Install the plugin from its GitHub marketplace:**
 
@@ -17,7 +17,7 @@ You need Codex on Linux and **Python 3.11+ with virtual-environment support**. T
 2. **Prepare Telegram.** Create a bot with `@BotFather` if you do not already have one for this setup, and add it to a dedicated group or forum topic. Reuse that bot for later agents. Keep its token private; the wizard asks for it in a hidden terminal prompt. Direct-message pairing is not supported.
 3. **Open the intended project in Codex and ask “Connect this agent to Telegram.”** The setup skill prepares the runtime from the installed plugin and gives you the private pairing command. Run the terminal wizard, send its exact `/pair@YourBotUsername …` command in the intended group/topic, then confirm the observed destination in the terminal. First registration also confirms that this bot has no other receiver. Adding another project reuses the registered bot without entering its token again.
 4. **Load the connection.** Open/add the prepared project, make Codex's normal project-trust decision, then reload/reopen its chat. Ask **“Telegram status”** to verify the actual bot and destination through the loaded tools.
-5. **Choose when to listen.** Ask **“Listen for Telegram in this chat for 10 minutes and reply to my messages.”** Keep ChatGPT and the listener running for that period. Open ChatGPT from the app list as usual. The listener supports Linux and checks the installed Codex queue capabilities. Live wakeup has been verified with bundled Codex **0.163.0-alpha.10.2**; other capable versions may run but do not yet have that live-test evidence.
+5. **Choose when to listen.** Ask **“Listen for Telegram in this chat for 10 minutes and reply to my messages.”** Keep ChatGPT and the listener running for that period. Open ChatGPT from the app list as usual. The listener supports Linux and macOS and checks the installed Codex queue capabilities. Live wakeup has been verified with bundled Codex **0.163.0-alpha.10.2**; other capable versions may run but do not yet have that live-test evidence.
 
 **Every chat in a project shares its Telegram identity.** Use separate project directories for separate agents. Setup writes one native project `telegram` MCP entry and a profile reference; it does not configure a global plugin MCP server or change global trust. The runtime stays outside the plugin cache, so a cache refresh does not remove the configured executable. Existing configured projects keep their current runtime during ordinary setup.
 
@@ -40,6 +40,8 @@ The optional [desktop listener](docs/DIRECT_DISPATCH.md) uses native Codex queue
 On Linux with bundled Codex **0.163.0-alpha.10.2**, the live `relay-desktop` check passed with ChatGPT opened normally: Telegram marker `normal-idle-1` woke the existing local Alpha chat, which polled once, sent one reply and acknowledged the delivery after publication was recorded as sent. No model forwarded the wake after the marker arrived, and Alpha returned to zero pending messages. Native tool and ledger evidence confirm the round trip; the user also confirmed the reply is visible in Telegram. The [compatibility record](docs/COMPATIBILITY.md) separates this result from earlier relay and shared-backend experiments.
 
 History covers captured local records, not a complete prior-day Telegram transcript. Messages consumed elsewhere or missed before binding and the old bridge's archive are not imported.
+
+On macOS, the listener discovers the bundled native CLI inside ChatGPT.app or Codex.app, validates the running app and its direct local backend with libproc/sysctl, and opens the wake URL in that same app. The macOS check covered native process discovery, queue acceptance and OS URL handoff; a full Telegram → idle chat → reply/ack round trip remains a separate acceptance check. See [macOS validation](docs/COMPATIBILITY.md#macos-native-queue-validation).
 
 ## Validation and setup details
 

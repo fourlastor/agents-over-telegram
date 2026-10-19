@@ -58,7 +58,7 @@ def handler(ws):
             ws.send(json.dumps({"method": "approval-result", "params": value["result"]}))
         else:
             ws.send(json.dumps({"id": value["id"], "result": {"echo": value.get("params")}}))
-        if os.environ.get("AOT_TEST_MODE") == "crash":
+        if os.environ.get("AOT_TEST_MODE") == "crash" and value.get("method") == "test/crash":
             os._exit(7)
 os.umask(0o077)  # Match Codex's explicit private socket creation.
 with unix_serve(handler, endpoint) as server:
@@ -75,7 +75,7 @@ def bridge(tmp_path):
     # Linux sockaddr_un paths are short; pytest's verbose test paths aren't.
     import tempfile
     with tempfile.TemporaryDirectory(prefix="aot-bridge-") as directory:
-        root = Path(directory)
+        root = Path(directory).resolve()
         root.chmod(0o700)
         binary = root / "codex"
         binary.write_text(f"#!{sys.executable}\n" + FAKE_BACKEND)
@@ -287,6 +287,10 @@ def test_backend_crash_is_reported_and_endpoint_cleaned(bridge):
     root, env, start = bridge
     process = start("app-server", AOT_TEST_MODE="crash")
     send(process, {"id": 1, "method": "initialize"})
+    # Establish the connection first. An immediate exit on initialize races
+    # startup/identity inspection on macOS and tests a different failure path.
+    assert receive(process)["id"] == 1
+    send(process, {"id": 2, "method": "test/crash"})
     process.wait(timeout=10)
     output, error = process.communicate(timeout=10)
     assert process.returncode == 2

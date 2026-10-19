@@ -47,7 +47,7 @@ def fake_server(handler, *, tcp=False):
             errors.append(error)
 
     with tempfile.TemporaryDirectory(prefix="aot-ws-") as directory:
-        path = Path(directory) / "rpc.sock"
+        path = Path(directory).resolve() / "rpc.sock"
         with (serve(run, "127.0.0.1", 0, close_timeout=0.1) if tcp else
               unix_serve(run, str(path), close_timeout=0.1)) as server:
             if tcp:
@@ -374,7 +374,7 @@ def test_unsafe_token_file_rejected_before_tcp_connect(tmp_path, mode):
 @pytest.mark.parametrize("kind", ["public_parent", "public_socket", "symlink_parent", "regular_file"])
 def test_unsafe_unix_paths_rejected(kind):
     with tempfile.TemporaryDirectory(prefix="aot-ws-") as directory:
-        parent = Path(directory) / "private"
+        parent = Path(directory).resolve() / "private"
         parent.mkdir(mode=0o700)
         path = parent / "rpc.sock"
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -385,7 +385,7 @@ def test_unsafe_unix_paths_rejected(kind):
             elif kind == "public_socket":
                 path.chmod(0o666)
             elif kind == "symlink_parent":
-                link = Path(directory) / "alias"
+                link = Path(directory).resolve() / "alias"
                 link.symlink_to(parent)
                 path = link / "rpc.sock"
             else:
@@ -398,7 +398,7 @@ def test_unsafe_unix_paths_rejected(kind):
 
 def test_private_absolute_leaf_alias_connects_to_private_socket():
     with fake_server(echo) as (endpoint, _), tempfile.TemporaryDirectory(prefix="aot-alias-") as directory:
-        alias = Path(directory) / "configured.sock"
+        alias = Path(directory).resolve() / "configured.sock"
         alias.symlink_to(endpoint.removeprefix("unix://"))
         with AppServerConnection("unix://" + str(alias)) as client:
             assert client.request("thread/loaded/list", {}) == {"ok": True}
@@ -407,7 +407,7 @@ def test_private_absolute_leaf_alias_connects_to_private_socket():
 @pytest.mark.parametrize("kind", ["relative", "chain", "public_alias_parent", "public_target_parent", "foreign_alias_owner", "target_parent_alias"])
 def test_unsafe_socket_aliases_rejected(kind, monkeypatch):
     with tempfile.TemporaryDirectory(prefix="aot-alias-") as directory:
-        root = Path(directory)
+        root = Path(directory).resolve()
         alias_parent = root / "config"
         target_parent = root / "backend"
         alias_parent.mkdir(mode=0o700)
@@ -448,7 +448,7 @@ def test_unsafe_socket_aliases_rejected(kind, monkeypatch):
 
 def test_endpoint_identity_change_during_connect_is_rejected(monkeypatch):
     with tempfile.TemporaryDirectory(prefix="aot-alias-") as directory:
-        path = Path(directory) / "actual.sock"
+        path = Path(directory).resolve() / "actual.sock"
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
             listener.bind(str(path))
             path.chmod(0o600)

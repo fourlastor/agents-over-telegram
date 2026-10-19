@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import plistlib
 import queue
 import re
 import signal
@@ -26,7 +27,21 @@ import uuid
 from .core import CoreError
 from .relay import WAKE_NOTICE
 
-DEFAULT_CODEX_BINARY = Path('/usr/lib/chatgpt/resources/codex')
+
+def default_codex_binary():
+    if sys.platform == 'darwin':
+        for root in (Path('/Applications'), Path.home() / 'Applications'):
+            for name in ('ChatGPT.app', 'Codex.app'):
+                resources = root / name / 'Contents' / 'Resources'
+                for binary in (resources / 'codex-cli/CodexCLI.app/Contents/MacOS/codex',
+                               resources / 'codex'):
+                    if binary.is_file():
+                        return binary
+        return Path('/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex')
+    return Path('/usr/lib/chatgpt/resources/codex')
+
+
+DEFAULT_CODEX_BINARY = default_codex_binary()
 PROC_ROOT = Path('/proc')
 
 
@@ -49,28 +64,68 @@ class DesktopQueueError(CoreError):
 
 
 class NativeDesktopQueue:
-    """Linux adapter for a bundled CLI exposing the native queue capabilities."""
+    """Linux/macOS adapter for a bundled CLI with native queue capabilities."""
 
-    def __init__(self, codex_binary=DEFAULT_CODEX_BINARY, codex_home=None):
-        self.binary = Path(codex_binary)
+    def __init__(self, codex_binary=None, codex_home=None):
+        self.binary = Path(codex_binary) if codex_binary is not None else default_codex_binary()
         self.home = Path(codex_home if codex_home is not None else
                          os.environ.get('CODEX_HOME', Path.home() / '.codex')).expanduser()
         self.desktop = self.binary.parent.parent / 'ChatGPT'
+        self.opener = Path('/usr/bin/open' if sys.platform == 'darwin' else '/usr/bin/xdg-open')
+        self.bundle = None
+        self.cli_aliases = {self.binary.resolve()}
+        if sys.platform == 'darwin':
+            self._macos_layout()
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(('CODEX_', 'AOT_'))}
         self.env['CODEX_HOME'] = str(self.home)
 
+    def _macos_layout(self):
+        # The CLI can be nested inside CodexCLI.app. Match the *outer* app,
+        # not the helper bundle, and never accept a PATH CLI as its backend.
+        for bundle in self.binary.parents:
+            if bundle.suffix != '.app':
+                continue
+            contents = bundle / 'Contents'
+            resources = contents / 'Resources'
+            allowed = (resources / 'codex',
+                       resources / 'codex-cli/CodexCLI.app/Contents/MacOS/codex')
+            if self.binary not in allowed:
+                continue
+            try:
+                path = contents / 'Info.plist'
+                info = path.stat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid())
+                        or info.st_mode & 0o022 or info.st_size > 1024 * 1024):
+                    raise ValueError
+                metadata = plistlib.loads(path.read_bytes())
+                if not isinstance(metadata, dict):
+                    raise ValueError
+                executable = metadata.get('CFBundleExecutable')
+                if (metadata.get('CFBundleIdentifier') != 'com.openai.codex'
+                        or not isinstance(executable, str)
+                        or re.fullmatch(r'[A-Za-z0-9 _-]+', executable) is None):
+                    raise ValueError
+                self.desktop = contents / 'MacOS' / executable
+                self.bundle = bundle
+                self.cli_aliases.add((resources / 'codex-cli/bin/codex').resolve())
+                return
+            except (OSError, ValueError, plistlib.InvalidFileException):
+                break
+
     def check_capability(self):
-        if sys.platform != 'linux' or not Path('/proc/self/stat').is_file():
+        if sys.platform not in ('linux', 'darwin') or (
+                sys.platform == 'linux' and not Path('/proc/self/stat').is_file()):
             raise DesktopQueueError('desktop_queue_unsupported_platform')
         try:
             if (not self.binary.is_absolute() or self.binary.name != 'codex'
-                    or self.binary.parent.name != 'resources' or not self.home.is_absolute()
+                    or (sys.platform == 'linux' and self.binary.parent.name != 'resources')
+                    or (sys.platform == 'darwin' and self.bundle is None) or not self.home.is_absolute()
                     or not self.home.is_dir()):
                 raise ValueError
             self.home = self.home.resolve(strict=True)
             self.env['CODEX_HOME'] = str(self.home)
-            for executable in (self.binary, self.desktop, Path('/usr/bin/xdg-open')):
+            for executable in (self.binary, self.desktop, self.opener):
                 info = executable.stat()
                 if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid())
                         or info.st_mode & 0o022 or not os.access(executable, os.X_OK)):
@@ -103,7 +158,7 @@ class NativeDesktopQueue:
                            str(Path(routing.get(b'HOME', '')) / '.codex'))
         cli = routing.get(b'CODEX_CLI_PATH')
         return (actual_home.is_absolute() and actual_home.resolve() == self.home
-                and (not cli or Path(cli).resolve() == self.binary.resolve())
+                and (not cli or (Path(cli).is_absolute() and Path(cli).resolve() in self.cli_aliases))
                 and not routing.get(b'CODEX_APP_SERVER_WS_URL')
                 and not routing.get(b'CODEX_APP_SERVER_USE_LOCAL_DAEMON'))
 
@@ -114,6 +169,8 @@ class NativeDesktopQueue:
         Its direct native app-server child retains the effective Codex home and
         distinguishes this route from a wrapped or external backend.
         """
+        if sys.platform == 'darwin':
+            return self._macos_desktop_identity()
         mains, backends = {}, []
         for entry in PROC_ROOT.iterdir():
             if not entry.name.isdigit():
@@ -138,6 +195,27 @@ class NativeDesktopQueue:
                     backends.append((pid, parent, start))
             except (OSError, ValueError, UnicodeError, IndexError, RuntimeError):
                 continue
+        identities = [(parent, mains[parent], pid, start) for pid, parent, start in backends
+                      if parent in mains]
+        return identities[0] if len(identities) == 1 else None
+
+    def _macos_desktop_identity(self):
+        from .macos_process import MacOSProcesses
+        if self.bundle is None:
+            return None
+        mains, backends = {}, []
+        try:
+            for pid, parent, start, executable, args, routing in MacOSProcesses().candidates(
+                    {self.desktop.resolve(), self.binary.resolve()}):
+                if executable == self.desktop.resolve():
+                    if not any(re.search(rb'(?:^|\s)--type=', arg) for arg in args):
+                        mains[pid] = start
+                elif (b'app-server' in args and not any(
+                        arg.startswith((b'--listen', b'--remote')) for arg in args)
+                        and self._routing_matches(routing)):
+                    backends.append((pid, parent, start))
+        except (OSError, ValueError, UnicodeError, RuntimeError):
+            return None
         identities = [(parent, mains[parent], pid, start) for pid, parent, start in backends
                       if parent in mains]
         return identities[0] if len(identities) == 1 else None
@@ -211,7 +289,11 @@ class NativeDesktopQueue:
     def wake(self, binding):
         self._guard(binding)
         try:
-            result = subprocess.run(['/usr/bin/xdg-open', 'codex://threads/wake/' + binding['thread_id']],
+            command = [str(self.opener)]
+            if self.bundle is not None:
+                # Pin the selected installed app rather than the default URL handler.
+                command += ['-a', str(self.bundle)]
+            result = subprocess.run([*command, 'codex://threads/wake/' + binding['thread_id']],
                                     stdin=subprocess.DEVNULL, capture_output=True, timeout=20, check=False,
                                     env=self.env)
             if result.returncode != 0:
@@ -273,7 +355,7 @@ class DesktopHandoffs:
         return receipt
 
 
-def run_desktop_dispatcher(core, store, *, codex_binary=DEFAULT_CODEX_BINARY, codex_home=None,
+def run_desktop_dispatcher(core, store, *, codex_binary=None, codex_home=None,
                            duration=55, collect=False, interval=.5, emit=None, stop_event=None):
     """Run with the ordinary desktop open; duration 0 is explicitly continuous.
 
