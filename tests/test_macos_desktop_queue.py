@@ -133,6 +133,7 @@ def mac_adapter(tmp_path, monkeypatch):
         path.chmod(0o700)
     (contents / 'Info.plist').write_bytes(plistlib.dumps(
         {'CFBundleIdentifier': 'com.openai.codex', 'CFBundleExecutable': 'ChatGPT'}))
+    (contents / 'Info.plist').chmod(0o644)
     home = tmp_path / 'state'
     home.mkdir()
     project = tmp_path / 'project'
