@@ -246,7 +246,7 @@ def run(args):
     state_dir = private_directory(args.state_dir)
     _mode(state_dir, args.fake)
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
-                and args.command not in {"history", "status", "account-status"}))
+                and args.command not in {"history", "status", "account-status", "bot-exchange-policy"}))
     if args.command.startswith("relay-"):
         from .relay import RelayStore
         store = RelayStore(core, project_validator=lambda binding: _relay_project_valid(core, binding, args.fake))

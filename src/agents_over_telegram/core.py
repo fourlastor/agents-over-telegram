@@ -350,16 +350,18 @@ class Core:
                 db.execute('''INSERT INTO bot_exchange_policies VALUES(?,?,?)
                     ON CONFLICT(client_id,sender_id) DO UPDATE SET enabled=excluded.enabled''',
                     (client_id, sender_id, int(enabled)))
-                # Include legacy reservations in the rolling budget. Never alter
-                # an existing conversation, inbox, outbox or chain counter.
-                db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
-                           (f'bot:{client_id}:{sender_id}', client_id, sender_id))
-                for admitted in db.execute('SELECT conversation_id,payload FROM inbox WHERE client_id=?', (client_id,)).fetchall():
-                    payload = json.loads(admitted['payload'])
-                    sender = _mapping(payload.get('sender'))
-                    if payload.get('origin') == 'telegram' and sender.get('id') == sender_id and sender.get('is_bot') is True:
-                        db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
-                                   (admitted['conversation_id'], client_id, sender_id))
+                # Backfill only on enablement. Disable leaves memberships already
+                # created, and never starts enforcing a pair that has not opted in.
+                # Never alter an existing conversation, inbox, outbox or chain counter.
+                if enabled:
+                    db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
+                               (f'bot:{client_id}:{sender_id}', client_id, sender_id))
+                    for admitted in db.execute('SELECT conversation_id,payload FROM inbox WHERE client_id=?', (client_id,)).fetchall():
+                        payload = json.loads(admitted['payload'])
+                        sender = _mapping(payload.get('sender'))
+                        if payload.get('origin') == 'telegram' and sender.get('id') == sender_id and sender.get('is_bot') is True:
+                            db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
+                                       (admitted['conversation_id'], client_id, sender_id))
             policy = db.execute('SELECT enabled FROM bot_exchange_policies WHERE client_id=? AND sender_id=?',
                                 (client_id, sender_id)).fetchone()
             usage = self._bot_pair_usage(db, client_id, sender_id, self.clock())
@@ -549,7 +551,7 @@ class Core:
             conversation = f'tg:{chat_id}:{thread_id}:{msg["message_id"]}'
         else:
             conversation = f'participant:{binding["client_id"]}:{sender_id}'
-        if sender['is_bot'] and kind == 'edited_message':
+        if kind == 'edited_message':
             for original in db.execute('SELECT payload,conversation_id FROM inbox WHERE client_id=? ORDER BY created,rowid',
                                        (binding['client_id'],)):
                 prior = json.loads(original['payload'])

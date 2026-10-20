@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 
@@ -47,6 +48,36 @@ def test_private_cli_setup_once_two_clients_and_pairing(tmp_path):
     assert command(state, "pause", "--client-file", str(client_a))["paused"]
     assert not command(state, "status", "--client-file", str(client_b))["paused"]
     assert command(state, "disconnect", "--client-file", str(client_a))["revoked"]
+
+
+def test_policy_command_does_not_recover_interrupted_sends(tmp_path):
+    state = tmp_path / "state"
+    command(state, "account-register")
+    client_file = state / "clients" / "alpha.json"
+    command(state, "client-create", "--label", "Alpha", "--client-file", str(client_file))
+    pairing = command(state, "pair-begin", "--client-file", str(client_file))
+    fake = read_private_json(state / "fake-transport.json")
+    fake["updates"] = [{"update_id": 1, "message": {"message_id": 1, "chat": {"id": -100, "type": "supergroup"},
+        "from": {"id": 101, "is_bot": False}, "text": pairing["command"]}}]
+    write_private_json(state / "fake-transport.json", fake, overwrite=True)
+    command(state, "collect")
+    command(state, "pair-confirm", "--pairing-id", pairing["pairing_id"], "--confirm")
+    command(state, "allow-sender", "--client-file", str(client_file), "--sender-id", "202", "--bot")
+    core = Core(state, FakeTransport(), recover_sends=False)
+    client_id = read_private_json(client_file)["client_id"]
+    with sqlite3.connect(core.database) as db:
+        db.execute(
+            "INSERT INTO outbox(id,client_id,chat_id,thread_id,idempotency_key,request_hash,text,conversation_id,status,created,updated,due) "
+            "VALUES('out_interrupted',?, -100, 0, 'interrupted', 'hash', 'text', 'local', 'sending', 1, 1, 1)",
+            (client_id,))
+    policy_args = ("bot-exchange-policy", "--client-file", str(client_file), "--sender-id", "202")
+    assert not command(state, *policy_args)["enabled"]
+    assert command(state, *policy_args, "--enable")["enabled"]
+    assert not command(state, *policy_args, "--disable")["enabled"]
+    with sqlite3.connect(core.database) as db:
+        status, error = db.execute("SELECT status, error FROM outbox WHERE id='out_interrupted'").fetchone()
+    assert status == "sending"
+    assert error is None
 
 
 def test_mode_mismatch_does_not_touch_token(tmp_path):

@@ -9,7 +9,7 @@ This opt-in policy separates new external bot requests without deleting the old 
 | No enabled policy for this client and external bot | Preserve the legacy persistent `bot:CLIENT:SENDER` chain and its eight-send cap. |
 | Enabled policy; a new, admitted, unsolicited bot message | Assign a server-derived `bot-root:CLIENT:SENDER:MESSAGE_ID` exchange. Message text cannot select the ID. |
 | Bot replies to a known sent publication | Inherit that publication's conversation, including an exhausted legacy chain. |
-| Bot edits an already captured message | Reuse its original conversation, even after policy disable. |
+| Any sender edits an already captured message | Reuse its original conversation, even after policy disable or unknown-send recovery. |
 | Unseen edit or reply to an unknown publication | Use the legacy chain; do not mint a new root. |
 | Any exchange | Keep the existing permanent eight-send chain cap. ACK, time, restart, and policy toggles do not reset it. |
 | Participating external bot pair | Allow at most 32 reserved sends in a rolling hour across its exchanges. Attach a pair to a human-started conversation when a real bot reply joins it. |
@@ -36,7 +36,7 @@ Use the selected project's existing runtime, state, and protected client file. T
   --client-file "$AOT_CLIENT" --sender-id VERIFIED_EXTERNAL_BOT_ID --enable
 ```
 
-Omitting `--enable` and `--disable` inspects the current policy. `--disable` prevents future independent root creation; existing exchange memberships and rolling reservations remain enforced. Re-enabling does not reset them. Human/non-bot senders and unknown bot IDs are refused. Existing destination, sender, pause, suspension, rate, queue and deduplication checks remain in force.
+Omitting `--enable` and `--disable` inspects the current policy. Inspection and policy changes do not recover interrupted sends. `--disable` prevents future independent root creation. It creates no memberships for a pair that has never been enabled; memberships and rolling reservations already created stay enforced. Re-enabling does not reset them. Human/non-bot senders and unknown bot IDs are refused. Existing destination, sender, pause, suspension, rate, queue and deduplication checks remain in force.
 
 ## Additive migration
 
@@ -53,6 +53,6 @@ For rollback, disable future root creation and review outstanding exchanges firs
 
 ## Offline verification
 
-`tests/test_bot_exchanges.py` covers legacy schema migration without counter changes, a fresh independent exchange after legacy exhaustion, permanent reply lineage, edits across policy disable, unknown replies and edits, a storm of fresh roots, rolling boundary behavior, restart and toggle persistence, uncertain/rejected sends, idempotency, concurrent last-slot allocation, sender/destination isolation, human-started lineage, reply budget borrowing, clock rollback and explicit CLI controls.
+`tests/test_bot_exchanges.py` covers legacy schema migration without counter changes, a fresh independent exchange after legacy exhaustion, permanent reply lineage, edits across policy disable, unknown replies and edits, a storm of fresh roots, rolling boundary behavior, restart and toggle persistence, uncertain/rejected sends, idempotency, concurrent last-slot allocation, sender/destination isolation, human-started lineage, reply budget borrowing, clock rollback, explicit CLI controls, disable without prior enablement, and human edit lineage after unknown-send recovery.
 
 These checks use temporary state and `FakeTransport`. They do not establish live activation, cross-version operation, or compatibility with a peer that deliberately drops reply lineage. Keep live activation separate from this proposal.

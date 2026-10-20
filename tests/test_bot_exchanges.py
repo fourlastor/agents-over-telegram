@@ -226,6 +226,65 @@ def test_cli_policy_is_operator_only_and_requires_explicit_mode():
         parser().parse_args(['bot-exchange-policy', '--client-file', '/private/fake.json', '--sender-id', '202', '--enable', '--disable'])
 
 
+def test_never_enabled_disable_does_not_create_pair_budget(setup_pair):
+    core, transport, clock, client = setup_pair
+    for n in range(core.BOT_PAIR_SEND_LIMIT):
+        human = append(transport, f'human {n}')
+        core.collect()
+        conv = rows(core, 'SELECT conversation_id FROM inbox WHERE event_key=?', (f'tg:{human["update_id"]}',))[0][0]
+        sent = core.send(client, 'reply', f'human-reply-{n}', conversation_id=conv)
+        clock.advance(2)
+        reply, _ = receive(core, transport, client, reply_to_message={'message_id': sent['message_id']})
+        assert reply == conv
+        clock.advance(2)
+    policy = core.bot_exchange_policy(client, 202, enabled=False)
+    assert not policy['enabled']
+    assert policy['reserved_in_window'] == 0
+    assert not rows(core, 'SELECT 1 FROM bot_exchange_members WHERE client_id=? AND sender_id=?', (client, 202))
+    human = append(transport, 'still unrestricted')
+    core.collect()
+    conv = rows(core, 'SELECT conversation_id FROM inbox WHERE event_key=?', (f'tg:{human["update_id"]}',))[0][0]
+    assert core.send(client, 'not opted in', 'not-opted-in', conversation_id=conv)['status'] == 'sent'
+
+
+def test_disable_retains_memberships_created_by_enablement(setup_pair):
+    core, transport, clock, client = setup_pair
+    core.bot_exchange_policy(client, 202, enabled=True)
+    for n in range(core.BOT_PAIR_SEND_LIMIT):
+        conv, _ = receive(core, transport, client)
+        core.send(client, 'one per root', f'retained-{n}', conversation_id=conv)
+        clock.advance(2)
+    later, _ = receive(core, transport, client)
+    policy = core.bot_exchange_policy(client, 202, enabled=False)
+    assert not policy['enabled']
+    assert policy['reserved_in_window'] == core.BOT_PAIR_SEND_LIMIT
+    with pytest.raises(CoreError, match='bot_pair_limit'):
+        core.send(client, 'disable is not a reset', 'retained-blocked', conversation_id=later)
+
+
+def test_human_edit_keeps_captured_conversation_after_unknown_recovery(setup_pair):
+    core, transport, clock, client = setup_pair
+    transport.outcomes = ['unknown']
+    sent = core.send(client, 'uncertain', 'uncertain')
+    assert sent['status'] == 'unknown'
+    human = append(transport, 'reply before recovery', reply_to_message={'message_id': 1})
+    core.collect()
+    original = rows(core, 'SELECT conversation_id FROM inbox WHERE event_key=?', (f'tg:{human["update_id"]}',))[0][0]
+    assert original != sent['conversation_id']
+    core.resolve_unknown(sent['outbox_id'], 'accepted', message_id=1)
+    event = {'update_id': human['update_id'] + 1, 'edited_message': dict(human['message'], text='edited reply')}
+    transport.updates.append(event)
+    core.collect()
+    edited = rows(core, 'SELECT conversation_id FROM inbox WHERE event_key=?', (f'tg:{event["update_id"]}',))[0][0]
+    assert edited == original
+    # The supplied conversation now matches the captured reply lineage, so this
+    # is no longer reply_conversation_mismatch. Pacing may still queue it.
+    result = core.send(client, 'follow the edit', 'follow-edit', conversation_id=edited,
+                       reply_to=human['message']['message_id'])
+    assert result['status'] in ('sent', 'queued')
+    assert result['conversation_id'] == original
+
+
 def test_reply_cannot_borrow_a_fresh_conversations_budget(setup_pair):
     core, transport, clock, client = setup_pair
     core.bot_exchange_policy(client, 202, enabled=True)
