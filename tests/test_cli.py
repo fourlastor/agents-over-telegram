@@ -37,6 +37,11 @@ def test_private_cli_setup_once_two_clients_and_pairing(tmp_path):
         assert result["connected"]
     command(state, "grant-peer", "--source-client-file", str(client_a), "--target-client-file", str(client_b))
     command(state, "allow-sender", "--client-file", str(client_a), "--sender-id", "202", "--bot")
+    policy_args = ("bot-exchange-policy", "--client-file", str(client_a), "--sender-id", "202")
+    assert not command(state, *policy_args)["enabled"]
+    assert command(state, *policy_args, "--enable")["enabled"]
+    assert command(state, *policy_args)["pair_send_limit"] == 32
+    assert not command(state, *policy_args, "--disable")["enabled"]
     command(state, "configure-peer", "--client-file", str(client_a), "--bot-username", "peer_bot", "--command", "review")
     assert len(command(state, "account-status")["accounts"]) == 1
     assert command(state, "pause", "--client-file", str(client_a))["paused"]

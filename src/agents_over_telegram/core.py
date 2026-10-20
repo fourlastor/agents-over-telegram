@@ -52,6 +52,8 @@ def _bounded(value: Any, maximum: int = 128) -> str:
 class Core:
     PAIR_TTL = 600
     MAX_CHAIN = 8
+    BOT_PAIR_SEND_LIMIT = 32
+    BOT_PAIR_WINDOW = 3600
     UNMATCHED_LIMIT = 100
     BOT_INTERVAL = 0.05
     DESTINATION_INTERVAL = 1.0
@@ -142,6 +144,18 @@ class Core:
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY, send_count INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS bot_exchange_policies (
+                    client_id TEXT NOT NULL REFERENCES clients(id), sender_id INTEGER NOT NULL,
+                    enabled INTEGER NOT NULL, PRIMARY KEY(client_id,sender_id)
+                );
+                CREATE TABLE IF NOT EXISTS bot_exchange_members (
+                    conversation_id TEXT NOT NULL, client_id TEXT NOT NULL REFERENCES clients(id),
+                    sender_id INTEGER NOT NULL,
+                    PRIMARY KEY(conversation_id,client_id,sender_id)
+                );
+                CREATE INDEX IF NOT EXISTS bot_exchange_pair
+                    ON bot_exchange_members(client_id,sender_id,conversation_id);
+                CREATE INDEX IF NOT EXISTS outbox_exchange_window ON outbox(conversation_id,created);
                 CREATE TABLE IF NOT EXISTS history_keys (
                     singleton INTEGER PRIMARY KEY CHECK(singleton=1), secret BLOB NOT NULL
                 );
@@ -323,6 +337,47 @@ class Core:
             db.execute('INSERT INTO peer_commands(client_id,bot_username,command) VALUES(?,?,?) ON CONFLICT(client_id) DO UPDATE SET bot_username=excluded.bot_username,command=excluded.command', (client_id, bot_username, command))
         return {'bot_username': bot_username, 'command': command}
 
+    def bot_exchange_policy(self, client_id, sender_id, enabled=None):
+        """Local operator control; never exposed as an agent MCP mutation."""
+        if not _integer(sender_id) or sender_id <= 0 or (enabled is not None and type(enabled) is not bool):
+            raise CoreError('invalid_sender')
+        with self._tx() as db:
+            self._binding(db, client_id)
+            if not db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=1',
+                              (client_id, sender_id)).fetchone():
+                raise CoreError('bot_sender_not_authorized')
+            if enabled is not None:
+                db.execute('''INSERT INTO bot_exchange_policies VALUES(?,?,?)
+                    ON CONFLICT(client_id,sender_id) DO UPDATE SET enabled=excluded.enabled''',
+                    (client_id, sender_id, int(enabled)))
+                # Include legacy reservations in the rolling budget. Never alter
+                # an existing conversation, inbox, outbox or chain counter.
+                db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
+                           (f'bot:{client_id}:{sender_id}', client_id, sender_id))
+                for admitted in db.execute('SELECT conversation_id,payload FROM inbox WHERE client_id=?', (client_id,)).fetchall():
+                    payload = json.loads(admitted['payload'])
+                    sender = _mapping(payload.get('sender'))
+                    if payload.get('origin') == 'telegram' and sender.get('id') == sender_id and sender.get('is_bot') is True:
+                        db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
+                                   (admitted['conversation_id'], client_id, sender_id))
+            policy = db.execute('SELECT enabled FROM bot_exchange_policies WHERE client_id=? AND sender_id=?',
+                                (client_id, sender_id)).fetchone()
+            usage = self._bot_pair_usage(db, client_id, sender_id, self.clock())
+        return {'sender_id': sender_id, 'enabled': bool(policy and policy[0]),
+                'max_sends_per_exchange': self.MAX_CHAIN, 'pair_send_limit': self.BOT_PAIR_SEND_LIMIT,
+                'window_seconds': self.BOT_PAIR_WINDOW, 'reserved_in_window': usage[0],
+                'retry_at': usage[1] if usage[0] >= self.BOT_PAIR_SEND_LIMIT else None}
+
+    def _bot_pair_usage(self, db, client_id, sender_id, now):
+        stamps = [r[0] for r in db.execute('''SELECT o.created FROM bot_exchange_members p
+            JOIN outbox o ON o.conversation_id=p.conversation_id
+            WHERE p.client_id=? AND p.sender_id=? AND o.created>?
+            ORDER BY o.created DESC''',
+            (client_id, sender_id, now - self.BOT_PAIR_WINDOW))]
+        # The newest Nth reservation must expire before the next one can fit.
+        return len(stamps), (stamps[self.BOT_PAIR_SEND_LIMIT - 1] + self.BOT_PAIR_WINDOW
+                             if len(stamps) >= self.BOT_PAIR_SEND_LIMIT else None)
+
     def unassigned(self, limit=20):
         if not _integer(limit) or not 1 <= limit <= self.UNMATCHED_LIMIT:
             raise CoreError('invalid_unassigned_limit')
@@ -478,17 +533,35 @@ class Core:
             return
         # A human message starts its own conversation unless it replies to a known
         # outbound message. Bot replies inherit a known conversation; unsolicited
-        # bot messages share one persistent chain and cannot reset limits by text.
+        # bot messages keep the legacy chain unless the operator enables bounded
+        # roots. Reply lineage and edits cannot mint another exchange budget.
         reply_to = _mapping(msg.get('reply_to_message')).get('message_id')
         known = db.execute('SELECT conversation_id FROM outbox WHERE chat_id=? AND thread_id=? AND message_id=? AND status=\'sent\' ORDER BY created DESC LIMIT 1', (chat_id, thread_id, reply_to)).fetchone() if _integer(reply_to) else None
         if known:
             conversation = known['conversation_id']
         elif sender['is_bot']:
             conversation = f'bot:{binding["client_id"]}:{sender_id}'
+            policy = db.execute('SELECT enabled FROM bot_exchange_policies WHERE client_id=? AND sender_id=?',
+                                (binding['client_id'], sender_id)).fetchone()
+            if policy and policy[0] and reply_to is None and kind == 'message':
+                conversation = f'bot-root:{binding["client_id"]}:{sender_id}:{msg["message_id"]}'
         elif sender_id == binding['owner_id']:
             conversation = f'tg:{chat_id}:{thread_id}:{msg["message_id"]}'
         else:
             conversation = f'participant:{binding["client_id"]}:{sender_id}'
+        if sender['is_bot'] and kind == 'edited_message':
+            for original in db.execute('SELECT payload,conversation_id FROM inbox WHERE client_id=? ORDER BY created,rowid',
+                                       (binding['client_id'],)):
+                prior = json.loads(original['payload'])
+                if (prior.get('origin') == 'telegram' and prior.get('message_id') == msg['message_id']
+                        and _mapping(prior.get('sender')).get('id') == sender_id):
+                    conversation = original['conversation_id']
+                    break
+        if sender['is_bot'] and db.execute('''SELECT 1 FROM bot_exchange_policies
+                WHERE client_id=? AND sender_id=? AND enabled=1''',
+                (binding['client_id'], sender_id)).fetchone():
+            db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
+                       (conversation, binding['client_id'], sender_id))
         payload = {'origin': 'telegram', 'kind': 'edited' if kind == 'edited_message' else 'message', 'update_id': update_id, 'message_id': msg['message_id'], 'chat_id': chat_id, 'thread_id': thread_id or None, 'sender': {'id': sender_id, 'is_bot': sender['is_bot'], 'username': _bounded(sender.get('username', ''), 64)}, 'text': text, 'reply_to': reply_to if _integer(reply_to) else None}
         stamp = msg.get('edit_date' if kind == 'edited_message' else 'date')
         event_at = stamp if _integer(stamp) and 0 < stamp <= now else now
@@ -745,17 +818,31 @@ class Core:
                     if not db.execute('SELECT 1 FROM grants WHERE source=? AND target=?', (client_id, recipient)).fetchone():
                         raise CoreError('peer_not_authorized')
                     binding = self._binding(db, recipient, usable=True)
+                reply_conversation = None
                 if reply_to is not None:
-                    known_incoming = db.execute('SELECT payload FROM inbox WHERE client_id=?', (recipient or client_id,)).fetchall()
-                    known = any(json.loads(r['payload']).get('message_id') == reply_to for r in known_incoming)
-                    known = known or db.execute('SELECT 1 FROM outbox WHERE chat_id=? AND thread_id=? AND message_id=? AND status=\'sent\'', (binding['chat_id'], binding['thread_id'], reply_to)).fetchone()
-                    if not known:
+                    for row in db.execute('SELECT payload,conversation_id FROM inbox WHERE client_id=? ORDER BY created,rowid',
+                                          (recipient or client_id,)):
+                        if json.loads(row['payload']).get('message_id') == reply_to:
+                            reply_conversation = row['conversation_id']
+                            break
+                    if reply_conversation is None:
+                        row = db.execute('SELECT conversation_id FROM outbox WHERE chat_id=? AND thread_id=? AND message_id=? AND status=\'sent\'',
+                                         (binding['chat_id'], binding['thread_id'], reply_to)).fetchone()
+                        if row:
+                            reply_conversation = row['conversation_id']
+                    if reply_conversation is None:
                         raise CoreError('unknown_reply')
-                conversation = self._conversation(db, client_id, conversation_id)
+                conversation = self._conversation(db, client_id, conversation_id if conversation_id is not None else reply_conversation)
+                if reply_conversation is not None and reply_conversation != conversation:
+                    raise CoreError('reply_conversation_mismatch')
                 db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
                 count = db.execute('SELECT send_count FROM conversations WHERE id=?', (conversation,)).fetchone()[0]
                 if count >= self.MAX_CHAIN:
                     raise CoreError('conversation_limit')
+                for pair in db.execute('SELECT client_id,sender_id FROM bot_exchange_members WHERE conversation_id=?',
+                                       (conversation,)).fetchall():
+                    if self._bot_pair_usage(db, pair['client_id'], pair['sender_id'], now)[0] >= self.BOT_PAIR_SEND_LIMIT:
+                        raise CoreError('bot_pair_limit')
                 outbox_id = 'out_' + secrets.token_hex(12)
                 publication = f'[Agent: {client["label"]} | shared bot @{account["username"]}]\n{text}'
                 peer = db.execute('SELECT * FROM peer_commands WHERE client_id=?', (client_id,)).fetchone() if recipient is None else None

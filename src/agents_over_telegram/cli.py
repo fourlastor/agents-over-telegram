@@ -91,7 +91,7 @@ def render_plugin(state_dir, client_file, output, name):
     if not (source / "plugin.json").is_file():
         raise CredentialError("plugin_template_missing_use_source_checkout")
     output.mkdir(parents=True, mode=0o700)
-    for relative in ("plugin.json", ".codex-plugin", "skills", "docs/OPERATIONS.md", "docs/LIVE_VALIDATION.md", "docs/COMPATIBILITY.md", "docs/RELAY.md", "docs/DIRECT_DISPATCH.md", "docs/MACOS_SERVICE.md"):
+    for relative in ("plugin.json", ".codex-plugin", "skills", "docs/OPERATIONS.md", "docs/LIVE_VALIDATION.md", "docs/COMPATIBILITY.md", "docs/RELAY.md", "docs/DIRECT_DISPATCH.md", "docs/MACOS_SERVICE.md", "docs/BOT_EXCHANGES.md"):
         src, dst = source / relative, output / relative
         if src.is_dir():
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
@@ -138,7 +138,7 @@ def parser():
     create = sub.add_parser("client-create")
     create.add_argument("--label", required=True)
     create.add_argument("--client-file", type=Path, required=True)
-    for name in ("pair-begin", "status", "history", "pause", "resume", "disconnect", "mcp", "allow-sender"):
+    for name in ("pair-begin", "status", "history", "pause", "resume", "disconnect", "mcp", "allow-sender", "bot-exchange-policy"):
         command = sub.add_parser(name)
         command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume"})
         if name == "status":
@@ -151,6 +151,11 @@ def parser():
         if name == "allow-sender":
             command.add_argument("--sender-id", type=int, required=True)
             command.add_argument("--bot", action="store_true")
+        if name == "bot-exchange-policy":
+            command.add_argument("--sender-id", type=int, required=True)
+            change = command.add_mutually_exclusive_group()
+            change.add_argument("--enable", dest="exchange_enabled", action="store_const", const=True)
+            change.add_argument("--disable", dest="exchange_enabled", action="store_const", const=False)
     confirm = sub.add_parser("pair-confirm")
     confirm.add_argument("--pairing-id", required=True)
     confirm.add_argument("--confirm", action="store_true", help="Confirm observed sender and destination after local inspection")
@@ -320,6 +325,8 @@ def run(args):
         return core.configure_peer_command(client_id, args.bot_username, args.peer_command)
     if args.command == "allow-sender":
         return core.allow_sender(client_id, args.sender_id, is_bot=args.bot)
+    if args.command == "bot-exchange-policy":
+        return core.bot_exchange_policy(client_id, args.sender_id, enabled=args.exchange_enabled)
     if args.command in {"pause", "resume"}:
         return core.pause(client_id, paused=args.command == "pause" and not args.resume)
     if args.command == "disconnect":
