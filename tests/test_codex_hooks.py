@@ -105,3 +105,17 @@ def test_codex_hook_uses_payload_cwd_and_stays_silent_elsewhere(env, tmp_path):
                             input=json.dumps({**payload(env, 'UserPromptSubmit'), 'cwd': str(sub)}),
                             capture_output=True, text=True, cwd=sub, timeout=60)
     assert (result.returncode, result.stdout) == (0, '')
+
+
+def test_plugin_launcher_finds_the_project_from_the_hook_input_cwd(env, tmp_path):
+    inject(env, 'Hello')
+    elsewhere = tmp_path / 'hook-cwd'
+    elsewhere.mkdir()
+    clean = {k: v for k, v in os.environ.items() if k not in ('AOT_PROJECT_DIR', 'CLAUDE_PROJECT_DIR')}
+    result = subprocess.run(['/usr/bin/python3', str(ROOT / 'scripts' / 'aot_host_launch.py'), 'hook', '--host', 'codex',
+                             '--collect-interval', '0.001'],
+                            input=json.dumps(payload(env, 'PostToolUse', tool_name='shell')),
+                            capture_output=True, text=True, cwd=elsewhere, env=clean, timeout=60)
+    assert result.returncode == 0 and result.stderr == ''
+    answer = json.loads(result.stdout)
+    assert '1 new Telegram message' in answer['hookSpecificOutput']['additionalContext']

@@ -58,18 +58,18 @@ The wake uses `/usr/bin/open -a <validated app bundle> codex://threads/wake/<UUI
 
 `codex queue` is a queue, not a promise of mid-turn steering. In the macOS live check, an accepted notice stayed queued while the target continued using tools. The desktop exposed a manual “Steer” action. Clicking it can unblock that notice, but does not validate automatic busy-session delivery.
 
-An operator can add a separate `PostToolUse` hook to notify the intended session at the next supported tool boundary. This workaround is not included in the plugin. The plugin's native queue remains the idle wake path. A hook does not interrupt an in-flight model request or a long-running tool.
+Since version 0.8.0 the Codex plugin ships these hooks itself (`codex/hooks.json`, referenced from `.codex-plugin/plugin.json`). They add a fixed notice at `SessionStart`, `UserPromptSubmit`, `PostToolUse` and `Stop`. The plugin's native queue remains the idle wake path. A hook does not interrupt an in-flight model request or a long-running tool. See [agent hosts](HOSTS.md#codex) for setup.
 
-For such an integration:
+The shipped hooks follow the rules learned from the earlier operator-installed hook:
 
-- Scope the hook to the operator-selected session, exact project and existing connection. Respect pause, suspension and active delivery leases.
-- Check only pending delivery metadata. Inject a fixed notice to use the scoped Telegram tools; never inject Telegram bodies as trusted hook context.
-- Do not collect, publish, lease or acknowledge from the hook. Suppress notices for Telegram tool calls and throttle reminders for the same pending set.
-- Use the prepared plugin Python runtime. Check the actual interpreter used by the hook, not only `python3` in an interactive shell. An Apple Python 3.9 command failed to read the live SQLite database in the local check; the plugin runtime succeeded.
-- Have the human review and trust the exact hook definition. `/hooks` is a **CLI** command; it was unavailable in the tested desktop UI. Open the CLI in the exact configured project to review it. Do not edit trust hashes or bypass hook trust.
-- Verify saved trust, actual hook execution, and handling in the same active target turn. Reopen the desktop session if needed to load the configuration; a restart alone is not evidence that a hook ran.
+- They act only for the exact project folder from the hook input (`cwd`) and its existing connection. They respect pause, suspension and active delivery leases.
+- They inject a fixed notice, never Telegram text. They never send, lease or acknowledge.
+- They announce each delivery once, shared with every other push surface, and stay quiet after Telegram tool calls. A `Stop` hook continues a turn at most once in a row.
+- They collect from Telegram at most every 10 seconds, because Codex has no background monitor. The shared collector lock prevents competition with a running `relay-desktop --collect`. The earlier operator hook did not collect; it relied on the listener for intake.
+- They run through `scripts/aot_host_launch.py`, which only reads the project's `.aot-runtime.json` and then starts the prepared runtime. The runtime, not the system `python3`, reads the SQLite state. (An Apple Python 3.9 failed to read the live SQLite database in an earlier check.)
+- The human reviews and trusts the hook definitions. `/hooks` is a **CLI** command; it was unavailable in the tested desktop UI. Do not edit trust hashes or bypass hook trust.
 
-The local macOS workaround passed a new Telegram test during an active work turn: one reply, one acknowledgment, zero pending messages, and 24.603 seconds from intake to sent receipt. No manual Steer or inter-task message forwarded the test. These results apply to that separate hook integration, not to the shipped queue-only listener. See the [evidence boundary](COMPATIBILITY.md#macos-follow-up-idle-and-busy-tests).
+The earlier local macOS workaround passed a new Telegram test during an active work turn: one reply, one acknowledgment, zero pending messages, and 24.603 seconds from intake to sent receipt. That evidence applies to the operator-installed hook. The shipped hooks were tested offline against Codex's documented hook input and output, but not yet in a live Codex run; see [what was tested](HOSTS.md#what-was-tested) and the [evidence boundary](COMPATIBILITY.md#macos-follow-up-idle-and-busy-tests).
 
 [Official Codex hook documentation](https://learn.chatgpt.com/docs/hooks) defines hook trust, `PostToolUse` output, and supported tool boundaries.
 

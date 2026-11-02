@@ -22,11 +22,22 @@ PROFILE = ".aot-profile.json"
 COMMANDS = ("mcp", "watch", "hook")
 
 
-def _project():
+MAX_HOOK_INPUT = 1024 * 1024
+
+
+def _project(hook_input=None):
     for key in ("AOT_PROJECT_DIR", "CLAUDE_PROJECT_DIR"):
         value = os.environ.get(key, "")
         if value:
             return value
+    # Codex documents the session folder as "cwd" in every hook input.
+    if hook_input:
+        try:
+            cwd = json.loads(hook_input).get("cwd")
+        except (ValueError, AttributeError, UnicodeError):
+            cwd = None
+        if isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd:
+            return cwd
     return os.getcwd()
 
 
@@ -94,7 +105,12 @@ def main(argv):
     # an event (Claude Code monitors) should not be woken in unrelated projects.
     idle = "--idle-if-unconfigured" in argv[1:]
     rest = [arg for arg in argv[1:] if arg != "--idle-if-unconfigured"]
-    project = os.path.realpath(_project())
+    hook_input = None
+    if command == "hook":
+        hook_input = sys.stdin.buffer.read(MAX_HOOK_INPUT + 1)
+        if len(hook_input) > MAX_HOOK_INPUT:
+            return 0
+    project = os.path.realpath(_project(hook_input))
     executable, problem = _executable(project)
     if executable is None:
         if command == "mcp":
@@ -107,8 +123,6 @@ def main(argv):
                                  "and not writable by others, then run 'aot setup --host ...' in this folder again.\n")
             return 2
         # Hooks and monitors stay silent in projects that do not use Telegram.
-        if command == "hook":
-            _drain_stdin()
         if command == "watch" and idle:
             try:
                 while True:
@@ -119,20 +133,19 @@ def main(argv):
     os.chdir(project)
     args = [executable, command] + rest
     if command == "hook":
-        args += ["--project-dir", project]
+        # The input was already read to find the project, so pass it on.
+        import subprocess
+        result = subprocess.run(args + ["--project-dir", project], input=hook_input,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+        if result.returncode == 0 and result.stdout:
+            sys.stdout.buffer.write(result.stdout)
+            sys.stdout.flush()
+        return 0
     try:
         os.execv(executable, args)
     except OSError:
         sys.stderr.write("The prepared Agents over Telegram runtime could not be started.\n")
         return 0 if command == "hook" else 2
-
-
-def _drain_stdin():
-    try:
-        while sys.stdin.read(65536):
-            pass
-    except (OSError, ValueError, UnicodeError):
-        pass
 
 
 def _run(argv):
