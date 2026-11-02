@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/scripts/aot_host_launch.py\" hook --host codex", "timeout": 10}]}
+    ],
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/scripts/aot_host_launch.py\" hook --host codex --collect-interval 10", "timeout": 20}]}
+    ],
+    "PostToolUse": [
+      {"hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/scripts/aot_host_launch.py\" hook --host codex --collect-interval 10", "timeout": 20}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "python3 \"${PLUGIN_ROOT}/scripts/aot_host_launch.py\" hook --host codex --collect-interval 10", "timeout": 20}]}
+    ]
+  }
+}

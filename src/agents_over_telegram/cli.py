@@ -218,6 +218,8 @@ def parser():
     hook = sub.add_parser("hook", help="Answer one Claude Code or Codex hook event from stdin; never sends or acknowledges")
     hook.add_argument("--host", choices=["claude", "codex"], required=True)
     hook.add_argument("--project-dir", type=Path, help="Exact project directory; defaults to the host's project or cwd")
+    hook.add_argument("--collect-interval", type=float, default=0,
+                      help="Also collect Telegram updates when the last attempt is older than this many seconds (0 = never)")
     sub.add_parser("demo", help="Run a standalone temporary two-agent offline demonstration")
     return p
 

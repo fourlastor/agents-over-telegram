@@ -82,7 +82,30 @@ def hook_answer(args, raw: str) -> dict | None:
         return None
     core = Core(state, _NoTransport(), recover_sends=False)
     client_id = _client(core, Path(profile['client_file']), profile['client_id'])
+    _maybe_collect(core, state, profile['mode'] == 'fake', getattr(args, 'collect_interval', 0))
     return hook_response(core, client_id, event, payload)
+
+
+def _maybe_collect(core, state: Path, fake: bool, interval) -> None:
+    """Collect once if nobody tried recently. Hosts without a background watcher
+    (Codex) use this so a busy turn still sees new messages. The shared
+    collector lock keeps this from competing with a running listener."""
+    if not isinstance(interval, (int, float)) or isinstance(interval, bool) or interval <= 0:
+        return
+    with core._db() as db:
+        row = db.execute('SELECT last_attempt FROM account WHERE singleton=1').fetchone()
+    if row is None or (row['last_attempt'] is not None and core.clock() - row['last_attempt'] < interval):
+        return
+    from .cli import LazyTransport, _mode
+    _mode(state, fake)
+    core.transport = LazyTransport(state, fake)
+    try:
+        core.collect(timeout=0)
+    except Exception:
+        # Intake errors are recorded by the core; the hook still answers.
+        pass
+    finally:
+        core.transport = _NoTransport()
 
 
 def run_hook(args) -> dict | None:
