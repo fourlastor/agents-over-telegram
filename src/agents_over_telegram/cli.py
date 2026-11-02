@@ -132,15 +132,24 @@ def parser():
     setup.add_argument("--client-file", type=Path, help="Reuse this existing protected client file")
     setup.add_argument("--receiver-handoff-confirmed", action="store_true")
     setup.add_argument("--prepare-only", action="store_true", help="Prepare profile and pairing without collecting or confirming")
+    setup.add_argument("--host", choices=["codex", "claude", "pi", "amp"], default="codex",
+                       help="Agent host to prepare; codex writes .codex/config.toml, plugin hosts use the runtime pointer")
     register = sub.add_parser("account-register", help="Prompt privately for one bot token, validate without polling")
     register.add_argument("--receiver-handoff-confirmed", action="store_true", help="Assert other receivers are stopped; webhooks are never changed")
     sub.add_parser("account-status")
     create = sub.add_parser("client-create")
     create.add_argument("--label", required=True)
     create.add_argument("--client-file", type=Path, required=True)
-    for name in ("pair-begin", "status", "history", "pause", "resume", "disconnect", "mcp", "allow-sender", "bot-exchange-policy"):
+    for name in ("pair-begin", "status", "history", "pause", "resume", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "watch"):
         command = sub.add_parser(name)
-        command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume"})
+        command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume", "mcp", "watch"})
+        if name == "watch":
+            command.add_argument("--collect", action="store_true", help="Also long-poll the shared Telegram collector; never sends or acknowledges")
+            command.add_argument("--duration", type=float, default=0, help="Seconds to watch; 0 runs until stopped")
+            command.add_argument("--interval", type=float, default=2.0, help="Seconds between local inbox checks")
+            command.add_argument("--poll-timeout", type=int, default=10, help="Telegram long-poll seconds when collecting (0-20)")
+            command.add_argument("--format", choices=["text", "jsonl"], default="text")
+            command.add_argument("--no-backlog", action="store_true", help="Announce only deliveries that arrive after start")
         if name == "status":
             command.add_argument("--human", action="store_true", help="Show a concise local status instead of JSON")
         if name == "history":
@@ -206,6 +215,9 @@ def parser():
     desktop.add_argument("--codex-home", type=Path, help="Existing Codex home used by the running desktop")
     desktop.add_argument("--duration", type=float, default=55, help="Listening seconds; 0 continues until explicitly stopped")
     desktop.add_argument("--collect", action="store_true", help="Also collect Telegram updates; never flush or acknowledge work")
+    hook = sub.add_parser("hook", help="Answer one Claude Code or Codex hook event from stdin; never sends or acknowledges")
+    hook.add_argument("--host", choices=["claude", "codex"], required=True)
+    hook.add_argument("--project-dir", type=Path, help="Exact project directory; defaults to the host's project or cwd")
     sub.add_parser("demo", help="Run a standalone temporary two-agent offline demonstration")
     return p
 
@@ -241,12 +253,15 @@ def run(args):
     if args.command == "setup":
         from .onboarding import setup
         return setup(args)
+    if args.command == "hook":
+        from .hosts import run_hook
+        return run_hook(args)
     from .onboarding import resolve_args
     args = resolve_args(args)
     state_dir = private_directory(args.state_dir)
     _mode(state_dir, args.fake)
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
-                and args.command not in {"history", "status", "account-status", "bot-exchange-policy"}))
+                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "watch"}))
     if args.command.startswith("relay-"):
         from .relay import RelayStore
         store = RelayStore(core, project_validator=lambda binding: _relay_project_valid(core, binding, args.fake))
@@ -314,6 +329,8 @@ def run(args):
         return core.grant_peer(source, target)
     if args.command == "resolve":
         return core.resolve_unknown(args.outbox_id, args.resolution, message_id=args.message_id)
+    if args.client_file is None:
+        raise CredentialError("client_file_required")
     client_id = _client(core, args.client_file, args.expected_client_id)
     if args.command == "pair-begin":
         return core.connection_begin(client_id)
@@ -335,6 +352,18 @@ def run(args):
         if args.fake:
             raise CredentialError("fake_plugin_render_refused")
         return render_plugin(state_dir, args.client_file, args.output, args.name)
+    if args.command == "watch":
+        from .push import watch
+        def emit(event):
+            if args.format == "jsonl":
+                print(json.dumps(event, separators=(",", ":")), flush=True)
+            elif event.get("type") == "telegram_messages":
+                print(event["notice"], flush=True)
+            else:
+                print("[Agents over Telegram] Watching stopped: " + event.get("reason", "unknown") + ".", flush=True)
+        watch(core, client_id, emit, collect=args.collect, duration=args.duration, interval=args.interval,
+              poll_timeout=args.poll_timeout, announce_backlog=not args.no_backlog)
+        return None
     if args.command == "mcp":
         from .mcp_server import serve
         serve(state_dir, args.client_file, transport=core.transport)
@@ -352,6 +381,8 @@ def main():
                 from .onboarding import human_status
                 print(human_status(value["connection"]))
                 print("Next: " + json.dumps(value["next_step"], ensure_ascii=True)[1:-1])
+            elif args.command == "hook":
+                print(json.dumps(value, separators=(",", ":")))
             elif args.command == "status" and args.human:
                 from .onboarding import human_status
                 print(human_status(value))
