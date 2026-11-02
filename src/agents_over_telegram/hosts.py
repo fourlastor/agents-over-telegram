@@ -29,12 +29,18 @@ def read_runtime_pointer(project: Path) -> Path | None:
     if not path.exists() and not path.is_symlink():
         return None
     try:
-        value = json.loads(_read_local(path))
-        executable = Path(value['executable'])
-        if set(value) != {'version', 'executable'} or value['version'] != 1 or not executable.is_absolute():
+        # Same rule as the plugin launcher: owned, single link, not group or world writable.
+        if path.lstat().st_mode & 0o022:
             return None
-        return executable
-    except (CredentialError, ValueError, TypeError, KeyError):
+        value = json.loads(_read_local(path))
+        if not isinstance(value, dict) or set(value) != {'version', 'executable'}:
+            return None
+        executable = value['executable']
+        if (type(value['version']) is not int or value['version'] != 1 or not isinstance(executable, str)
+                or '\x00' in executable or not Path(executable).is_absolute()):
+            return None
+        return Path(executable)
+    except (CredentialError, OSError, ValueError, TypeError, KeyError):
         return None
 
 

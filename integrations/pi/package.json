@@ -1,0 +1,13 @@
+{
+  "name": "agents-over-telegram-pi",
+  "version": "0.8.0",
+  "private": true,
+  "description": "Push delivery of Agents over Telegram notices into running Pi sessions",
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": ["./agents-over-telegram.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

@@ -361,8 +361,12 @@ def run(args):
                 print(event["notice"], flush=True)
             else:
                 print("[Agents over Telegram] Watching stopped: " + event.get("reason", "unknown") + ".", flush=True)
+        parent = os.getppid()
+        # A host can die without stopping its watcher (for example on SIGKILL).
+        # Re-parenting means the host is gone, so stop instead of polling forever.
         watch(core, client_id, emit, collect=args.collect, duration=args.duration, interval=args.interval,
-              poll_timeout=args.poll_timeout, announce_backlog=not args.no_backlog)
+              poll_timeout=args.poll_timeout, announce_backlog=not args.no_backlog,
+              keep_running=lambda: os.getppid() == parent)
         return None
     if args.command == "mcp":
         from .mcp_server import serve
@@ -371,9 +375,44 @@ def run(args):
     raise CredentialError("unknown_command")
 
 
+def _hook_invocation(argv):
+    """True when argv selects the hook command, even if its options are invalid."""
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--state-dir":
+            index += 2
+        elif arg == "--fake" or arg.startswith("--state-dir="):
+            index += 1
+        else:
+            return arg == "hook"
+    return False
+
+
 def main():
     from .core import CoreError
-    args = parser().parse_args()
+    try:
+        args = parser().parse_args()
+    except SystemExit:
+        # Exit status 2 blocks some host hook events (for example a user prompt).
+        # A hook from a newer or older plugin must never do that.
+        if _hook_invocation(sys.argv[1:]):
+            return 0
+        raise
+    if args.command == "hook":
+        # run_hook already turns failures into no output; this also covers a
+        # host that closed the pipe before reading the answer.
+        try:
+            value = run(args)
+            if value is not None:
+                print(json.dumps(value, separators=(",", ":")), flush=True)
+        except Exception:
+            try:
+                # Avoid a second failing flush at interpreter exit (status 120).
+                os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+            except (OSError, ValueError):
+                pass
+        return 0
     try:
         value = run(args)
         if value is not None:
@@ -381,8 +420,6 @@ def main():
                 from .onboarding import human_status
                 print(human_status(value["connection"]))
                 print("Next: " + json.dumps(value["next_step"], ensure_ascii=True)[1:-1])
-            elif args.command == "hook":
-                print(json.dumps(value, separators=(",", ":")))
             elif args.command == "status" and args.human:
                 from .onboarding import human_status
                 print(human_status(value))

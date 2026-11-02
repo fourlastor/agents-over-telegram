@@ -17,13 +17,19 @@ import time
 from typing import Any, Callable
 
 from .core import CoreError, _mapping
+from .credentials import CredentialError
+from .transport import TransportError
 
 SURFACES = ('watch', 'hook')
 MAX_SENDERS = 5
 _USERNAME = re.compile(r'[A-Za-z0-9_]{1,64}')
 # Errors that mean this client can never be served again by this process.
-FATAL_CODES = {'client_revoked', 'unknown_client', 'authentication_failed', 'not_connected',
-               'account_not_registered'}
+# 'not_connected' is not fatal: an agent can pair from inside a running session,
+# and the watcher should start announcing once the pairing is confirmed.
+FATAL_CODES = {'client_revoked', 'unknown_client', 'authentication_failed'}
+# Telegram collection retries back off from the first value up to the maximum.
+COLLECT_BACKOFF = 5.0
+COLLECT_BACKOFF_MAX = 300.0
 
 NOTICE_GUIDANCE = (
     'Use your scoped Telegram tools now: call messages_poll, handle each delivery, '
@@ -117,8 +123,12 @@ def pending_summary(core, client_id: str) -> dict[str, Any] | None:
 def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool = False,
           duration: float = 0, interval: float = 2.0, poll_timeout: int = 10,
           clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
-          announce_backlog: bool = True) -> dict[str, Any]:
+          announce_backlog: bool = True,
+          keep_running: Callable[[], bool] | None = None) -> dict[str, Any]:
     """Emit one event per batch of new deliveries until the duration ends.
+
+    ``keep_running`` is checked once per cycle; the CLI uses it to stop when the
+    host process that started the watcher has gone away.
 
     ``duration`` 0 runs until the process is stopped. With ``collect`` the watcher
     long-polls the shared collector; another process that holds the collector lock
@@ -131,39 +141,65 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
     if not isinstance(poll_timeout, int) or isinstance(poll_timeout, bool) or not 0 <= poll_timeout <= 20:
         raise CoreError('invalid_watch_poll_timeout')
     ensure_tables(core)
+    events = 0
+
+    def stopped(code):
+        emit({'type': 'watch_stopped', 'reason': code})
+        return {'events': events, 'reason': code}
+
     if not announce_backlog:
         # Treat already waiting work as known; only later arrivals are announced.
-        with core._tx() as db:
-            core._binding(db, client_id)
-            db.execute('''INSERT OR IGNORE INTO push_announcements(inbox_id,client_id,surface,announced)
-                SELECT id,client_id,'watch',? FROM inbox WHERE client_id=? AND acknowledged=0''',
-                       (core.clock(), client_id))
+        try:
+            with core._tx() as db:
+                core._client(db, client_id)
+                db.execute('''INSERT OR IGNORE INTO push_announcements(inbox_id,client_id,surface,announced)
+                    SELECT id,client_id,'watch',? FROM inbox WHERE client_id=? AND acknowledged=0''',
+                           (core.clock(), client_id))
+        except CoreError as error:
+            if error.code in FATAL_CODES:
+                return stopped(error.code)
+            raise
     deadline = clock() + duration if duration else None
-    events = 0
+    failures = 0
+    next_collect = clock()
     while True:
-        collected = False
-        if collect:
+        if keep_running is not None and not keep_running():
+            return {'events': events, 'reason': 'parent_exited'}
+        waited = False
+        if collect and clock() >= next_collect:
+            timeout = poll_timeout
+            if deadline is not None:
+                # Do not let a long poll run past the requested duration.
+                timeout = max(0, min(timeout, int(deadline - clock())))
+            started = clock()
             try:
-                result = core.collect(timeout=poll_timeout)
-                collected = result.get('status') == 'ok'
-            except CoreError:
+                result = core.collect(timeout=timeout)
+            except (CoreError, CredentialError, TransportError):
                 # The core records intake errors; queued local work stays usable.
-                pass
+                # Back off so a broken connection is not retried every interval.
+                failures += 1
+                next_collect = clock() + min(COLLECT_BACKOFF_MAX, COLLECT_BACKOFF * 2 ** min(failures - 1, 16))
+            else:
+                if result.get('status') == 'ok':
+                    failures = 0
+                    # Only a poll that really blocked replaces the pacing sleep.
+                    # Fake transports and immediate answers return at once.
+                    waited = clock() - started >= interval
         try:
             event = claim_new(core, client_id, 'watch')
         except CoreError as error:
             if error.code in FATAL_CODES:
-                emit({'type': 'watch_stopped', 'reason': error.code})
-                return {'events': events, 'reason': error.code}
+                return stopped(error.code)
             event = None
         if event is not None:
             emit(event)
             events += 1
         if deadline is not None and clock() >= deadline:
             return {'events': events, 'reason': 'duration_elapsed'}
-        if not collected or poll_timeout == 0:
-            # A long poll already waited; otherwise pace the shared database checks.
-            sleep(interval)
+        if not waited:
+            # Pace the shared database checks, without passing the deadline.
+            pause = interval if deadline is None else max(0.0, min(interval, deadline - clock()))
+            sleep(pause)
 
 
 # Claude Code and Codex share this hook input and output shape.

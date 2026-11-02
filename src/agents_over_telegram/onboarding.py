@@ -244,8 +244,11 @@ def setup(args):
     if host == 'codex':
         expected = _entry(state, client, fake)
         config_path, old_config, new_config = _config_plan(project, expected)
+    elif host in ('pi', 'amp'):
+        from .host_config import json_config_plan
+        config_path, old_config, new_config = json_config_plan(project, host, _entry(state, client, fake))
     else:
-        # Plugin hosts start the runtime through the project runtime pointer.
+        # The Claude Code plugin starts the runtime through the project runtime pointer.
         _check_directory(project)
         config_path = old_config = new_config = None
     from .hosts import RUNTIME_POINTER, runtime_pointer
