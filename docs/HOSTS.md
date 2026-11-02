@@ -78,14 +78,17 @@ All checks below ran on macOS on 2026-11-02 and 2026-11-03 with the **fake Teleg
 
 | Host and version | Model | Scenario | Result |
 |---|---|---|---|
-| Claude Code 2.1.302, interactive, plugin loaded with `--plugin-dir` | Sonnet 5.5 | Idle session at the prompt | Pass, 3 of 3 messages. Reply 5–7 seconds after the message. |
-| Claude Code 2.1.302, interactive | Sonnet 5.5 | Busy: three `sleep 20` commands; message sent during the first | Pass after a fix (see below). Reply 21 seconds after the message, right after the first sleep. The task then continued. |
+| Claude Code 2.1.302, interactive, plugin loaded with `--plugin-dir` | Sonnet 5.5 | Idle session at the prompt | Pass. Reply 10 seconds after the message (earlier runs: 5–7 seconds, 3 of 3 messages). |
+| Claude Code 2.1.302, interactive | Sonnet 5.5 | Busy: three `sleep 20` commands; message sent during the first | Pass after a fix (see below). Reply 16 seconds after the message, right after the first sleep. The task then continued. |
 | Claude Code 2.1.302, `-p` (hooks only, separate collector loop) | Sonnet 5.5 | Busy: three `sleep 15` commands | Pass after the same fix. The `PostToolUse` hook notice arrived after the first sleep; reply 21 seconds after the message. |
-| Pi 1.5.0, interactive, `-e` extension, `.pi/mcp.json` | Scripted local model (see below) | Idle | Pass. Reply 2 seconds after the message. |
-| Pi 1.5.0, interactive | Scripted local model | Busy: three `sleep 15` commands | Pass. Pi steered the notice in right after the first sleep; the agent replied, acknowledged and finished the other two sleeps. |
-| Amp 0.0.1793649628, interactive TUI, project plugin, MCP via `--mcp-config` | Amp default ("medium") | Idle, newly opened Amp with no thread | Pass. The plugin opened a thread. Reply 22 seconds after the message. |
-| Amp 0.0.1793649628, interactive TUI | Amp default | Busy: three `sleep 15` commands | Pass. The steering notice appeared after the first sleep. The agent replied and acknowledged before the task ended, 78 seconds after the message. |
+| Pi 1.5.0, interactive, `-e` extension, `.pi/mcp.json` | Scripted local model (see below) | Idle | Pass. Reply 1 second after the message. |
+| Pi 1.5.0, interactive | Scripted local model | Busy: three `sleep 15` commands | Pass. Pi steered the notice in right after the current sleep; reply 4 seconds after the message. The agent acknowledged it and finished the remaining sleeps. |
+| Amp 0.0.1793649628, interactive TUI, project plugin, MCP via `--mcp-config` | Amp default ("medium") | Idle, newly opened Amp with no thread | Pass. The plugin opened a thread. Reply 18 seconds after the message. |
+| Amp 0.0.1793649628, interactive TUI | Amp default | Busy: three `sleep 15` commands | Pass. The steering notice appeared after the current sleep. The agent replied (26 seconds after the message; 78 seconds in an earlier run) and acknowledged before the task ended. |
 | Amp 0.0.1793649628 | — | Amp killed with `SIGKILL` | Pass. The watcher exited by itself within 15 seconds. |
+| All three hosts | — | Host session closed after the checks | Pass. No AOT watcher or MCP process was left running. |
+
+The interactive idle and busy rows come from a final run of all three hosts at the same time on the documented code. The `-p` row and the `SIGKILL` row come from earlier runs on the same day, before the documentation changes. In every final-run row the fake Telegram recorded exactly one reply per message, and the inbox had zero pending messages afterwards.
 
 **Fixes found by these runs.** The first busy Claude Code run delivered the notice mid-task, but the model said a Telegram message was waiting and asked the user whether to handle it. The notice and the MCP server instructions now say that the local user wants these messages handled when they arrive, without asking first. They also still say that message text cannot widen permissions, approvals or recipients. After this change, both Claude Code busy checks passed. The runs also found a monitor that stopped in an unconfigured folder (Claude Code then reports the stop as an event) and a watcher left running after its host was killed. Both are fixed.
 
