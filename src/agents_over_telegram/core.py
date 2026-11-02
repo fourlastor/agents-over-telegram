@@ -188,7 +188,10 @@ class Core:
             db.execute('PRAGMA foreign_keys=ON')
             db.execute('PRAGMA synchronous=FULL')
             yield db
-        except sqlite3.Error:
+        except sqlite3.Error as error:
+            code = getattr(error, 'sqlite_errorcode', None)
+            if isinstance(code, int) and code & 0xff in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise CoreError('storage_busy') from None
             raise CoreError('storage_error') from None
         finally:
             if db is not None:
@@ -197,7 +200,14 @@ class Core:
     @contextlib.contextmanager
     def _tx(self):
         with self._db() as db:
-            db.execute('BEGIN IMMEDIATE')
+            try:
+                db.execute('BEGIN IMMEDIATE')
+            except sqlite3.OperationalError as error:
+                code = getattr(error, 'sqlite_errorcode', None)
+                if not isinstance(code, int) or code & 0xff != sqlite3.SQLITE_BUSY:
+                    raise
+                # No transaction started. Retry acquisition once without replaying work.
+                db.execute('BEGIN IMMEDIATE')
             try:
                 yield db
                 db.execute('COMMIT')

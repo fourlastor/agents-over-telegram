@@ -51,6 +51,7 @@ ERROR_MESSAGES = {
     "history_cursor_invalid": "This history cursor is invalid or unavailable to this local client.",
     "history_cursor_expired": "This history snapshot expired; start again without a cursor.",
     "invalid_history_options": "History options are outside the allowed bounds.",
+    "storage_busy": "Local storage is busy. Inspect the existing operation outcome before any retry.",
     "storage_error": "Local storage is unavailable. Check the private state directory.",
     "connection_suspended": "This destination is suspended. Check connection_status for the reason. The local owner clears it with \"aot unsuspend\" on this computer, or pairs again if the group moved.",
     "already_connected": "This local client already has a connected destination.",
