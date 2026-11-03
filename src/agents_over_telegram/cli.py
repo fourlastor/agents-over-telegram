@@ -137,7 +137,7 @@ def parser():
     create = sub.add_parser("client-create")
     create.add_argument("--label", required=True)
     create.add_argument("--client-file", type=Path, required=True)
-    for name in ("pair-begin", "status", "history", "pause", "resume", "unsuspend", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "watch"):
+    for name in ("pair-begin", "status", "history", "pause", "resume", "unsuspend", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "watch", "conversation-budget"):
         command = (sub.add_parser(name, help="Owner only: check with Telegram that a suspended destination works again, then clear it")
                    if name == "unsuspend" else sub.add_parser(name))
         command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume", "unsuspend", "mcp", "watch"})
@@ -166,6 +166,11 @@ def parser():
             change = command.add_mutually_exclusive_group()
             change.add_argument("--enable", dest="exchange_enabled", action="store_const", const=True)
             change.add_argument("--disable", dest="exchange_enabled", action="store_const", const=False)
+        if name == "conversation-budget":
+            command.add_argument("--conversation-id", required=True)
+            command.add_argument("--additional-sends", type=int)
+            command.add_argument("--duration-seconds", type=int)
+            command.add_argument("--reason")
     confirm = sub.add_parser("pair-confirm")
     confirm.add_argument("--pairing-id", required=True)
     confirm.add_argument("--confirm", action="store_true", help="Confirm observed sender and destination after local inspection")
@@ -264,7 +269,7 @@ def run(args):
     state_dir = private_directory(args.state_dir)
     _mode(state_dir, args.fake)
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
-                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "watch"}))
+                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "watch", "conversation-budget"}))
     if args.command.startswith("relay-"):
         from .relay import RelayStore
         store = RelayStore(core, project_validator=lambda binding: _relay_project_valid(core, binding, args.fake))
@@ -349,6 +354,10 @@ def run(args):
         return core.bot_exchange_policy(client_id, args.sender_id, enabled=args.exchange_enabled)
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
+    if args.command == "conversation-budget":
+        return core.conversation_budget(client_id, args.conversation_id,
+                                        additional_sends=args.additional_sends,
+                                        duration_seconds=args.duration_seconds, reason=args.reason)
     if args.command in {"pause", "resume"}:
         return core.pause(client_id, paused=args.command == "pause" and not args.resume)
     if args.command == "disconnect":

@@ -11,7 +11,7 @@ This opt-in policy separates new external bot requests without deleting the old 
 | Bot replies to a known sent publication | Inherit that publication's conversation, including an exhausted legacy chain. |
 | Any sender edits an already captured message | Reuse its original conversation, even after policy disable or unknown-send recovery. |
 | Unseen edit or reply to an unknown publication | Use the legacy chain; do not mint a new root. |
-| Any exchange | Keep the existing permanent eight-send chain cap. ACK, time, restart, and policy toggles do not reset it. |
+| Any exchange without an explicit operator allowance | Keep the permanent eight-send chain cap. ACK, time, restart, and policy toggles do not reset it. |
 | Participating external bot pair | Allow at most 32 reserved sends in a rolling hour across its exchanges. Attach a pair to a human-started conversation when a real bot reply joins it. |
 | Outbound reply with an explicit different conversation | Reject it with `reply_conversation_mismatch`. Without an explicit conversation, use the actual reply lineage. |
 
@@ -22,6 +22,21 @@ Reservations count queued, sent, rejected and unknown publications. No automatic
 Reaching the chain cap returns `conversation_limit`. Reaching the rolling pair cap returns `bot_pair_limit`. Both failures occur before an outbox intent is created. There is no automatic retry, reset, relay through another client, or invented conversation ID. The local policy status reports `retry_at` when the rolling budget is full. That timestamp does not reopen an exhausted eight-send chain or prove that an old request is still appropriate to answer.
 
 ## Local operator control
+
+An operator can grant a temporary allowance to one existing conversation after an explicit human request:
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" conversation-budget \
+  --client-file "$AOT_CLIENT" --conversation-id EXISTING_CONVERSATION \
+  --additional-sends 16 --duration-seconds 50400 \
+  --reason "Human authorized a quota-break handoff"
+```
+
+Omit the last three options to inspect the allowance. A grant permits at most 32 additional reservations for at most 24 hours.
+It applies only to the authenticated client and the admitted conversation. It preserves counters, reply lineage, and idempotency records.
+The grant is recorded in an append-only table. It does not change the rolling pair budget, queue limits, sender permissions, or pause state.
+No MCP tool can grant an allowance. Existing processes must load the updated core to use it; older cores keep the default cap.
+Status and grant commands do not recover interrupted sends. Expired grants do not reopen a conversation.
 
 Only an already allowed external bot's verified numeric sender ID can receive this policy. The command does not grant a sender, change the group, or install a listener. No MCP tool can enable it.
 

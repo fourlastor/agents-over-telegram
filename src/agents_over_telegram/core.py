@@ -144,6 +144,12 @@ class Core:
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY, send_count INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS conversation_budget_grants (
+                    id INTEGER PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id),
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    send_limit INTEGER NOT NULL, created REAL NOT NULL,
+                    expires_at REAL NOT NULL, reason TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS bot_exchange_policies (
                     client_id TEXT NOT NULL REFERENCES clients(id), sender_id INTEGER NOT NULL,
                     enabled INTEGER NOT NULL, PRIMARY KEY(client_id,sender_id)
@@ -870,6 +876,45 @@ class Core:
             db.execute('UPDATE outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND (client_id=? OR recipient=?)', (self.clock(), client_id, client_id))
         return {'client_id': client_id, 'connected': False, 'revoked': True, 'queued_work_preserved': True}
 
+    def _conversation_send_limit(self, db, client_id, conversation_id, now):
+        grant = db.execute(
+            'SELECT MAX(send_limit) FROM conversation_budget_grants '
+            'WHERE client_id=? AND conversation_id=? AND created<=? AND expires_at>?',
+            (client_id, conversation_id, now, now)).fetchone()[0]
+        return max(self.MAX_CHAIN, grant or 0)
+
+    def conversation_budget(self, client_id, conversation_id, *, additional_sends=None,
+                            duration_seconds=None, reason=None):
+        """Inspect or grant a finite allowance through the local operator CLI."""
+        if conversation_id is None:
+            raise CoreError('invalid_conversation')
+        changing = additional_sends is not None
+        if changing:
+            if (not _integer(additional_sends) or not 1 <= additional_sends <= 32
+                    or not _integer(duration_seconds) or not 1 <= duration_seconds <= 86400
+                    or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 500):
+                raise CoreError('invalid_conversation_budget')
+        elif duration_seconds is not None or reason is not None:
+            raise CoreError('invalid_conversation_budget')
+        now = self.clock()
+        with self._tx() as db:
+            self._binding(db, client_id, usable=changing)
+            conversation = self._conversation(db, client_id, conversation_id)
+            row = db.execute('SELECT send_count FROM conversations WHERE id=?', (conversation,)).fetchone()
+            count = row['send_count'] if row else 0
+            if changing:
+                db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
+                db.execute(
+                    'INSERT INTO conversation_budget_grants'
+                    '(client_id,conversation_id,send_limit,created,expires_at,reason) VALUES(?,?,?,?,?,?)',
+                    (client_id, conversation, count + additional_sends, now, now + duration_seconds, reason.strip()))
+            grants = [dict(row) for row in db.execute(
+                'SELECT id,send_limit,created,expires_at,reason FROM conversation_budget_grants '
+                'WHERE client_id=? AND conversation_id=? ORDER BY id', (client_id, conversation))]
+            limit = self._conversation_send_limit(db, client_id, conversation, now)
+        return {'conversation_id': conversation, 'send_count': count, 'send_limit': limit,
+                'remaining_sends': max(0, limit - count), 'grants': grants}
+
     def _conversation(self, db, client_id, conversation_id):
         if conversation_id is not None:
             if not isinstance(conversation_id, str) or len(conversation_id) > 200:
@@ -928,7 +973,7 @@ class Core:
                     raise CoreError('reply_conversation_mismatch')
                 db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
                 count = db.execute('SELECT send_count FROM conversations WHERE id=?', (conversation,)).fetchone()[0]
-                if count >= self.MAX_CHAIN:
+                if count >= self._conversation_send_limit(db, client_id, conversation, now):
                     raise CoreError('conversation_limit')
                 for pair in db.execute('SELECT client_id,sender_id FROM bot_exchange_members WHERE conversation_id=?',
                                        (conversation,)).fetchall():
