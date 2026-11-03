@@ -1,5 +1,6 @@
 """Owner-only clearing of a suspended binding after Telegram confirms the fix."""
 import inspect
+import io
 import json
 import sqlite3
 
@@ -10,7 +11,7 @@ from agents_over_telegram.cli import main, parser, run
 from agents_over_telegram.core import Core, CoreError
 from agents_over_telegram.credentials import read_private_json, write_private_json
 from agents_over_telegram.mcp_server import TOOLS
-from agents_over_telegram.transport import FakeTransport, TransportError
+from agents_over_telegram.transport import FakeTransport, TelegramTransport, TransportError
 
 
 class Clock:
@@ -19,6 +20,9 @@ class Clock:
 
     def __call__(self):
         return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
 
 
 def update(number, text, chat=-100, topic=None, sender=101, **fields):
@@ -191,6 +195,81 @@ def test_newer_suspension_during_check_is_kept(env, monkeypatch):
     assert suspended_column(core, a) == 'group_migrated:-5'
 
 
+def test_same_reason_repeated_during_check_is_kept(env, monkeypatch):
+    core, transport = env
+    a = bind(core, transport)
+    suspend_by_removal(core, transport, a)
+    set_member(transport, 'member')
+    real = transport.get_chat_member
+
+    def removed_again_during_check(chat_id, user_id):
+        answer = real(chat_id, user_id)
+        membership(transport, 'kicked')
+        core.collect()
+        return answer
+    monkeypatch.setattr(transport, 'get_chat_member', removed_again_during_check)
+    with pytest.raises(CoreError, match='suspension_changed'):
+        core.clear_suspension(a)
+    assert suspended_column(core, a) == 'bot_removed_or_restricted'
+
+
+def test_removal_after_topic_close_keeps_topic_confirmation(env):
+    core, transport = env
+    a = bind(core, transport, topic=7)
+    append(transport, 'service', topic=7, forum_topic_closed={})
+    membership(transport, 'kicked')
+    core.collect()
+    assert suspended_column(core, a) == 'topic_changed'
+    set_member(transport, 'member')
+    with pytest.raises(CoreError, match='topic_open_confirmation_required'):
+        core.clear_suspension(a)
+    assert core.clear_suspension(a, topic_open_confirmed=True)['previous_suspension'] == 'topic_changed'
+
+
+def test_topic_close_after_removal_needs_topic_confirmation(env):
+    core, transport = env
+    a = bind(core, transport, topic=7)
+    membership(transport, 'kicked')
+    append(transport, 'service', topic=7, forum_topic_closed={})
+    core.collect()
+    assert suspended_column(core, a) == 'topic_changed'
+
+
+@pytest.mark.parametrize('later', ['removal', 'topic'])
+def test_migration_is_never_replaced_by_a_weaker_reason(env, later):
+    core, transport = env
+    a = bind(core, transport, topic=7)
+    append(transport, 'service', migrate_to_chat_id=-999)
+    if later == 'removal':
+        membership(transport, 'kicked')
+    else:
+        append(transport, 'service', topic=7, forum_topic_closed={})
+    core.collect()
+    assert suspended_column(core, a) == 'group_migrated:-999'
+    with pytest.raises(CoreError, match='group_migrated_pair_again'):
+        core.clear_suspension(a, topic_open_confirmed=True)
+
+
+def test_outgoing_queued_before_suspension_is_sent_after_clear(tmp_path):
+    clock = Clock()
+    transport = FakeTransport(outcomes=['rate_limit'])
+    core = Core(tmp_path / 'state', transport, clock=clock)
+    core.register_account(transport.bot_id, transport.username)
+    a = bind(core, transport)
+    queued = core.send(a, 'held reply', 'k1')
+    assert queued['status'] == 'queued'
+    suspend_by_removal(core, transport, a)
+    clock.advance(120)
+    core.flush()
+    assert core.delivery_status(a, queued['outbox_id'])['status'] == 'queued'
+    assert transport.sent == []
+    set_member(transport, 'member')
+    assert core.clear_suspension(a)['queued_outgoing'] == 1
+    core.flush()
+    assert core.delivery_status(a, queued['outbox_id'])['status'] == 'sent'
+    assert transport.sent[0]['text'].endswith('held reply')
+
+
 def test_queued_messages_are_delivered_after_clear(env):
     core, transport = env
     a = bind(core, transport)
@@ -273,3 +352,35 @@ def test_cli_unsuspend_refuses_then_clears_and_prints_json(tmp_path, monkeypatch
     assert printed['pending_messages'] == 1
     assert 'private' not in json.dumps(printed)
     assert cli(state, 'status', '--client-file', str(client_file))['state'] == 'connected'
+
+
+class Opener:
+    def __init__(self, body):
+        self.body = body
+        self.requests = []
+
+    def open(self, request, timeout):
+        self.requests.append(request)
+        return io.BytesIO(self.body)
+
+
+def test_live_transport_get_chat_member_request_and_filtering():
+    token = '987654:FAKE_SECRET_MUST_NEVER_ESCAPE_123456789'
+    body = json.dumps({'ok': True, 'result': {
+        'status': 'restricted', 'is_member': True, 'can_send_messages': True, 'until_date': 0,
+        'user': {'id': 900001, 'is_bot': True, 'first_name': 'Private Name', 'username': 'private_bot'}}}).encode()
+    opener = Opener(body)
+    member = TelegramTransport(token, opener=opener).get_chat_member(-100, 900001)
+    assert member == {'status': 'restricted', 'is_member': True, 'can_send_messages': True}
+    request = opener.requests[0]
+    assert request.full_url.endswith('/getChatMember')
+    assert json.loads(request.data) == {'chat_id': -100, 'user_id': 900001}
+
+
+@pytest.mark.parametrize('result', [None, [], {}, {'status': 5}, 'member'])
+def test_live_transport_rejects_malformed_chat_member(result):
+    opener = Opener(json.dumps({'ok': True, 'result': result}).encode())
+    transport = TelegramTransport('987654:FAKE_SECRET_MUST_NEVER_ESCAPE_123456789', opener=opener)
+    with pytest.raises(TransportError) as error:
+        transport.get_chat_member(-100, 900001)
+    assert 'FAKE_SECRET' not in str(error.value)
