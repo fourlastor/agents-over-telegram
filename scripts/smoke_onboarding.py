@@ -56,17 +56,18 @@ async def check(aot):
             names = set(archive.namelist())
             require(not names.intersection({"mcp.json", ".mcp.json"}),
                     "Normal package still contains an automatic MCP launcher")
+            require("plugin.json" not in names,
+                    "A root plugin.json would make Codex skip the plugin hooks")
             require(all(not Path(name).is_absolute() and ".." not in Path(name).parts
                         for name in names), "Package contains an unsafe extraction path")
             archive.extractall(cache)
-        for manifest_name in ("plugin.json", ".codex-plugin/plugin.json"):
-            manifest = json.loads((cache / manifest_name).read_text())
-            require("mcpServers" not in manifest, "Manifest still declares automatic MCP")
-            onboarding = manifest["extensions"]["com.openai"]["onboardingSkill"]
-            skill = (cache / onboarding).resolve()
-            require(skill.is_relative_to(cache) and skill.is_file(),
-                    "Packaged onboarding skill is missing or outside the package")
-        version = json.loads((cache / "plugin.json").read_text())["version"]
+        manifest = json.loads((cache / ".codex-plugin/plugin.json").read_text())
+        require("mcpServers" not in manifest, "Manifest still declares automatic MCP")
+        onboarding = manifest["extensions"]["com.openai"]["onboardingSkill"]
+        skill = (cache / onboarding).resolve()
+        require(skill.is_relative_to(cache) and skill.is_file(),
+                "Packaged onboarding skill is missing or outside the package")
+        version = manifest["version"]
         checks.append("Normal source package extracts with valid onboarding skills and no automatic MCP launcher")
 
         env = {key: value for key, value in os.environ.items()

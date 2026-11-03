@@ -34,4 +34,4 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/", "tests/", "skills/", "scripts/", "docs/", "requirements/runtime.txt", "requirements/build.txt", "plugin.json", ".codex-plugin/", ".claude-plugin/", "claude/", "codex/", "integrations/", ".agents/plugins/marketplace.json", "pyproject.toml", "uv.lock", "README.md", "PROPOSAL.md", "HANDOFF.md", "LICENSE"]
+include = ["src/", "tests/", "skills/", "scripts/", "docs/", "requirements/runtime.txt", "requirements/build.txt", ".codex-plugin/", ".claude-plugin/", "claude/", "codex/", "integrations/", ".agents/plugins/marketplace.json", "pyproject.toml", "uv.lock", "README.md", "PROPOSAL.md", "HANDOFF.md", "LICENSE"]

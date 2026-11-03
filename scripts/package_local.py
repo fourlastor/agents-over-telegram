@@ -7,7 +7,7 @@ import zipfile
 
 def package(root, output):
     selected = []
-    for name in ("src", "tests", "skills", "scripts", "docs", ".codex-plugin", ".claude-plugin", "claude", "codex", "integrations", ".agents/plugins/marketplace.json", "plugin.json", "mcp.json",
+    for name in ("src", "tests", "skills", "scripts", "docs", ".codex-plugin", ".claude-plugin", "claude", "codex", "integrations", ".agents/plugins/marketplace.json",
                  ".mcp.json", "pyproject.toml", "uv.lock", "requirements/runtime.txt", "requirements/build.txt",
                  "README.md", "PROPOSAL.md", "HANDOFF.md", "LICENSE"):
         path = root/name

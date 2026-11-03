@@ -20,7 +20,7 @@ Date: 2026-11-03. Version: 0.8.0. Earlier sections keep their original dates. So
 | Shared-bot coordination | Owner-granted directional peer routing inserts one correlated broker delivery atomically with the outbox. Publication outcome is exposed independently; no own-bot Telegram echo is needed. |
 | External bots | Numeric sender allowlist plus per-binding configurable addressed peer command; actual live visibility remains untested. |
 | Controls | Per-bot, destination and conversation pacing; bounded conversation send counts; owner pause command; binding pause/disconnect; edited-message events and suspension on removal/migration/topic changes; owner-only `unsuspend` after a Telegram membership check (migration still needs a new pairing). |
-| MCP/plugin | Eleven scoped tools using official Python MCP SDK 1.30.0, explicit schemas and annotations, structured results and sanitized wire/validation errors. Skills-only portable and compatibility plugin manifests; setup creates one native project MCP entry. An explicit advanced renderer generates a private one-client MCP package. |
+| MCP/plugin | Eleven scoped tools using official Python MCP SDK 1.30.0, explicit schemas and annotations, structured results and sanitized wire/validation errors. Skills-and-hooks `.codex-plugin/plugin.json` manifest; setup creates one native project MCP entry. An explicit advanced renderer generates a private one-client MCP package. |
 | Skill/docs | Codex onboarding skill and routine status/pause/resume/history/coordination guidance, credential and lifecycle instructions, source/schema evidence and deliberate receiver handoff/rollback procedure. |
 | Optional relay prototype | Exact-project client-to-thread mapping, bounded pending-inbox watcher and separate wake-notification outcomes. A running Codex chat performs the native host handoff; one bounded live idle-target wake/reply/ack test passed. Setup starts no listener. |
 | Desktop listener | Native queue plus desktop wake URL wakes an existing local chat while ChatGPT opens normally; live Telegram poll/reply/ack passed. Earlier shared-backend launch experiments remain secondary. |
@@ -155,11 +155,11 @@ The prior 0.2.0 full suite completed with **187 passed in 2.47 seconds**:
 | Transport and credentials | 18 | Private file writes, fixed errors, HTTP rejection/rate-limit/unknown classification, malformed send responses, plain-text send shape, persistent fake acceptance without echo. |
 | CLI | 6 | Register once/create two clients/pair/confirm/peer configuration, pause/disconnect, fake/live state mismatch, mandatory receiver handoff assertion, schema-valid secret-free profile rendering and offline demo. |
 | Actual process crashes | 3 | `os._exit` before intake transaction commit, after commit, and after fake remote acceptance but before saving send confirmation. Recovery preserved work/cursor and prevented automatic duplicate publication. |
-| Plugin package | 5 | Vendored portable schema validation, compatibility parity, local paths and fail-closed launch configuration. |
+| Plugin package | 5 | Single Codex manifest, vendored MCP schema validation, local paths and fail-closed launch configuration. |
 
 The earlier 0.2.0 run also passed these checks:
 
-- `scripts/validate_package.py`: portable schemas, compatibility parity and referenced local component paths.
+- `scripts/validate_package.py`: single Codex manifest, vendored MCP schema and referenced local component paths, including the hooks file.
 - The bundled skill-creator `quick_validate.py`: skill frontmatter/name/scaffold checks.
 - Independent skill trials: account reuse, forged peer/exfiltration instructions, acknowledgment disposition, and unknown-send recovery boundaries.
 - `uv build`: source archive and Python wheel built successfully.
