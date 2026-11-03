@@ -15,13 +15,32 @@ import tomllib
 from .credentials import CredentialError, private_directory, read_private_json, write_private_json
 
 PROFILE_NAME = '.aot-profile.json'
-SHORT_COMMANDS = {'status', 'history', 'pause', 'resume'}
+SHORT_COMMANDS = {'status', 'history', 'pause', 'resume', 'unsuspend'}
+PROFILE_CLIENT_COMMANDS = SHORT_COMMANDS | {'flush', 'mcp', 'watch'}
 CONNECTED_NEXT_STEP = (
     'Open this exact project folder in Codex and trust it if prompted. Reopen its chat, then ask '
     '"Telegram status" to verify that the native Telegram tools are loaded and connected. '
     'To enable automatic wakeups, ask "Listen for Telegram in this chat for one hour and reply to my messages." '
     'Setup does not start a listener.'
 )
+
+HOST_NEXT_STEPS = {
+    'codex': CONNECTED_NEXT_STEP,
+    'claude': (
+        'Enable the Agents over Telegram Claude Code plugin for this project only, for example: '
+        '"claude plugin install agents-over-telegram@agents-over-telegram --scope local" run in this exact folder. '
+        'Start Claude Code in this folder and ask "Telegram status". While an interactive session is open, '
+        'the plugin monitor collects Telegram updates and wakes the session; hooks add notices at tool boundaries.'
+    ),
+    'pi': (
+        'Load the Agents over Telegram Pi extension for this project (see docs/HOSTS.md), start Pi in this exact '
+        'folder and ask "Telegram status". While Pi runs, the extension collects Telegram updates and starts or steers a turn.'
+    ),
+    'amp': (
+        'Configure the Agents over Telegram Amp integration for this project (see docs/HOSTS.md), start Amp in this '
+        'exact folder and ask "Telegram status".'
+    ),
+}
 
 
 def default_state_dir():
@@ -88,7 +107,7 @@ def resolve_args(args):
             raise CredentialError('project_profile_mode_mismatch')
         args.state_dir = Path(profile['state_dir'])
         args.fake = profile['mode'] == 'fake'
-        if hasattr(args, 'client_file') and client_file is None and args.command in SHORT_COMMANDS | {'flush'}:
+        if hasattr(args, 'client_file') and client_file is None and args.command in PROFILE_CLIENT_COMMANDS:
             args.client_file = Path(profile['client_file'])
         args.expected_client_id = profile['client_id'] if getattr(args, 'client_file', None) is not None else None
     else:
@@ -108,7 +127,26 @@ def _entry(state, client, fake):
     return {'command': str(Path(sys.executable).absolute().parent / 'aot'), 'args': args}
 
 
-def _config_plan(project, expected):
+# The tools that handle pushed Telegram work: read the inbox, reply in the bound
+# topic, and acknowledge. Codex's automatic approval reviewer rejects these calls
+# when a hook notice (not the user's typed prompt) asks for them, so setup
+# approves exactly these three for this project's scoped server. Pause,
+# disconnect and connection changes still follow the normal approval policy.
+CODEX_APPROVED_TOOLS = ('messages_poll', 'message_send', 'messages_ack')
+
+
+def _approvals_toml():
+    return ''.join(f'\n[mcp_servers.telegram.tools.{name}]\napproval_mode = "approve"\n'
+                   for name in CODEX_APPROVED_TOOLS)
+
+
+def _config_plan(project, expected, approvals=True):
+    """Plan the project's Codex config.
+
+    With ``approvals``, a new or older ``telegram`` entry without a ``tools``
+    table also gets the push-handling tool approvals. An existing ``tools``
+    table is the user's choice and stays unchanged.
+    """
     _check_directory(project)
     folder = project / '.codex'
     _check_directory(folder)
@@ -123,16 +161,23 @@ def _config_plan(project, expected):
             selected = servers['telegram']
             if not isinstance(selected, dict) or any(selected.get(key) != value for key, value in expected.items()):
                 raise CredentialError('project_mcp_config_conflict')
-            extras = set(selected) - set(expected)
+            extras = set(selected) - set(expected) - {'tools'}
             if extras - {'startup_timeout_sec', 'tool_timeout_sec'} or any(type(selected[key]) not in (int, float) or not 0 < selected[key] <= 3600 for key in extras):
                 raise CredentialError('project_mcp_config_conflict')
-            return path, raw, raw
-        suffix = '\n[mcp_servers.telegram]\ncommand = ' + json.dumps(expected['command']) + '\nargs = ' + json.dumps(expected['args']) + '\n'
-        proposed = (raw or '') + suffix
-        if tomllib.loads(proposed)['mcp_servers']['telegram'] != expected:
+            tools = selected.get('tools')
+            if tools is not None and (not isinstance(tools, dict) or not all(isinstance(value, dict) for value in tools.values())):
+                raise CredentialError('project_mcp_config_conflict')
+            if tools is not None or not approvals:
+                return path, raw, raw
+            proposed = raw + _approvals_toml()
+        else:
+            suffix = '\n[mcp_servers.telegram]\ncommand = ' + json.dumps(expected['command']) + '\nargs = ' + json.dumps(expected['args']) + '\n'
+            proposed = (raw or '') + suffix + (_approvals_toml() if approvals else '')
+        selected = tomllib.loads(proposed)['mcp_servers']['telegram']
+        if {key: selected[key] for key in expected} != expected:
             raise ValueError()
         return path, raw, proposed
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, KeyError):
         raise CredentialError('invalid_project_config') from None
 
 
@@ -219,8 +264,23 @@ def setup(args):
             raise CredentialError('existing_client_file_required')
     if state == project or project in state.parents or client == project or project in client.parents:
         raise CredentialError('private_state_must_be_outside_project')
-    expected = _entry(state, client, fake)
-    config_path, old_config, new_config = _config_plan(project, expected)
+    host = getattr(args, 'host', None) or 'codex'
+    if host not in HOST_NEXT_STEPS:
+        raise CredentialError('unsupported_host')
+    if host == 'codex':
+        expected = _entry(state, client, fake)
+        config_path, old_config, new_config = _config_plan(project, expected)
+    elif host in ('pi', 'amp'):
+        from .host_config import json_config_plan
+        config_path, old_config, new_config = json_config_plan(project, host, _entry(state, client, fake))
+    else:
+        # The Claude Code plugin starts the runtime through the project runtime pointer.
+        _check_directory(project)
+        config_path = old_config = new_config = None
+    from .hosts import RUNTIME_POINTER, runtime_pointer
+    pointer_path = project / RUNTIME_POINTER
+    old_pointer = _read_local(pointer_path) if pointer_path.exists() or pointer_path.is_symlink() else None
+    new_pointer = runtime_pointer(Path(_entry(state, client, fake)['command']))
     if not args.prepare_only and not sys.stdin.isatty():
         raise CredentialError('private_terminal_required')
     # A mode mismatch is checked before any transport can load credentials.
@@ -262,16 +322,20 @@ def setup(args):
     old_profile = _read_local(project / PROFILE_NAME) if profile else None
     # Persist the selected identity before pairing; reruns never mint a replacement.
     _write_local(project / PROFILE_NAME, json.dumps(new_profile, indent=2) + '\n', old_profile)
-    _write_local(config_path, new_config, old_config)
+    if config_path is not None:
+        _write_local(config_path, new_config, old_config)
+    _write_local(pointer_path, new_pointer, old_pointer)
     status = core.connection_status(client_id)
     next_setup = _next_setup(args, state, fake, project, client)
     result = {'project_dir': str(project), 'profile_file': str(project / PROFILE_NAME),
-              'config_file': str(config_path), 'client_id': client_id, 'label': args.label,
+              'config_file': str(config_path) if config_path is not None else None,
+              'runtime_pointer': str(pointer_path), 'host': host,
+              'client_id': client_id, 'label': args.label,
               'mode': new_profile['mode'], 'state_dir': str(state), 'client_file': str(client), 'connected': status['connected'],
               'host_trust_changed': False, 'automatic_delivery': False}
     if status['connected']:
         result['connection'] = status
-        result['next_step'] = CONNECTED_NEXT_STEP
+        result['next_step'] = HOST_NEXT_STEPS[host]
         return result
     cache_path = state / 'setup' / (client_id + '.json')
     pairing = status.get('pairing')
@@ -314,7 +378,7 @@ def setup(args):
         result['next_step'] = 'No destination was confirmed. To review it again, run: ' + next_setup
         return result
     status = core.confirm_pairing(pairing['id'])
-    result.update(connected=True, connection=status, next_step=CONNECTED_NEXT_STEP)
+    result.update(connected=True, connection=status, next_step=HOST_NEXT_STEPS[host])
     return result
 
 

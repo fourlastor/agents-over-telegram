@@ -168,6 +168,8 @@ class Core:
                 db.execute('ALTER TABLE account ADD COLUMN last_gap_at REAL')
             if 'event_at' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
                 db.execute('ALTER TABLE inbox ADD COLUMN event_at REAL')
+            if 'suspension_seq' not in {row['name'] for row in db.execute('PRAGMA table_info(bindings)')}:
+                db.execute('ALTER TABLE bindings ADD COLUMN suspension_seq INTEGER NOT NULL DEFAULT 0')
             db.execute('INSERT OR IGNORE INTO history_keys(singleton,secret) VALUES(1,?)', (secrets.token_bytes(32),))
             db.execute('CREATE INDEX IF NOT EXISTS inbox_history ON inbox(client_id,COALESCE(event_at,created) DESC)')
             db.execute('CREATE INDEX IF NOT EXISTS outbox_history ON outbox(client_id,created DESC)')
@@ -428,7 +430,15 @@ class Core:
                     message = 'Review the observed sender, group and topic locally, then confirm pairing.'
             elif row['suspended']:
                 state, action = 'suspended', 'review_connection'
-                message = 'Ask the local owner to review this suspended Telegram destination before continuing.'
+                if row['suspended'].startswith('group_migrated:'):
+                    message = ('This group moved to a new chat id. Queued messages are kept. Ask the local owner to '
+                               'disconnect and pair again in the new chat; "aot unsuspend" cannot clear a migration.')
+                elif row['suspended'] == 'topic_changed':
+                    message = ('This topic was closed or changed. Queued messages are kept. After the topic is open, '
+                               'ask the local owner to run "aot unsuspend --topic-open" on this computer.')
+                else:
+                    message = ('The bot was removed or restricted in this group. Queued messages are kept. After the bot '
+                               'can post there again, ask the local owner to run "aot unsuspend" on this computer.')
             elif row['paused']:
                 state, action = 'paused', 'resume_connection'
                 message = 'Resume this connection when you want to handle messages again; queued work is preserved.'
@@ -480,6 +490,27 @@ class Core:
             raise CoreError('queue_full')
         db.execute('INSERT INTO inbox(id,client_id,event_key,payload,created,conversation_id,outbox_id,event_at) VALUES(?,?,?,?,?,?,?,?)', ('msg_' + secrets.token_hex(12), client_id, event_key, json.dumps(payload, ensure_ascii=False), now, conversation_id, outbox_id, now if event_at is None else event_at))
 
+    # A new suspension never replaces a reason that needs more owner work.
+    # Clearing topic_changed also checks bot membership, and a migration
+    # cannot be cleared at all, so keep the strongest observed reason.
+    _SUSPEND_OVER = {
+        'bot_removed_or_restricted': "(suspended IS NULL OR suspended='bot_removed_or_restricted')",
+        'topic_changed': "(suspended IS NULL OR suspended IN ('bot_removed_or_restricted','topic_changed'))",
+        'group_migrated': "(suspended IS NULL OR suspended NOT LIKE 'group_migrated:%')",
+    }
+
+    def _suspend(self, db, reason, chat_id, thread_id=None):
+        # Every observed event bumps suspension_seq, even with the same reason,
+        # so an owner clear that raced with it cannot erase it.
+        guard = self._SUSPEND_OVER[reason.split(':')[0]]
+        scope = 'chat_id=? AND (? IS NULL OR thread_id=?) AND connected=1'
+        # Bindings that keep a stronger reason still get a new seq. Run this
+        # first so each binding moves exactly once.
+        db.execute(f'UPDATE bindings SET suspension_seq=suspension_seq+1 WHERE {scope} AND suspended IS NOT NULL AND NOT {guard}',
+                   (chat_id, thread_id, thread_id))
+        db.execute(f'UPDATE bindings SET suspended=?,suspension_seq=suspension_seq+1 WHERE {scope} AND {guard}',
+                   (reason, chat_id, thread_id, thread_id))
+
     def _route_update(self, db, update, account, now):
         update_id = update['update_id']
         membership = update.get('my_chat_member')
@@ -487,7 +518,7 @@ class Core:
             chat_id = _mapping(membership.get('chat')).get('id')
             new = _mapping(membership.get('new_chat_member'))
             if _integer(chat_id) and _mapping(new.get('user')).get('id') == account['bot_id'] and (new.get('status') in ('left', 'kicked') or (new.get('status') == 'restricted' and (not new.get('is_member', True) or not new.get('can_send_messages', True)))):
-                db.execute('UPDATE bindings SET suspended=? WHERE chat_id=? AND connected=1', ('bot_removed_or_restricted', chat_id))
+                self._suspend(db, 'bot_removed_or_restricted', chat_id)
             return
         kind = 'edited_message' if 'edited_message' in update else 'message'
         msg = update.get(kind)
@@ -501,10 +532,10 @@ class Core:
             self._unmatched(db, update_id, None, 'unsupported_destination', now)
             return
         if _integer(msg.get('migrate_to_chat_id')):
-            db.execute('UPDATE bindings SET suspended=? WHERE chat_id=? AND connected=1', ('group_migrated:' + str(msg['migrate_to_chat_id']), chat_id))
+            self._suspend(db, 'group_migrated:' + str(msg['migrate_to_chat_id']), chat_id)
             return
         if 'forum_topic_closed' in msg or 'forum_topic_edited' in msg:
-            db.execute('UPDATE bindings SET suspended=? WHERE chat_id=? AND thread_id=? AND connected=1', ('topic_changed', chat_id, thread_id))
+            self._suspend(db, 'topic_changed', chat_id, thread_id)
             return
         sender = _mapping(msg.get('from'))
         sender_id = sender.get('id')
@@ -771,6 +802,54 @@ class Core:
                 raise CoreError('connection_suspended')
             db.execute('UPDATE bindings SET paused=? WHERE client_id=?', (int(paused), client_id))
         return self.connection_status(client_id)
+
+    def clear_suspension(self, client_id, *, topic_open_confirmed=False):
+        """Local owner control; never exposed as an agent MCP tool.
+
+        Ask Telegram first whether the bot can post in the bound chat again.
+        Clear the flag only if no suspension event arrived during the check,
+        including a repeat of the same reason, so a newer one stays in place. Queued inbox and outbox
+        rows are not touched; they are delivered once the binding is usable.
+        """
+        if not isinstance(topic_open_confirmed, bool):
+            raise CoreError('invalid_unsuspend')
+        with self._db() as db:
+            binding = self._binding(db, client_id)
+            account = self._account(db)
+        reason, seq = binding['suspended'], binding['suspension_seq']
+        if not reason:
+            raise CoreError('not_suspended')
+        if reason.startswith('group_migrated:'):
+            # The destination itself changed. Clearing would keep sending to a
+            # chat id that no longer exists; the owner must pair again.
+            raise CoreError('group_migrated_pair_again')
+        if reason not in ('bot_removed_or_restricted', 'topic_changed'):
+            raise CoreError('unknown_suspension')
+        if reason == 'topic_changed' and not topic_open_confirmed:
+            # The Bot API has no read-only call for one forum topic's state.
+            raise CoreError('topic_open_confirmation_required')
+        try:
+            member = self.transport.get_chat_member(binding['chat_id'], account['bot_id'])
+        except TransportError as error:
+            if isinstance(error.code, int) and 400 <= error.code < 500 and error.code != 429:
+                raise CoreError('bot_not_in_chat') from None
+            raise CoreError('telegram_check_failed') from None
+        status = member.get('status') if isinstance(member, dict) else None
+        if not (status in ('member', 'administrator')
+                or (status == 'restricted' and member.get('is_member') is True
+                    and member.get('can_send_messages') is True)):
+            raise CoreError('bot_cannot_post')
+        with self._tx() as db:
+            cleared = db.execute('UPDATE bindings SET suspended=NULL WHERE client_id=? AND connected=1 AND suspended=? AND suspension_seq=?',
+                                 (client_id, reason, seq)).rowcount
+            if not cleared:
+                raise CoreError('suspension_changed')
+        status_after = self.connection_status(client_id)
+        return {'client_id': client_id, 'previous_suspension': reason, 'suspended': None,
+                'paused': status_after['paused'], 'state': status_after['state'],
+                'verified': {'bot_member_status': status, 'topic_open': 'owner_confirmed' if reason == 'topic_changed' else None},
+                'pending_messages': status_after['pending_messages'],
+                'queued_outgoing': status_after['outbox'].get('queued', 0)}
 
     def disconnect(self, client_id):
         with self._tx() as db:

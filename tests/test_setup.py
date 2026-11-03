@@ -385,7 +385,9 @@ def test_setup_stdout_is_json_and_cancellation_has_fixed_error(tmp_path, monkeyp
 def test_matching_config_timeouts_preserved_and_env_override_rejected(tmp_path):
     result = prepare(tmp_path)
     path = Path(result['config_file'])
-    original = path.read_text() + 'startup_timeout_sec = 20\ntool_timeout_sec = 90\n'
+    text = path.read_text()
+    args_line = next(line for line in text.splitlines(keepends=True) if line.startswith('args = '))
+    original = text.replace(args_line, args_line + 'startup_timeout_sec = 20\ntool_timeout_sec = 90\n')
     path.write_text(original)
     assert prepare(tmp_path)['client_id'] == result['client_id']
     assert path.read_text() == original
@@ -456,3 +458,40 @@ def test_project_flush_only_sends_its_client_and_legacy_global_scope_remains(tmp
     monkeypatch.chdir(tmp_path)
     assert invoke('--state-dir', alpha['state_dir'], '--fake', 'flush')['attempted'] == 1
     assert core.delivery_status(beta['client_id'], second['outbox_id'])['status'] == 'sent'
+
+
+def test_codex_config_approves_only_push_tools(tmp_path):
+    from agents_over_telegram.onboarding import CODEX_APPROVED_TOOLS
+    result = prepare(tmp_path)
+    entry = tomllib.loads(Path(result['config_file']).read_text())['mcp_servers']['telegram']
+    assert entry['tools'] == {name: {'approval_mode': 'approve'} for name in CODEX_APPROVED_TOOLS}
+    assert set(CODEX_APPROVED_TOOLS) == {'messages_poll', 'message_send', 'messages_ack'}
+
+
+def test_older_codex_config_gains_approvals_and_custom_tools_stay(tmp_path):
+    result = prepare(tmp_path)
+    path = Path(result['config_file'])
+    full = path.read_text()
+    older = full[:full.index('\n[mcp_servers.telegram.tools.')] + '\n'
+    path.write_text(older)
+    prepare(tmp_path)
+    upgraded = path.read_text()
+    assert upgraded.startswith(older)
+    assert tomllib.loads(upgraded)['mcp_servers']['telegram'] == tomllib.loads(full)['mcp_servers']['telegram']
+    custom = older + '\n[mcp_servers.telegram.tools.messages_poll]\napproval_mode = "prompt"\n'
+    path.write_text(custom)
+    prepare(tmp_path)
+    assert path.read_text() == custom
+
+
+def test_relay_accepts_codex_config_with_or_without_approvals(tmp_path):
+    from agents_over_telegram.onboarding import _config_plan, _entry
+    result = prepare(tmp_path)
+    path, project = Path(result['config_file']), Path(result['project_dir'])
+    entry = _entry(Path(result['state_dir']), Path(result['client_file']), True)
+    _, current, proposed = _config_plan(project, entry, approvals=False)
+    assert current == proposed
+    full = path.read_text()
+    path.write_text(full[:full.index('\n[mcp_servers.telegram.tools.')] + '\n')
+    _, current, proposed = _config_plan(project, entry, approvals=False)
+    assert current == proposed

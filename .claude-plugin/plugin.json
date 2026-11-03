@@ -1,0 +1,27 @@
+{
+  "name": "agents-over-telegram",
+  "version": "0.8.0",
+  "description": "Coordinate logical agents through one human-owned Telegram bot and separate scoped local inboxes. New messages wake the running session.",
+  "author": {
+    "name": "Daniele Conti"
+  },
+  "homepage": "https://github.com/fourlastor/agents-over-telegram",
+  "repository": "https://github.com/fourlastor/agents-over-telegram",
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "telegram": {
+      "command": "python3",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py",
+        "mcp"
+      ],
+      "env": {
+        "AOT_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}"
+      }
+    }
+  },
+  "hooks": "./claude/hooks.json",
+  "experimental": {
+    "monitors": "./claude/monitors.json"
+  }
+}

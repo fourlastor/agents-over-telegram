@@ -21,7 +21,7 @@ class LazyTransport:
         self.transport = None
 
     def __getattr__(self, name):
-        if name not in {"get_me", "get_webhook_info", "get_updates", "send_message"}:
+        if name not in {"get_me", "get_webhook_info", "get_updates", "send_message", "get_chat_member"}:
             raise AttributeError(name)
         if self.transport is None:
             self.transport = make_transport(self.state_dir, fake=self.fake)
@@ -74,7 +74,8 @@ def _relay_project_valid(core, binding, fake):
             return False
         client = Path(profile['client_file'])
         _client(core, client, binding['client_id'])
-        _, current, proposed = _config_plan(project, _entry(core.state_dir, client, fake))
+        # Tool approvals are optional here, so configs from older setups stay valid.
+        _, current, proposed = _config_plan(project, _entry(core.state_dir, client, fake), approvals=False)
         return current is not None and current == proposed
     except (CredentialError, CoreError, OSError, ValueError):
         return False
@@ -91,7 +92,7 @@ def render_plugin(state_dir, client_file, output, name):
     if not (source / "plugin.json").is_file():
         raise CredentialError("plugin_template_missing_use_source_checkout")
     output.mkdir(parents=True, mode=0o700)
-    for relative in ("plugin.json", ".codex-plugin", "skills", "docs/OPERATIONS.md", "docs/LIVE_VALIDATION.md", "docs/COMPATIBILITY.md", "docs/RELAY.md", "docs/DIRECT_DISPATCH.md", "docs/MACOS_SERVICE.md", "docs/BOT_EXCHANGES.md"):
+    for relative in ("plugin.json", ".codex-plugin", "skills", "docs/OPERATIONS.md", "docs/LIVE_VALIDATION.md", "docs/COMPATIBILITY.md", "docs/RELAY.md", "docs/DIRECT_DISPATCH.md", "docs/MACOS_SERVICE.md", "docs/BOT_EXCHANGES.md", "docs/HOSTS.md"):
         src, dst = source / relative, output / relative
         if src.is_dir():
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
@@ -132,15 +133,28 @@ def parser():
     setup.add_argument("--client-file", type=Path, help="Reuse this existing protected client file")
     setup.add_argument("--receiver-handoff-confirmed", action="store_true")
     setup.add_argument("--prepare-only", action="store_true", help="Prepare profile and pairing without collecting or confirming")
+    setup.add_argument("--host", choices=["codex", "claude", "pi", "amp"], default="codex",
+                       help="Agent host to prepare; codex writes .codex/config.toml, plugin hosts use the runtime pointer")
     register = sub.add_parser("account-register", help="Prompt privately for one bot token, validate without polling")
     register.add_argument("--receiver-handoff-confirmed", action="store_true", help="Assert other receivers are stopped; webhooks are never changed")
     sub.add_parser("account-status")
     create = sub.add_parser("client-create")
     create.add_argument("--label", required=True)
     create.add_argument("--client-file", type=Path, required=True)
-    for name in ("pair-begin", "status", "history", "pause", "resume", "disconnect", "mcp", "allow-sender", "bot-exchange-policy"):
-        command = sub.add_parser(name)
-        command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume"})
+    for name in ("pair-begin", "status", "history", "pause", "resume", "unsuspend", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "watch"):
+        command = (sub.add_parser(name, help="Owner only: check with Telegram that a suspended destination works again, then clear it")
+                   if name == "unsuspend" else sub.add_parser(name))
+        command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume", "unsuspend", "mcp", "watch"})
+        if name == "unsuspend":
+            command.add_argument("--topic-open", action="store_true",
+                                 help="Confirm you checked that a closed or changed topic is open again")
+        if name == "watch":
+            command.add_argument("--collect", action="store_true", help="Also long-poll the shared Telegram collector; never sends or acknowledges")
+            command.add_argument("--duration", type=float, default=0, help="Seconds to watch; 0 runs until stopped")
+            command.add_argument("--interval", type=float, default=2.0, help="Seconds between local inbox checks")
+            command.add_argument("--poll-timeout", type=int, default=10, help="Telegram long-poll seconds when collecting (0-20)")
+            command.add_argument("--format", choices=["text", "jsonl"], default="text")
+            command.add_argument("--no-backlog", action="store_true", help="Announce only deliveries that arrive after start")
         if name == "status":
             command.add_argument("--human", action="store_true", help="Show a concise local status instead of JSON")
         if name == "history":
@@ -206,6 +220,11 @@ def parser():
     desktop.add_argument("--codex-home", type=Path, help="Existing Codex home used by the running desktop")
     desktop.add_argument("--duration", type=float, default=55, help="Listening seconds; 0 continues until explicitly stopped")
     desktop.add_argument("--collect", action="store_true", help="Also collect Telegram updates; never flush or acknowledge work")
+    hook = sub.add_parser("hook", help="Answer one Claude Code or Codex hook event from stdin; never sends or acknowledges")
+    hook.add_argument("--host", choices=["claude", "codex"], required=True)
+    hook.add_argument("--project-dir", type=Path, help="Exact project directory; defaults to the host's project or cwd")
+    hook.add_argument("--collect-interval", type=float, default=0,
+                      help="Also collect Telegram updates when the last attempt is older than this many seconds (0 = never)")
     sub.add_parser("demo", help="Run a standalone temporary two-agent offline demonstration")
     return p
 
@@ -241,12 +260,15 @@ def run(args):
     if args.command == "setup":
         from .onboarding import setup
         return setup(args)
+    if args.command == "hook":
+        from .hosts import run_hook
+        return run_hook(args)
     from .onboarding import resolve_args
     args = resolve_args(args)
     state_dir = private_directory(args.state_dir)
     _mode(state_dir, args.fake)
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
-                and args.command not in {"history", "status", "account-status", "bot-exchange-policy"}))
+                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "watch"}))
     if args.command.startswith("relay-"):
         from .relay import RelayStore
         store = RelayStore(core, project_validator=lambda binding: _relay_project_valid(core, binding, args.fake))
@@ -314,6 +336,8 @@ def run(args):
         return core.grant_peer(source, target)
     if args.command == "resolve":
         return core.resolve_unknown(args.outbox_id, args.resolution, message_id=args.message_id)
+    if args.client_file is None:
+        raise CredentialError("client_file_required")
     client_id = _client(core, args.client_file, args.expected_client_id)
     if args.command == "pair-begin":
         return core.connection_begin(client_id)
@@ -327,6 +351,8 @@ def run(args):
         return core.allow_sender(client_id, args.sender_id, is_bot=args.bot)
     if args.command == "bot-exchange-policy":
         return core.bot_exchange_policy(client_id, args.sender_id, enabled=args.exchange_enabled)
+    if args.command == "unsuspend":
+        return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command in {"pause", "resume"}:
         return core.pause(client_id, paused=args.command == "pause" and not args.resume)
     if args.command == "disconnect":
@@ -335,6 +361,22 @@ def run(args):
         if args.fake:
             raise CredentialError("fake_plugin_render_refused")
         return render_plugin(state_dir, args.client_file, args.output, args.name)
+    if args.command == "watch":
+        from .push import watch
+        def emit(event):
+            if args.format == "jsonl":
+                print(json.dumps(event, separators=(",", ":")), flush=True)
+            elif event.get("type") == "telegram_messages":
+                print(event["notice"], flush=True)
+            else:
+                print("[Agents over Telegram] Watching stopped: " + event.get("reason", "unknown") + ".", flush=True)
+        parent = os.getppid()
+        # A host can die without stopping its watcher (for example on SIGKILL).
+        # Re-parenting means the host is gone, so stop instead of polling forever.
+        watch(core, client_id, emit, collect=args.collect, duration=args.duration, interval=args.interval,
+              poll_timeout=args.poll_timeout, announce_backlog=not args.no_backlog,
+              keep_running=lambda: os.getppid() == parent)
+        return None
     if args.command == "mcp":
         from .mcp_server import serve
         serve(state_dir, args.client_file, transport=core.transport)
@@ -342,9 +384,44 @@ def run(args):
     raise CredentialError("unknown_command")
 
 
+def _hook_invocation(argv):
+    """True when argv selects the hook command, even if its options are invalid."""
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--state-dir":
+            index += 2
+        elif arg == "--fake" or arg.startswith("--state-dir="):
+            index += 1
+        else:
+            return arg == "hook"
+    return False
+
+
 def main():
     from .core import CoreError
-    args = parser().parse_args()
+    try:
+        args = parser().parse_args()
+    except SystemExit:
+        # Exit status 2 blocks some host hook events (for example a user prompt).
+        # A hook from a newer or older plugin must never do that.
+        if _hook_invocation(sys.argv[1:]):
+            return 0
+        raise
+    if args.command == "hook":
+        # run_hook already turns failures into no output; this also covers a
+        # host that closed the pipe before reading the answer.
+        try:
+            value = run(args)
+            if value is not None:
+                print(json.dumps(value, separators=(",", ":")), flush=True)
+        except Exception:
+            try:
+                # Avoid a second failing flush at interpreter exit (status 120).
+                os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+            except (OSError, ValueError):
+                pass
+        return 0
     try:
         value = run(args)
         if value is not None:

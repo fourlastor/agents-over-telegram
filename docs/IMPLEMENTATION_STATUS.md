@@ -1,6 +1,6 @@
 # Implementation status and validation evidence
 
-Date: 2026-10-19. Version: 0.7.2. Source root: `/home/daniele/Documents/agents-over-telegram`.
+Date: 2026-11-03. Version: 0.8.0. Earlier sections keep their original dates. Source root: `/home/daniele/Documents/agents-over-telegram`.
 
 **Working local implementation with offline tests and scoped live checks.** The automated suite uses one fake bot reused by two isolated clients. Separate live checks on 2026-10-19 exercised native Codex tools and the shared-bot workflow described below. Native CLI marketplace installation, runtime bootstrap and fresh-project MCP onboarding have been tested in isolated profiles. Published GitHub retrieval and installation have passed in a clean profile; desktop plugin UI installation, automatic onboarding invocation and fresh real-bot registration remain untested. No background service is installed by this package. The original proposal and handoff are preserved.
 
@@ -19,12 +19,16 @@ Date: 2026-10-19. Version: 0.7.2. Source root: `/home/daniele/Documents/agents-o
 | Recovery | Interrupted sending becomes unknown after the sender lock is available. Unknown is never automatically retried; operator accepts, cancels or explicitly queues a retry. |
 | Shared-bot coordination | Owner-granted directional peer routing inserts one correlated broker delivery atomically with the outbox. Publication outcome is exposed independently; no own-bot Telegram echo is needed. |
 | External bots | Numeric sender allowlist plus per-binding configurable addressed peer command; actual live visibility remains untested. |
-| Controls | Per-bot, destination and conversation pacing; bounded conversation send counts; owner pause command; binding pause/disconnect; edited-message events and suspension on removal/migration/topic changes. |
+| Controls | Per-bot, destination and conversation pacing; bounded conversation send counts; owner pause command; binding pause/disconnect; edited-message events and suspension on removal/migration/topic changes; owner-only `unsuspend` after a Telegram membership check (migration still needs a new pairing). |
 | MCP/plugin | Eleven scoped tools using official Python MCP SDK 1.30.0, explicit schemas and annotations, structured results and sanitized wire/validation errors. Skills-only portable and compatibility plugin manifests; setup creates one native project MCP entry. An explicit advanced renderer generates a private one-client MCP package. |
 | Skill/docs | Codex onboarding skill and routine status/pause/resume/history/coordination guidance, credential and lifecycle instructions, source/schema evidence and deliberate receiver handoff/rollback procedure. |
 | Optional relay prototype | Exact-project client-to-thread mapping, bounded pending-inbox watcher and separate wake-notification outcomes. A running Codex chat performs the native host handoff; one bounded live idle-target wake/reply/ack test passed. Setup starts no listener. |
 | Desktop listener | Native queue plus desktop wake URL wakes an existing local chat while ChatGPT opens normally; live Telegram poll/reply/ack passed. Earlier shared-backend launch experiments remain secondary. |
 | First-time runtime | Bundled bootstrap prepares a stable runtime from the installed plugin; native CLI marketplace install and fresh fake-project MCP onboarding passed. Python 3.11+ is required; uv is optional, with a venv/ensurepip and private-pip fallback. |
+
+## Version 0.8.0: push delivery for Codex, Claude Code, Pi and Amp
+
+New Telegram messages now reach a running agent without a typed prompt in four hosts. A shared watcher (`aot watch`) and hook handler (`aot hook`) announce each new delivery once, with a fixed notice that contains no message text. The Claude Code plugin uses a monitor and hooks, the Codex plugin ships hooks, and Pi and Amp get small extensions. Setup gained `--host` and writes a non-secret `.aot-runtime.json` plus the host's MCP configuration. For Codex, setup also approves the three push-handling tools (`messages_poll`, `message_send`, `messages_ack`) on the project's scoped server, because Codex's automatic approval reviewer blocked them in a live run. The full suite passed **764 passed, 2 skipped**. Real Claude Code, Pi (with a real OpenAI model) and Amp processes passed idle and busy checks against a fake Telegram transport. A real `codex exec` run passed a busy check with the plugin's hooks file loaded as a project hook and hook trust bypassed for that run. Live Telegram was not used. Details and exact limits: [agent hosts](HOSTS.md#what-was-tested).
 
 ## Version 0.7.2: public release and capability-based compatibility
 

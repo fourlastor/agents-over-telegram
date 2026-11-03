@@ -1,6 +1,19 @@
 # Agents over Telegram
 
-Connect a Codex project to a Telegram group or forum topic. Register **one bot once**, then reuse it for multiple logical agents in separate project conversations. Telegram shows the actual shared bot; messages label the logical agent clearly.
+Connect a coding agent project to a Telegram group or forum topic. Register **one bot once**, then reuse it for multiple logical agents in separate project conversations. Telegram shows the actual shared bot; messages label the logical agent clearly.
+
+## Supported agent hosts
+
+Version 0.8.0 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+
+| Host | Integration | Push delivery |
+|---|---|---|
+| Codex | Codex plugin (skills and hooks) | `relay-desktop` wakes idle desktop chats; hooks reach busy turns |
+| Claude Code | Claude Code plugin (MCP server, monitor, hooks) | A monitor wakes idle sessions; the monitor and hooks reach busy turns |
+| Pi | Pi extension and `.pi/mcp.json` | The extension starts a turn or steers a busy agent |
+| Amp | Amp plugin and `.amp/settings.json` | The plugin appends a steering message, opening a thread if needed |
+
+Run setup with `--host codex|claude|pi|amp`. See [agent hosts](docs/HOSTS.md) for setup per host and for exactly what was tested. The new integrations were tested end to end with real host processes and a fake Telegram transport, not with live Telegram. The setup steps below describe Codex.
 
 ## First-time setup
 
@@ -34,7 +47,9 @@ Ask Codex:
 - **“Listen for Telegram”** — start a bounded listener for a chosen local chat while ChatGPT is open normally.
 - **“Leave Telegram listening”** — keep the listener running until stopped. Automatic restart after login requires an explicit service request; see the [macOS service procedure](docs/MACOS_SERVICE.md).
 
-Status and history do not contact Telegram or send messages. Collection is **on demand** by default: asking for new messages polls the shared collector and may progress previously authorized queued sends. Setup starts no listener or background service.
+AOT suspends a connection when the bot is removed or restricted, the topic is closed or edited, or the group moves to a new chat id. Queued messages are kept. Resume does not clear a suspension. After fixing the cause, the owner runs `aot unsuspend` on this computer; it checks with Telegram first. A moved group needs a new pairing instead. See [clear a suspended connection](docs/OPERATIONS.md#clear-a-suspended-connection).
+
+Status and history do not contact Telegram or send messages. In Codex, collection is **on demand** by default: asking for new messages polls the shared collector and may progress previously authorized queued sends. Setup starts no listener or background service. The Claude Code, Pi and Amp integrations collect while the host is open, and the Codex plugin hooks collect at most every 10 seconds during a turn; see [agent hosts](docs/HOSTS.md).
 
 The optional [desktop listener](docs/DIRECT_DISPATCH.md) uses native Codex queueing and a wake URL to notify an existing local chat. **Open ChatGPT from the app list as usual.** No custom app launcher, protocol wrapper or relay model is required. Listening follows the requested duration or runs continuously when explicitly requested; the target uses its own scoped Telegram tools to handle pending work. Without a duration or ongoing-listening request, the default check lasts 55 seconds.
 
@@ -46,8 +61,11 @@ On macOS, the listener discovers the bundled native CLI inside ChatGPT.app or Co
 
 ## Validation and setup details
 
+Version 0.8.0 adds push delivery for four hosts. Its full suite passed **764 passed, 2 skipped**, and its host checks are listed in [agent hosts](docs/HOSTS.md#what-was-tested). The 0.7.2 results below still describe the Codex installation path.
+
 Version 0.7.2 passed a fresh install from the public GitHub repository with **no uv executable available**, followed by automatic pip bootstrap, repeat reuse, cache-independent runtime operation and fresh fake Alpha/Beta scoped MCP checks. The release suite passed **572 tests in 21.71 seconds**. Earlier live Telegram checks covered peer delivery, pause/resume and normal-desktop wake/reply/ack. The desktop plugin UI, automatic onboarding button and a fresh real-bot registration remain untested. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for the evidence and limits.
 
+- [Agent hosts: Claude Code, Codex, Pi and Amp](docs/HOSTS.md)
 - [Guided setup, local controls and advanced CLI](docs/OPERATIONS.md)
 - [Listen with the normally opened desktop](docs/DIRECT_DISPATCH.md)
 - [Shared binding procedure and older model-mediated relay](docs/RELAY.md)
@@ -67,6 +85,8 @@ uv sync --frozen --extra dev --python /usr/bin/python3.13
 .venv/bin/python scripts/validate_package.py
 ```
 
-The demo and automated tests use isolated fake state. They need no token and do not call Telegram. The lockfile pins dependencies, including the official Python MCP SDK. Source/runtime installation does not install a daemon or select a live account. Claude integration is deferred; this workflow targets Codex.
+The demo and automated tests use isolated fake state. They need no token and do not call Telegram. The lockfile pins dependencies, including the official Python MCP SDK. Source/runtime installation does not install a daemon or select a live account.
+
+`scripts/e2e_fake.py` prepares an isolated fake-Telegram project for any host and injects test messages, so a real Claude Code, Codex, Pi or Amp process can be checked end to end without a token. See [agent hosts](docs/HOSTS.md#what-was-tested).
 
 Licensed under [Apache 2.0](LICENSE).

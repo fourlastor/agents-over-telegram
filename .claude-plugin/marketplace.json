@@ -1,0 +1,12 @@
+{
+  "name": "agents-over-telegram",
+  "description": "Agents over Telegram for Claude Code",
+  "owner": {"name": "Daniele Conti"},
+  "plugins": [
+    {
+      "name": "agents-over-telegram",
+      "source": "./",
+      "description": "One human-owned Telegram bot shared by several coding agents, with push delivery into running sessions."
+    }
+  ]
+}

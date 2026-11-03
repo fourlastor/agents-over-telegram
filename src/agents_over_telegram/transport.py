@@ -110,6 +110,30 @@ class TelegramTransport:
             params["reply_parameters"] = {"message_id": reply_to}
         return self._call("sendMessage", params, sending=True)
 
+    def get_chat_member(self, chat_id, user_id):
+        result = self._call("getChatMember", {"chat_id": chat_id, "user_id": user_id})
+        if not isinstance(result, dict) or not isinstance(result.get("status"), str):
+            raise TransportError("invalid_chat_member")
+        return _chat_member(result)
+
+
+def _chat_member(value):
+    """Keep only the fields the suspension check reads; never user profile data."""
+    member = {"status": value.get("status")}
+    for key in ("is_member", "can_send_messages"):
+        if isinstance(value.get(key), bool):
+            member[key] = value[key]
+    return member
+
+
+def _fake_chat_member(members, chat_id, user_id):
+    # Telegram answers 400/403 when the bot cannot see the chat. Model that for
+    # chats with no explicit entry, so tests fail closed like the real API.
+    member = members.get(str(chat_id), {}).get(str(user_id))
+    if member is None:
+        raise TransportError(403)
+    return _chat_member(member)
+
 
 class FakeTransport:
     """No sockets; modes sent/reject/rate_limit/unknown/crash model failure windows."""
@@ -121,6 +145,7 @@ class FakeTransport:
         self.outcomes = list(outcomes or [])
         self.sent = []
         self.poll_offsets = []
+        self.chat_members = {}  # {str(chat_id): {str(user_id): ChatMember dict}}
         self._lock = threading.RLock()
 
     def get_me(self):
@@ -151,6 +176,10 @@ class FakeTransport:
             if outcome == "crash":
                 raise SystemExit("fake crash after acceptance")
             return copy.deepcopy(message)
+
+    def get_chat_member(self, chat_id, user_id):
+        with self._lock:
+            return _fake_chat_member(self.chat_members, chat_id, user_id)
 
 
 class FileFakeTransport:
@@ -200,6 +229,10 @@ class FileFakeTransport:
         if outcome == "crash":
             raise SystemExit("fake crash after acceptance")
         return result
+
+    def get_chat_member(self, chat_id, user_id):
+        with self._data() as data:
+            return _fake_chat_member(data.get("chat_members", {}), chat_id, user_id)
 
 
 def make_transport(state_dir, *, fake=False):
