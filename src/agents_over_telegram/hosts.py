@@ -97,9 +97,9 @@ def _maybe_collect(core, state: Path, fake: bool, interval) -> None:
     if row is None or (row['last_attempt'] is not None and core.clock() - row['last_attempt'] < interval):
         return
     from .cli import LazyTransport, _mode
-    _mode(state, fake)
-    core.transport = LazyTransport(state, fake)
     try:
+        _mode(state, fake)
+        core.transport = LazyTransport(state, fake)
         core.collect(timeout=0)
     except Exception:
         # Intake errors are recorded by the core; the hook still answers.

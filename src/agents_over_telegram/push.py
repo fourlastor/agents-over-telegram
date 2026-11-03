@@ -41,7 +41,9 @@ NOTICE_GUIDANCE = (
 
 
 def ensure_tables(core) -> None:
-    with core._tx() as db:
+    # No explicit write transaction: once the table exists these statements are
+    # no-ops, so frequent hook calls do not take the shared write lock.
+    with core._db() as db:
         db.execute('''CREATE TABLE IF NOT EXISTS push_announcements (
             inbox_id TEXT PRIMARY KEY REFERENCES inbox(id),
             client_id TEXT NOT NULL REFERENCES clients(id),

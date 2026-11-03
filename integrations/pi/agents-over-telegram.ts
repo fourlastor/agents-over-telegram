@@ -47,7 +47,11 @@ export function runtimeExecutable(project: string): string | undefined {
 		const executable = value.executable;
 		if (typeof executable !== "string" || !path.isAbsolute(executable) || executable.includes("\0")) return undefined;
 		fs.accessSync(executable, fs.constants.X_OK);
-		return fs.statSync(executable).isFile() ? executable : undefined;
+		const info = fs.statSync(executable);
+		const uid = typeof process.getuid === "function" ? process.getuid() : info.uid;
+		// Same rule as scripts/aot_host_launch.py: owned by this user or root, not world-writable.
+		if (!info.isFile() || (info.uid !== uid && info.uid !== 0) || (info.mode & 0o002) !== 0) return undefined;
+		return executable;
 	} catch {
 		return undefined;
 	}
@@ -127,6 +131,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		stop();
+		process.removeListener("exit", stop);
+		process.once("exit", stop);
 		start(ctx.cwd, (text) => {
 			if (ctx.hasUI) ctx.ui.notify(text, "warning");
 		});
@@ -134,7 +140,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		stop();
+		process.removeListener("exit", stop);
 	});
-
-	process.once("exit", stop);
 }

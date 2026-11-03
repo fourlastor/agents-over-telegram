@@ -136,7 +136,9 @@ def main(argv):
         # The input was already read to find the project, so pass it on.
         import subprocess
         result = subprocess.run(args + ["--project-dir", project], input=hook_input,
-                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                # Stay below the shortest host hook timeout (Codex: 20 s).
+                                timeout=18)
         if result.returncode == 0 and result.stdout:
             sys.stdout.buffer.write(result.stdout)
             sys.stdout.flush()
