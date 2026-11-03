@@ -117,6 +117,9 @@ def render_plugin(state_dir, client_file, output, name):
             manifest.get("extensions", {}).get("com.openai", {}).pop("onboardingSkill", None)
             if filename == ".codex-plugin/plugin.json":
                 manifest["mcpServers"] = "./.mcp.json"
+                # Push hooks need a project's runtime pointer and the host
+                # launcher; a rendered profile is a fixed client, so it ships neither.
+                manifest.pop("hooks", None)
             path.write_text(json.dumps(manifest, indent=2) + "\n")
     return {"plugin_directory": str(output), "name": name, "installed": False,
             "scope": "One client identity per server process; separate chat isolation requires host support."}
