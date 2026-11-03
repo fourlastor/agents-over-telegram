@@ -111,19 +111,18 @@ def test_plugin_renderer_has_no_secret_or_token_and_valid_schema(tmp_path):
     for path in rendered.rglob("*"):
         if path.is_file():
             assert client["client_secret"] not in path.read_text()
-    for name in ("plugin", "mcp"):
-        schema = json.loads((root/"docs"/"schemas"/(name+".schema.json")).read_text())
-        Draft202012Validator(schema).validate(json.loads((rendered/(name+".json")).read_text()))
-    manifest = json.loads((rendered/"mcp.json").read_text())
+    # A root Agent Plugins manifest would make Codex ignore .codex-plugin/plugin.json.
+    assert not (rendered/"plugin.json").exists() and not (rendered/"mcp.json").exists()
+    manifest = json.loads((rendered/".mcp.json").read_text())
+    schema = json.loads((root/"docs"/"schemas"/"mcp.schema.json").read_text())
+    Draft202012Validator(schema).validate({"$schema": schema["$id"], **manifest})
     server = next(iter(manifest["mcpServers"].values()))
     assert server["args"][-1] == str(client_path)
     assert "AOT_CLIENT_FILE" not in json.dumps(manifest)
-    assert json.loads((rendered/".mcp.json").read_text()) == {"mcpServers": manifest["mcpServers"]}
     compat = json.loads((rendered/".codex-plugin/plugin.json").read_text())
     assert compat["mcpServers"] == "./.mcp.json"
-    for name in ("plugin.json", ".codex-plugin/plugin.json"):
-        metadata = json.loads((rendered/name).read_text())
-        assert "onboardingSkill" not in metadata.get("extensions", {}).get("com.openai", {})
+    assert compat["name"] == "agents-over-telegram-alpha"
+    assert "onboardingSkill" not in compat.get("extensions", {}).get("com.openai", {})
     spec = spec_from_file_location("package_validator", root / "scripts/validate_package.py")
     validator = module_from_spec(spec)
     spec.loader.exec_module(validator)

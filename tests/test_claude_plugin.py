@@ -14,8 +14,8 @@ def load(relative):
 def test_manifest_identity_matches_the_other_packages():
     manifest = load('.claude-plugin/plugin.json')
     version = tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['version']
-    assert manifest['name'] == load('plugin.json')['name'] == 'agents-over-telegram'
-    assert manifest['version'] == load('plugin.json')['version'] == load('.codex-plugin/plugin.json')['version'] == version
+    assert manifest['name'] == load('.codex-plugin/plugin.json')['name'] == 'agents-over-telegram'
+    assert manifest['version'] == load('.codex-plugin/plugin.json')['version'] == version
 
 
 def test_mcp_server_starts_through_the_project_launcher():

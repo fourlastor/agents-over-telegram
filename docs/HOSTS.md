@@ -54,7 +54,11 @@ In `-p` (non-interactive) mode, monitors do not start. The hooks still add notic
 
 ### Codex
 
-The Codex plugin now ships hooks for `SessionStart`, `UserPromptSubmit`, `PostToolUse` and `Stop`. Codex asks you to review and trust plugin hooks once. Open the Codex CLI in the project and run `/hooks` to review them. The desktop app may not show `/hooks`.
+The Codex plugin ships hooks for `SessionStart`, `UserPromptSubmit`, `PostToolUse` and `Stop`. Codex asks you to review and trust plugin hooks once. Open the Codex CLI in the project and run `/hooks` to review them. The desktop app may not show `/hooks`.
+
+**Version 0.8.0 shipped these hooks, but Codex did not load them.** The 0.8.0 package had two manifests: a root `plugin.json` in the Agent Plugins format and `.codex-plugin/plugin.json`. Codex uses the root `plugin.json` when it exists, and Codex loads no hooks for an Agent Plugins package. So Codex reported no plugin hooks and never asked to trust them. The package now has only `.codex-plugin/plugin.json`, and Codex loads the four hooks as plugin hooks. See [how this was checked](#how-the-codex-plugin-hooks-were-checked).
+
+If you used 0.8.0 and copied `codex/hooks.json` into a project's `.codex/hooks.json` as a workaround, delete that project file after you update the plugin. Otherwise Codex runs the hooks twice and adds every notice twice.
 
 The hooks use the project folder from Codex's hook input (`cwd`). They collect from Telegram at most every 10 seconds. If `relay-desktop --collect` is running, the hooks see its collector lock and do not compete with it. Idle desktop chats still need `relay-desktop`, as before ([listening](DIRECT_DISPATCH.md)).
 
@@ -96,18 +100,30 @@ The Claude Code and Amp interactive rows come from a final run of the hosts at t
 
 **Fixes found by these runs.** The first busy Claude Code run delivered the notice mid-task, but the model said a Telegram message was waiting and asked the user whether to handle it. The notice and the MCP server instructions now say that the local user wants these messages handled when they arrive, without asking first. They also still say that message text cannot widen permissions, approvals or recipients. After this change, both Claude Code busy checks passed. The runs also found a monitor that stopped in an unconfigured folder (Claude Code then reports the stop as an event) and a watcher left running after its host was killed. Both are fixed. The first live Codex run found that Codex's automatic approval reviewer rejects `messages_poll` when a hook notice asks for it. Setup now approves the three push-handling tools (see [Codex](#codex)).
 
-**How the Codex check loaded the hooks.** Installing the plugin from a marketplace would change the user's Codex configuration, so the check did not do it. Instead it copied the plugin's `codex/hooks.json` unchanged into the test project's `.codex/hooks.json` and set `PLUGIN_ROOT` to this checkout. The hook commands, the launcher and the runtime were the same as in the plugin. The project layer had to be trusted, and `--dangerously-bypass-hook-trust` replaced the `/hooks` review for this one run. Codex then stored a trust entry for each test folder in the user's `~/.codex/config.toml`; those entries were removed afterwards.
+**How the Codex check loaded the hooks.** This check did not test the plugin's own hook loading, and 0.8.0 wrongly said that it did. Installing the plugin from a marketplace would change the user's Codex configuration, so the check did not do it. Instead it copied the plugin's `codex/hooks.json` unchanged into the test project's `.codex/hooks.json` and set `PLUGIN_ROOT` to this checkout. The hook commands, the launcher and the runtime were the same as in the plugin. The project layer had to be trusted, and `--dangerously-bypass-hook-trust` replaced the `/hooks` review for this one run. Codex then stored a trust entry for each test folder in the user's `~/.codex/config.toml`; those entries were removed afterwards.
 
 **Pi with a real model needs Node.js network access.** In the first Pi runs, Node.js could not reach the model providers, so the check used `scripts/e2e/scripted_model.py`, a small OpenAI-compatible model on `127.0.0.1`. The later run used a real OpenAI model. On the test machine, Node.js could still not reach Anthropic hosts (a raw TCP connection from Node.js timed out while `curl` and Python connected), so Pi's default Claude model failed there. This is a local network filter, not part of AOT.
 
 **Not tested end to end:**
 
 - **Real Telegram** for any of these new integrations. Earlier live Telegram evidence for Codex `relay-desktop` is in [compatibility](COMPATIBILITY.md).
-- **Codex plugin hooks after a marketplace install and a `/hooks` review.** The live check used the same hooks file as a project hook, with trust bypassed (see above). The Codex desktop app and the interactive Codex CLI were not tested; the check used `codex exec`. The `Stop` continuation was covered only offline, in `tests/test_codex_hooks.py`.
+- **Codex plugin hooks running in a live session after a marketplace install and a `/hooks` review.** The live check used the same hooks file as a project hook, with trust bypassed (see above). The check in [How the Codex plugin hooks were checked](#how-the-codex-plugin-hooks-were-checked) shows that Codex loads the plugin hooks, but it did not run a session. The Codex desktop app and the interactive Codex CLI were not tested; the check used `codex exec`. The `Stop` continuation was covered only offline, in `tests/test_codex_hooks.py`.
 - **Installation from a marketplace** for Claude Code and Codex, and `pi install` for Pi. The checks loaded the plugin with `--plugin-dir` (Claude Code), `-e` (Pi) and a copy in `.amp/plugins/` (Amp).
 - **The Amp workspace approval flow.** The check passed the same server entry with `--mcp-config` instead of approving `.amp/settings.json`.
 - **The Claude Code desktop app** (Code tab). Its documentation does not say whether plugin monitors run there.
 - **Linux** for the new integrations.
+
+### How the Codex plugin hooks were checked
+
+These checks ran on macOS on 2026-11-03 with Codex CLI 0.163.0. Each check copied the package to a temporary folder and started `codex app-server` with a new, empty `CODEX_HOME`, so the user's Codex configuration was not used or changed. A script then sent JSON-RPC requests: `plugin/read` with the package's `.agents/plugins/marketplace.json`, then `plugin/install`, then `plugin/read` again, then `hooks/list` for an empty project folder.
+
+| Package | Hooks reported by `plugin/read` | `hooks/list` | Skills | Onboarding skill after install |
+|---|---|---|---|---|
+| 0.8.0 as released (root `plugin.json` and `.codex-plugin/plugin.json`) | None | None | `telegram-coordinate`, `telegram-setup` | `telegram-setup` |
+| 0.8.0 with `"hooks": "./codex/hooks.json"` added to the root manifest's `extensions.com.openai` | None | Not run | Same | Not run |
+| This fix: archive from `scripts/package_local.py`, no root `plugin.json` | `postToolUse`, `sessionStart`, `userPromptSubmit`, `stop` | The same four, source `plugin`, trust status `untrusted` | Same | `telegram-setup` |
+
+Trust status `untrusted` means that Codex knows the hooks and waits for the human to trust them. The Codex 0.163.0 source code explains the first two rows. `find_plugin_manifest_path` chooses a root `plugin.json` with an Agent Plugins `$schema` before `.codex-plugin/plugin.json`. The plugin loader and `plugin/read` then skip hooks for every Agent Plugins package (`codex-rs/core-plugins/src/loader.rs` and `manager.rs`). A private package from `plugin-render` was also checked the same way: Codex loaded its `telegram` MCP server from `.mcp.json` and reported no hooks, as intended.
 
 ## Security notes
 

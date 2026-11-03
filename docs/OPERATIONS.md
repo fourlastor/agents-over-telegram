@@ -174,7 +174,7 @@ MCP uses stdin/stdout, so the host must launch this process. The private capabil
 
 A Codex chat label is not client authentication. If the host shares one MCP entry across chats, those chats share that entry's capability. Use separately scoped host configurations to preserve the tested boundary. Do not install both profiles globally and assume each chat can access only its matching one.
 
-The normal source plugin supplies skills and onboarding only. Its root has no `mcp.json` or `.mcp.json`, and the compatibility manifest has no `mcpServers` declaration. Guided setup writes the native project MCP entry shown above; normal installation does not run the optional launcher.
+The normal source plugin supplies skills and onboarding only. Its root has no `plugin.json`, `mcp.json` or `.mcp.json`, and `.codex-plugin/plugin.json` has no `mcpServers` declaration. Guided setup writes the native project MCP entry shown above; normal installation does not run the optional launcher.
 
 For advanced hosts that can scope an entire plugin to exactly one intended client, `plugin-render` synthesizes a separate private package with explicit MCP declarations and absolute paths. Do not globally enable that rendered package: every chat that can access its server gets the same client's permissions. Do not combine it with the setup-created native entry for that client. Normal Codex setup does not require rendering.
 
@@ -187,7 +187,7 @@ Generate this optional private package for an existing live client:
 .venv/bin/python scripts/validate_package.py /absolute/private/path/agents-over-telegram-alpha
 ```
 
-Rendering creates a new directory and does not install it or overwrite an existing package. It generates portable and compatibility MCP definitions with an explicitly selected installed executable, state directory and client file. It does not copy credentials, queues or capability contents. Treat rendered packages as private local profiles: their absolute paths are machine-specific and should not be published. The executable and source environment must remain available. Native scoped tools have been tested live; plugin UI installation and automatic onboarding discovery remain unvalidated. Project identity is shared across its chats; see [compatibility](COMPATIBILITY.md).
+Rendering creates a new directory and does not install it or overwrite an existing package. It generates one `.mcp.json` MCP definition, referenced from `.codex-plugin/plugin.json`, with an explicitly selected installed executable, state directory and client file. It does not copy credentials, queues or capability contents. Treat rendered packages as private local profiles: their absolute paths are machine-specific and should not be published. The executable and source environment must remain available. Native scoped tools have been tested live; plugin UI installation and automatic onboarding discovery remain unvalidated. Project identity is shared across its chats; see [compatibility](COMPATIBILITY.md).
 
 ## Read captured context from the last 24 hours
 

@@ -89,10 +89,10 @@ def render_plugin(state_dir, client_file, output, name):
     if output.exists():
         raise CredentialError("plugin_output_exists")
     source = Path(__file__).resolve().parents[2]
-    if not (source / "plugin.json").is_file():
+    if not (source / ".codex-plugin" / "plugin.json").is_file():
         raise CredentialError("plugin_template_missing_use_source_checkout")
     output.mkdir(parents=True, mode=0o700)
-    for relative in ("plugin.json", ".codex-plugin", "skills", "docs/OPERATIONS.md", "docs/LIVE_VALIDATION.md", "docs/COMPATIBILITY.md", "docs/RELAY.md", "docs/DIRECT_DISPATCH.md", "docs/MACOS_SERVICE.md", "docs/BOT_EXCHANGES.md", "docs/HOSTS.md"):
+    for relative in (".codex-plugin", "skills", "docs/OPERATIONS.md", "docs/LIVE_VALIDATION.md", "docs/COMPATIBILITY.md", "docs/RELAY.md", "docs/DIRECT_DISPATCH.md", "docs/MACOS_SERVICE.md", "docs/BOT_EXCHANGES.md", "docs/HOSTS.md"):
         src, dst = source / relative, output / relative
         if src.is_dir():
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
@@ -102,25 +102,18 @@ def render_plugin(state_dir, client_file, output, name):
     executable = str(Path(sys.executable).parent / "aot")
     entry = {"type": "stdio", "command": executable,
              "args": ["--state-dir", str(state_dir), "mcp", "--client-file", str(Path(client_file).absolute())]}
-    for filename in ("mcp.json", ".mcp.json"):
-        manifest = {"mcpServers": {"telegram": entry}}
-        if filename == "mcp.json":
-            manifest["$schema"] = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
-        (output / filename).write_text(json.dumps(manifest, indent=2) + "\n")
-    for filename in ("plugin.json", ".codex-plugin/plugin.json"):
-        path = output / filename
-        if path.exists():
-            manifest = json.loads(path.read_text())
-            manifest["name"] = name
-            # A rendered profile is already wired. Its setup action must not
-            # create a second, project-native connection for the same client.
-            manifest.get("extensions", {}).get("com.openai", {}).pop("onboardingSkill", None)
-            if filename == ".codex-plugin/plugin.json":
-                manifest["mcpServers"] = "./.mcp.json"
-                # Push hooks need a project's runtime pointer and the host
-                # launcher; a rendered profile is a fixed client, so it ships neither.
-                manifest.pop("hooks", None)
-            path.write_text(json.dumps(manifest, indent=2) + "\n")
+    (output / ".mcp.json").write_text(json.dumps({"mcpServers": {"telegram": entry}}, indent=2) + "\n")
+    path = output / ".codex-plugin" / "plugin.json"
+    manifest = json.loads(path.read_text())
+    manifest["name"] = name
+    # A rendered profile is already wired. Its setup action must not
+    # create a second, project-native connection for the same client.
+    manifest.get("extensions", {}).get("com.openai", {}).pop("onboardingSkill", None)
+    manifest["mcpServers"] = "./.mcp.json"
+    # Push hooks need a project's runtime pointer and the host
+    # launcher; a rendered profile is a fixed client, so it ships neither.
+    manifest.pop("hooks", None)
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
     return {"plugin_directory": str(output), "name": name, "installed": False,
             "scope": "One client identity per server process; separate chat isolation requires host support."}
 

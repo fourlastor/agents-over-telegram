@@ -58,7 +58,7 @@ The wake uses `/usr/bin/open -a <validated app bundle> codex://threads/wake/<UUI
 
 `codex queue` is a queue, not a promise of mid-turn steering. In the macOS live check, an accepted notice stayed queued while the target continued using tools. The desktop exposed a manual “Steer” action. Clicking it can unblock that notice, but does not validate automatic busy-session delivery.
 
-Since version 0.8.0 the Codex plugin ships these hooks itself (`codex/hooks.json`, referenced from `.codex-plugin/plugin.json`). They add a fixed notice at `SessionStart`, `UserPromptSubmit`, `PostToolUse` and `Stop`. The plugin's native queue remains the idle wake path. A hook does not interrupt an in-flight model request or a long-running tool. See [agent hosts](HOSTS.md#codex) for setup.
+Since version 0.8.0 the Codex plugin ships these hooks itself (`codex/hooks.json`, referenced from `.codex-plugin/plugin.json`). In 0.8.0 itself Codex did not load them, because of a root `plugin.json`; see [agent hosts](HOSTS.md#codex). They add a fixed notice at `SessionStart`, `UserPromptSubmit`, `PostToolUse` and `Stop`. The plugin's native queue remains the idle wake path. A hook does not interrupt an in-flight model request or a long-running tool. See [agent hosts](HOSTS.md#codex) for setup.
 
 The shipped hooks follow the rules learned from the earlier operator-installed hook:
 
