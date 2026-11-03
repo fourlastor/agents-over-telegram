@@ -517,3 +517,18 @@ def test_launcher_runs_real_watch_and_hook(tmp_path):
                   stdin=json.dumps({'hook_event_name': 'Stop', 'stop_hook_active': False}))
     assert hook.returncode == 0, hook.stderr
     assert json.loads(hook.stdout)['decision'] == 'block'
+
+
+@pytest.mark.parametrize('host', HOSTS)
+def test_pairing_follow_up_command_keeps_host(tmp_path, host):
+    result = prepare(tmp_path, host)
+    assert result['next_step'].endswith('--host ' + host)
+
+
+def test_rendered_codex_plugin_has_no_dangling_hooks(tmp_path):
+    result = connected(tmp_path, 'codex')
+    output = tmp_path / 'rendered'
+    cli.render_plugin(result['state_dir'], result['client_file'], output, 'aot-rendered')
+    manifest = json.loads((output / '.codex-plugin' / 'plugin.json').read_text())
+    assert 'hooks' not in manifest
+    assert json.loads((ROOT / '.codex-plugin' / 'plugin.json').read_text())['hooks'] == './codex/hooks.json'

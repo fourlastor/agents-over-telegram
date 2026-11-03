@@ -26,6 +26,7 @@ const POINTER = '.aot-runtime.json'
 const PROFILE = '.aot-profile.json'
 const MAX_LINE = 64 * 1024
 const MAX_QUEUED = 20
+const APPEND_RETRY_MS = [2_000, 5_000, 15_000, 30_000, 60_000]
 const RESTART_DELAYS_MS = [2_000, 5_000, 15_000, 30_000, 60_000]
 const FATAL_REASONS = new Set(['client_revoked', 'unknown_client', 'authentication_failed', 'account_not_registered'])
 
@@ -87,7 +88,25 @@ export default function (amp: PluginAPI) {
 		}
 	}
 
+	let retryTimer: ReturnType<typeof setTimeout> | undefined
+	let appendFailures = 0
+	const keep = (notice: string) => {
+		if (queued.length < MAX_QUEUED) queued.push(notice)
+	}
+	// The watcher announces each delivery once, so a notice that could not be
+	// appended is kept and retried. Otherwise its messages would wait unseen.
+	const retryQueued = () => {
+		if (stopped || retryTimer || !queued.length) return
+		const delay = APPEND_RETRY_MS[Math.min(appendFailures, APPEND_RETRY_MS.length - 1)]
+		retryTimer = setTimeout(async () => {
+			retryTimer = undefined
+			const pending = queued.splice(0)
+			for (const notice of pending) await deliver(notice)
+		}, delay)
+	}
+
 	const deliver = async (notice: string) => {
+		if (stopped) return
 		let target = amp.activeThread.current?.id ?? threadID
 		if (!target) {
 			opening ??= openThread()
@@ -96,20 +115,29 @@ export default function (amp: PluginAPI) {
 			if (target) threadID = target
 		}
 		if (!target) {
-			// Deliver when the first thread session starts.
-			if (queued.length < MAX_QUEUED) queued.push(notice)
+			// Deliver when the first thread session starts, or on the next retry.
+			keep(notice)
+			appendFailures += 1
+			retryQueued()
 			return
 		}
 		try {
 			await amp.threads.get(target as any).appendUserMessage({ type: 'user-message', content: notice }, { steer: true })
+			appendFailures = 0
 		} catch (error) {
 			amp.logger.log(`agents-over-telegram: could not append notice: ${String(error).slice(0, 200)}`)
+			// The thread may be gone: let the next attempt use the active thread or open one.
+			if (threadID === target) threadID = undefined
+			keep(notice)
+			appendFailures += 1
+			retryQueued()
 		}
 	}
 
 	amp.on('session.start', async (event) => {
 		threadID = event.thread.id
-		while (queued.length) await deliver(queued.shift() as string)
+		const pending = queued.splice(0)
+		for (const notice of pending) await deliver(notice)
 	})
 
 	const run = () => {
@@ -159,6 +187,7 @@ export default function (amp: PluginAPI) {
 	amp.onDispose(() => {
 		stopped = true
 		if (restartTimer) clearTimeout(restartTimer)
+		if (retryTimer) clearTimeout(retryTimer)
 		if (child && child.exitCode === null) child.kill('SIGTERM')
 	})
 

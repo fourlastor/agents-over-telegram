@@ -224,7 +224,8 @@ def _next_setup(args, state, fake, project, client):
     argv = [_entry(state, client, fake)['command'], '--state-dir', str(state)]
     if fake:
         argv.append('--fake')
-    argv += ['setup', '--label', args.label, '--project-dir', str(project)]
+    argv += ['setup', '--label', args.label, '--project-dir', str(project),
+             '--host', getattr(args, 'host', None) or 'codex']
     return shlex.join(argv)
 
 

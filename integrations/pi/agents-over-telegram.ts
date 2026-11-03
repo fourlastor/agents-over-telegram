@@ -62,8 +62,13 @@ export default function (pi: ExtensionAPI) {
 	let restartTimer: ReturnType<typeof setTimeout> | undefined;
 	let stopped = true;
 	let failures = 0;
+	// Each start gets a new generation. Callbacks from an older watcher see a
+	// different generation and do nothing, so a session restart cannot leave
+	// two watchers running.
+	let generation = 0;
 
 	const stop = () => {
+		generation += 1;
 		stopped = true;
 		if (restartTimer) clearTimeout(restartTimer);
 		restartTimer = undefined;
@@ -82,8 +87,11 @@ export default function (pi: ExtensionAPI) {
 		const executable = runtimeExecutable(project);
 		if (!executable) return;
 		stopped = false;
+		failures = 0;
+		const current = ++generation;
+		const active = () => !stopped && generation === current;
 		const run = () => {
-			if (stopped) return;
+			if (!active()) return;
 			const proc = spawn(executable, ["watch", "--collect", "--format", "jsonl"], {
 				cwd: project,
 				stdio: ["ignore", "pipe", "ignore"],
@@ -107,6 +115,7 @@ export default function (pi: ExtensionAPI) {
 					} catch {
 						continue;
 					}
+					if (!active()) return;
 					if (event?.type === "telegram_messages" && typeof event.notice === "string") {
 						failures = 0;
 						deliver(event.notice);
@@ -119,7 +128,7 @@ export default function (pi: ExtensionAPI) {
 			proc.on("error", () => {});
 			proc.on("exit", () => {
 				if (child === proc) child = undefined;
-				if (stopped || fatal) return;
+				if (!active() || fatal) return;
 				// Restart a watcher that died unexpectedly, with a growing delay.
 				const delay = RESTART_DELAYS_MS[Math.min(failures, RESTART_DELAYS_MS.length - 1)];
 				failures += 1;
