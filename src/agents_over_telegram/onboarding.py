@@ -127,7 +127,26 @@ def _entry(state, client, fake):
     return {'command': str(Path(sys.executable).absolute().parent / 'aot'), 'args': args}
 
 
-def _config_plan(project, expected):
+# The tools that handle pushed Telegram work: read the inbox, reply in the bound
+# topic, and acknowledge. Codex's automatic approval reviewer rejects these calls
+# when a hook notice (not the user's typed prompt) asks for them, so setup
+# approves exactly these three for this project's scoped server. Pause,
+# disconnect and connection changes still follow the normal approval policy.
+CODEX_APPROVED_TOOLS = ('messages_poll', 'message_send', 'messages_ack')
+
+
+def _approvals_toml():
+    return ''.join(f'\n[mcp_servers.telegram.tools.{name}]\napproval_mode = "approve"\n'
+                   for name in CODEX_APPROVED_TOOLS)
+
+
+def _config_plan(project, expected, approvals=True):
+    """Plan the project's Codex config.
+
+    With ``approvals``, a new or older ``telegram`` entry without a ``tools``
+    table also gets the push-handling tool approvals. An existing ``tools``
+    table is the user's choice and stays unchanged.
+    """
     _check_directory(project)
     folder = project / '.codex'
     _check_directory(folder)
@@ -142,16 +161,23 @@ def _config_plan(project, expected):
             selected = servers['telegram']
             if not isinstance(selected, dict) or any(selected.get(key) != value for key, value in expected.items()):
                 raise CredentialError('project_mcp_config_conflict')
-            extras = set(selected) - set(expected)
+            extras = set(selected) - set(expected) - {'tools'}
             if extras - {'startup_timeout_sec', 'tool_timeout_sec'} or any(type(selected[key]) not in (int, float) or not 0 < selected[key] <= 3600 for key in extras):
                 raise CredentialError('project_mcp_config_conflict')
-            return path, raw, raw
-        suffix = '\n[mcp_servers.telegram]\ncommand = ' + json.dumps(expected['command']) + '\nargs = ' + json.dumps(expected['args']) + '\n'
-        proposed = (raw or '') + suffix
-        if tomllib.loads(proposed)['mcp_servers']['telegram'] != expected:
+            tools = selected.get('tools')
+            if tools is not None and (not isinstance(tools, dict) or not all(isinstance(value, dict) for value in tools.values())):
+                raise CredentialError('project_mcp_config_conflict')
+            if tools is not None or not approvals:
+                return path, raw, raw
+            proposed = raw + _approvals_toml()
+        else:
+            suffix = '\n[mcp_servers.telegram]\ncommand = ' + json.dumps(expected['command']) + '\nargs = ' + json.dumps(expected['args']) + '\n'
+            proposed = (raw or '') + suffix + (_approvals_toml() if approvals else '')
+        selected = tomllib.loads(proposed)['mcp_servers']['telegram']
+        if {key: selected[key] for key in expected} != expected:
             raise ValueError()
         return path, raw, proposed
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, KeyError):
         raise CredentialError('invalid_project_config') from None
 
 

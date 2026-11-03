@@ -74,7 +74,8 @@ def _relay_project_valid(core, binding, fake):
             return False
         client = Path(profile['client_file'])
         _client(core, client, binding['client_id'])
-        _, current, proposed = _config_plan(project, _entry(core.state_dir, client, fake))
+        # Tool approvals are optional here, so configs from older setups stay valid.
+        _, current, proposed = _config_plan(project, _entry(core.state_dir, client, fake), approvals=False)
         return current is not None and current == proposed
     except (CredentialError, CoreError, OSError, ValueError):
         return False

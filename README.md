@@ -59,7 +59,7 @@ On macOS, the listener discovers the bundled native CLI inside ChatGPT.app or Co
 
 ## Validation and setup details
 
-Version 0.8.0 adds push delivery for four hosts. Its full suite passed **761 passed, 2 skipped**, and its host checks are listed in [agent hosts](docs/HOSTS.md#what-was-tested). The 0.7.2 results below still describe the Codex installation path.
+Version 0.8.0 adds push delivery for four hosts. Its full suite passed **764 passed, 2 skipped**, and its host checks are listed in [agent hosts](docs/HOSTS.md#what-was-tested). The 0.7.2 results below still describe the Codex installation path.
 
 Version 0.7.2 passed a fresh install from the public GitHub repository with **no uv executable available**, followed by automatic pip bootstrap, repeat reuse, cache-independent runtime operation and fresh fake Alpha/Beta scoped MCP checks. The release suite passed **572 tests in 21.71 seconds**. Earlier live Telegram checks covered peer delivery, pause/resume and normal-desktop wake/reply/ack. The desktop plugin UI, automatic onboarding button and a fresh real-bot registration remain untested. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for the evidence and limits.
 
