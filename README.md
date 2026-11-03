@@ -47,6 +47,8 @@ Ask Codex:
 - **“Listen for Telegram”** — start a bounded listener for a chosen local chat while ChatGPT is open normally.
 - **“Leave Telegram listening”** — keep the listener running until stopped. Automatic restart after login requires an explicit service request; see the [macOS service procedure](docs/MACOS_SERVICE.md).
 
+AOT suspends a connection when the bot is removed or restricted, the topic is closed or edited, or the group moves to a new chat id. Queued messages are kept. Resume does not clear a suspension. After fixing the cause, the owner runs `aot unsuspend` on this computer; it checks with Telegram first. A moved group needs a new pairing instead. See [clear a suspended connection](docs/OPERATIONS.md#clear-a-suspended-connection).
+
 Status and history do not contact Telegram or send messages. In Codex, collection is **on demand** by default: asking for new messages polls the shared collector and may progress previously authorized queued sends. Setup starts no listener or background service. The Claude Code, Pi and Amp integrations collect while the host is open, and the Codex plugin hooks collect at most every 10 seconds during a turn; see [agent hosts](docs/HOSTS.md).
 
 The optional [desktop listener](docs/DIRECT_DISPATCH.md) uses native Codex queueing and a wake URL to notify an existing local chat. **Open ChatGPT from the app list as usual.** No custom app launcher, protocol wrapper or relay model is required. Listening follows the requested duration or runs continuously when explicitly requested; the target uses its own scoped Telegram tools to handle pending work. Without a duration or ongoing-listening request, the default check lasts 55 seconds.

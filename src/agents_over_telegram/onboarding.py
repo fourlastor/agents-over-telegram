@@ -15,7 +15,7 @@ import tomllib
 from .credentials import CredentialError, private_directory, read_private_json, write_private_json
 
 PROFILE_NAME = '.aot-profile.json'
-SHORT_COMMANDS = {'status', 'history', 'pause', 'resume'}
+SHORT_COMMANDS = {'status', 'history', 'pause', 'resume', 'unsuspend'}
 PROFILE_CLIENT_COMMANDS = SHORT_COMMANDS | {'flush', 'mcp', 'watch'}
 CONNECTED_NEXT_STEP = (
     'Open this exact project folder in Codex and trust it if prompted. Reopen its chat, then ask '

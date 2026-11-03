@@ -428,7 +428,15 @@ class Core:
                     message = 'Review the observed sender, group and topic locally, then confirm pairing.'
             elif row['suspended']:
                 state, action = 'suspended', 'review_connection'
-                message = 'Ask the local owner to review this suspended Telegram destination before continuing.'
+                if row['suspended'].startswith('group_migrated:'):
+                    message = ('This group moved to a new chat id. Queued messages are kept. Ask the local owner to '
+                               'disconnect and pair again in the new chat; "aot unsuspend" cannot clear a migration.')
+                elif row['suspended'] == 'topic_changed':
+                    message = ('This topic was closed or changed. Queued messages are kept. After the topic is open, '
+                               'ask the local owner to run "aot unsuspend --topic-open" on this computer.')
+                else:
+                    message = ('The bot was removed or restricted in this group. Queued messages are kept. After the bot '
+                               'can post there again, ask the local owner to run "aot unsuspend" on this computer.')
             elif row['paused']:
                 state, action = 'paused', 'resume_connection'
                 message = 'Resume this connection when you want to handle messages again; queued work is preserved.'
@@ -771,6 +779,54 @@ class Core:
                 raise CoreError('connection_suspended')
             db.execute('UPDATE bindings SET paused=? WHERE client_id=?', (int(paused), client_id))
         return self.connection_status(client_id)
+
+    def clear_suspension(self, client_id, *, topic_open_confirmed=False):
+        """Local owner control; never exposed as an agent MCP tool.
+
+        Ask Telegram first whether the bot can post in the bound chat again.
+        Clear the flag only for that exact earlier reason, so a newer suspension
+        that arrives during the check stays in place. Queued inbox and outbox
+        rows are not touched; they are delivered once the binding is usable.
+        """
+        if not isinstance(topic_open_confirmed, bool):
+            raise CoreError('invalid_unsuspend')
+        with self._db() as db:
+            binding = self._binding(db, client_id)
+            account = self._account(db)
+        reason = binding['suspended']
+        if not reason:
+            raise CoreError('not_suspended')
+        if reason.startswith('group_migrated:'):
+            # The destination itself changed. Clearing would keep sending to a
+            # chat id that no longer exists; the owner must pair again.
+            raise CoreError('group_migrated_pair_again')
+        if reason not in ('bot_removed_or_restricted', 'topic_changed'):
+            raise CoreError('unknown_suspension')
+        if reason == 'topic_changed' and not topic_open_confirmed:
+            # The Bot API has no read-only call for one forum topic's state.
+            raise CoreError('topic_open_confirmation_required')
+        try:
+            member = self.transport.get_chat_member(binding['chat_id'], account['bot_id'])
+        except TransportError as error:
+            if isinstance(error.code, int) and 400 <= error.code < 500 and error.code != 429:
+                raise CoreError('bot_not_in_chat') from None
+            raise CoreError('telegram_check_failed') from None
+        status = member.get('status') if isinstance(member, dict) else None
+        if not (status in ('member', 'administrator')
+                or (status == 'restricted' and member.get('is_member') is True
+                    and member.get('can_send_messages') is True)):
+            raise CoreError('bot_cannot_post')
+        with self._tx() as db:
+            cleared = db.execute('UPDATE bindings SET suspended=NULL WHERE client_id=? AND connected=1 AND suspended=?',
+                                 (client_id, reason)).rowcount
+            if not cleared:
+                raise CoreError('suspension_changed')
+        status_after = self.connection_status(client_id)
+        return {'client_id': client_id, 'previous_suspension': reason, 'suspended': None,
+                'paused': status_after['paused'], 'state': status_after['state'],
+                'verified': {'bot_member_status': status, 'topic_open': 'owner_confirmed' if reason == 'topic_changed' else None},
+                'pending_messages': status_after['pending_messages'],
+                'queued_outgoing': status_after['outbox'].get('queued', 0)}
 
     def disconnect(self, client_id):
         with self._tx() as db:

@@ -67,11 +67,12 @@ Preferred local equivalents from the exact configured project directory are:
 "$AOT_BIN" history
 "$AOT_BIN" pause
 "$AOT_BIN" resume
+"$AOT_BIN" unsuspend
 ```
 
 Interactive setup ends with a concise status and next step; `--prepare-only` returns JSON. Omit `--human` for JSON status. The older explicit `pause --client-file PATH --resume` form also remains supported. Existing explicit `--state-dir` and `--client-file` forms remain available for operator work; conflicts with an exact-directory profile are rejected rather than silently switching identities. Within a configured project, `flush` also uses only that project's client. Outside a configured project, the advanced unscoped `flush` command retains its bot-wide behavior. Do not read the client capability file to diagnose a profile.
 
-Status reports the logical label, actual bot, destination, state, backlog, allowed senders, intake health and a suggested next action. It does not collect or flush. History is also read-only; see [captured context](#read-captured-context-from-the-last-24-hours). Pausing retains incoming work and stops new claims/sends for that binding. Resuming allows later authorized work; it does not start a timer, automatic agent replies or background monitoring. A suspended connection still needs owner review rather than a forced resume.
+Status reports the logical label, actual bot, destination, state, backlog, allowed senders, intake health and a suggested next action. It does not collect or flush. History is also read-only; see [captured context](#read-captured-context-from-the-last-24-hours). Pausing retains incoming work and stops new claims/sends for that binding. Resuming allows later authorized work; it does not start a timer, automatic agent replies or background monitoring. Resume does not clear a suspension. The owner clears it with `unsuspend` after fixing the cause; see [clear a suspended connection](#clear-a-suspended-connection).
 
 The setup command and scoped native tools are distinct from installing the plugin through Codex's plugin UI. The manifest declares onboarding, but UI installation and setup-button invocation remain untested. See [compatibility](COMPATIBILITY.md) for evidence limits.
 
@@ -264,6 +265,25 @@ The bot token lives in `credentials.json` under the private state root. Each cli
 ```
 
 Pause retains incoming work, blocks new claims/sends, and prevents queued publications for that connection while other clients continue. Authorized intake still queues its messages up to the bound. The paired human owner can also send the exact addressed `/pause@YourBotUsername` command in that destination; it pauses only after the collector observes it. This transport pause has no authority to execute arbitrary Telegram commands. Resume only when requested by the owner. Disconnect revokes the selected client, marks queued outbound work from/to it `rejected`, preserves inbox/history records, and does not revoke the shared bot token. A send already in flight can finish after a pause/disconnect request; inspect its recorded result. Retained history is not automatically transferred to a newly paired client. The scoped `history` command reads the current active client's recent captured context; it does not provide a revoked-client archive export or replay path. Reconnecting requires a fresh client/pairing flow; do not reuse a revoked capability. Review pending and uncertain outgoing work before disconnecting.
+
+### Clear a suspended connection
+
+AOT suspends a connection when Telegram reports a change to its destination. A suspended connection keeps collecting authorized messages into its inbox, but the agent cannot read them or send until the owner clears the suspension. `status` shows the reason in `suspended`. The agent cannot clear a suspension: `unsuspend` is a local owner command and is not an MCP tool.
+
+| Reason | Cause | What the owner does |
+| --- | --- | --- |
+| `bot_removed_or_restricted` | The bot left, was removed, or lost the right to post. | Add the bot back or restore its rights, then run `unsuspend`. |
+| `topic_changed` | The bound forum topic was closed or edited. | Reopen the topic if needed, check it, then run `unsuspend --topic-open`. |
+| `group_migrated:<new chat id>` | The group became a supergroup with a new chat id. | Run `disconnect`, then pair again in the new chat. `unsuspend` refuses this reason. |
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" unsuspend --client-file "$AOT_STATE/clients/alpha.json"
+"$AOT_BIN" --state-dir "$AOT_STATE" unsuspend --client-file "$AOT_STATE/clients/alpha.json" --topic-open
+```
+
+Before it clears anything, `unsuspend` calls Telegram `getChatMember` for the bot in the bound chat. It accepts `member`, `administrator`, or `restricted` with both `is_member` and `can_send_messages` true. Any other answer, or a Telegram error, leaves the suspension in place and prints an error code such as `bot_not_in_chat` or `bot_cannot_post`. The Bot API has no read-only call that shows whether one forum topic is open, so `--topic-open` records that the owner checked the topic. It does not post anything to the chat.
+
+`unsuspend` does not change queued messages. It prints JSON with the previous reason, the new state, `pending_messages` and `queued_outgoing`. The held inbox messages become available to the agent's next poll, and queued outgoing messages are sent on the next flush. An owner pause stays in place; run `resume` separately. If Telegram reports a new suspension while the check runs, the command fails with `suspension_changed` and keeps the new reason.
 
 Disabling or uninstalling the normal skills plugin leaves the setup-created native project MCP entry configured. To remove that connection from Codex, remove only the owned `[mcp_servers.telegram]` entry from that exact project's `.codex/config.toml`, preserve unrelated settings, and reload/reopen the project chat to stop using the old server configuration. Remove the project's `.aot-profile.json` when retiring its local CLI selection as well. For an advanced rendered plugin, remove/disable that scoped host entry and stop its process. These steps do not revoke the client; use `disconnect` first when revocation is intended. This package installs no service to uninstall. Retain the shared state while any other agents depend on it. Removing plugin files does not delete local state or revoke a bot token. To retire the whole bridge, stop all its processes, reconcile unknown sends, retain any required protected backup, then explicitly remove private state and client files. Token revocation is a separate deliberate owner action that affects all users of that bot, including integrations outside this package.
 

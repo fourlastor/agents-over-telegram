@@ -52,7 +52,7 @@ ERROR_MESSAGES = {
     "history_cursor_expired": "This history snapshot expired; start again without a cursor.",
     "invalid_history_options": "History options are outside the allowed bounds.",
     "storage_error": "Local storage is unavailable. Check the private state directory.",
-    "connection_suspended": "The owner must review this suspended destination before continuing.",
+    "connection_suspended": "This destination is suspended. Check connection_status for the reason. The local owner clears it with \"aot unsuspend\" on this computer, or pairs again if the group moved.",
     "already_connected": "This local client already has a connected destination.",
     "invalid_delivery_lease": "The delivery does not belong to this client or its lease is invalid or expired.",
     "unknown_delivery": "This outgoing delivery is not available to this local client.",
@@ -159,7 +159,7 @@ TOOLS = (
         "conversation_id": _string(),
     }, ("text", "idempotency_key")), destructive=True, idempotent=True, open_world=True),
     _tool("delivery_status", "Inspect this client's outgoing delivery, including queued, sent, rejected or unknown outcomes. This never resends it.", _schema({"outbox_id": _string()}, ("outbox_id",)), read_only=True),
-    _tool("connection_pause", "Pause or resume this agent's Telegram connection while retaining queued work. Use paused=true to pause, or paused=false to resume the same connection; no new pairing is needed. Other agents keep their current state. A suspended destination needs private owner review before it can resume.", _schema({"paused": {"type": "boolean", "default": True}}), idempotent=True),
+    _tool("connection_pause", "Pause or resume this agent's Telegram connection while retaining queued work. Use paused=true to pause, or paused=false to resume the same connection; no new pairing is needed. Other agents keep their current state. A suspended destination cannot be resumed here; the local owner clears it with \"aot unsuspend\".", _schema({"paused": {"type": "boolean", "default": True}}), idempotent=True),
     _tool("connection_disconnect", "Disconnect and revoke only this local client's credential. Queued work is retained for the private owner to review.", destructive=True, idempotent=True),
 )
 _TOOL_MAP = {tool.name: tool for tool in TOOLS}

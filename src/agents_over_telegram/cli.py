@@ -21,7 +21,7 @@ class LazyTransport:
         self.transport = None
 
     def __getattr__(self, name):
-        if name not in {"get_me", "get_webhook_info", "get_updates", "send_message"}:
+        if name not in {"get_me", "get_webhook_info", "get_updates", "send_message", "get_chat_member"}:
             raise AttributeError(name)
         if self.transport is None:
             self.transport = make_transport(self.state_dir, fake=self.fake)
@@ -141,9 +141,13 @@ def parser():
     create = sub.add_parser("client-create")
     create.add_argument("--label", required=True)
     create.add_argument("--client-file", type=Path, required=True)
-    for name in ("pair-begin", "status", "history", "pause", "resume", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "watch"):
-        command = sub.add_parser(name)
-        command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume", "mcp", "watch"})
+    for name in ("pair-begin", "status", "history", "pause", "resume", "unsuspend", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "watch"):
+        command = (sub.add_parser(name, help="Owner only: check with Telegram that a suspended destination works again, then clear it")
+                   if name == "unsuspend" else sub.add_parser(name))
+        command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume", "unsuspend", "mcp", "watch"})
+        if name == "unsuspend":
+            command.add_argument("--topic-open", action="store_true",
+                                 help="Confirm you checked that a closed or changed topic is open again")
         if name == "watch":
             command.add_argument("--collect", action="store_true", help="Also long-poll the shared Telegram collector; never sends or acknowledges")
             command.add_argument("--duration", type=float, default=0, help="Seconds to watch; 0 runs until stopped")
@@ -347,6 +351,8 @@ def run(args):
         return core.allow_sender(client_id, args.sender_id, is_bot=args.bot)
     if args.command == "bot-exchange-policy":
         return core.bot_exchange_policy(client_id, args.sender_id, enabled=args.exchange_enabled)
+    if args.command == "unsuspend":
+        return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command in {"pause", "resume"}:
         return core.pause(client_id, paused=args.command == "pause" and not args.resume)
     if args.command == "disconnect":
