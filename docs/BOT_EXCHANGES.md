@@ -1,29 +1,68 @@
 # Proposed bounded external bot exchanges
 
-This opt-in policy separates new external bot requests without deleting the old lifetime counters. Deployment and activation require a deliberate local operator decision. A source update alone does not enable it.
+This opt-in policy separates new external bot requests. Deployment and activation require a deliberate local operator decision. A source update alone does not enable it.
+
+All automated sends are bounded by rolling rate limits, not by lifetime counters. Each conversation may send at most 30 messages in any rolling hour. When an older send leaves the window, the conversation can send again. A long agent exchange therefore slows down when it is too busy, but it does not stop until a human posts. The operator can change both limits; see [rolling send limits](#rolling-send-limits).
 
 ## Contract
 
 | Situation | Behavior |
 | --- | --- |
-| No enabled policy for this client and external bot | Preserve the legacy persistent `bot:CLIENT:SENDER` chain and its eight-send cap. |
+| No enabled policy for this client and external bot | Preserve the legacy persistent `bot:CLIENT:SENDER` chain. Its rolling conversation limit applies. |
 | Enabled policy; a new, admitted, unsolicited bot message | Assign a server-derived `bot-root:CLIENT:SENDER:MESSAGE_ID` exchange. Message text cannot select the ID. |
 | Bot replies to a known sent publication | Inherit that publication's conversation, including an exhausted legacy chain. |
 | Any sender edits an already captured message | Reuse its original conversation, even after policy disable or unknown-send recovery. |
 | Unseen edit or reply to an unknown publication | Use the legacy chain; do not mint a new root. |
-| Any exchange without an explicit operator allowance | Keep the permanent eight-send chain cap. ACK, time, restart, and policy toggles do not reset it. |
-| Participating external bot pair | Allow at most 32 reserved sends in a rolling hour across its exchanges. Attach a pair to a human-started conversation when a real bot reply joins it. |
+| Any conversation | Allow at most 30 reserved sends in a rolling hour (configurable). ACK, restart, policy toggles, and human messages elsewhere do not reset the window. Only time frees space. |
+| Participating external bot pair | Allow at most 32 reserved sends in a rolling hour across its exchanges (configurable). Attach a pair to a human-started conversation when a real bot reply joins it. |
 | Outbound reply with an explicit different conversation | Reject it with `reply_conversation_mismatch`. Without an explicit conversation, use the actual reply lineage. |
 
 The core cannot prove that two unsolicited messages concern different semantic tasks. The rolling pair budget bounds bots that repeatedly post new roots instead of preserving reply lineage. It is a second limit, not evidence that every new root is independent work. Correct peers should reply to the actual message and keep the supplied conversation ID.
 
-Reservations count queued, sent, rejected and unknown publications. No automatic refund follows a rejection or an uncertain send. Reusing a valid idempotency key does not consume a second reservation. Every new reservation and both budget checks occur in the existing transaction before network activity. Shared-bot broker sends retain the eight-send conversation cap; if they continue an exchange with an external pair, that pair's rolling budget also applies.
+Reservations count queued, sent, rejected and unknown publications. No automatic refund follows a rejection or an uncertain send. Reusing a valid idempotency key does not consume a second reservation. Every new reservation and both budget checks occur in the existing transaction before network activity. Shared-bot broker sends use the same rolling conversation limit; if they continue an exchange with an external pair, that pair's rolling budget also applies.
 
-Reaching the chain cap returns `conversation_limit`. Reaching the rolling pair cap returns `bot_pair_limit`. Both failures occur before an outbox intent is created. There is no automatic retry, reset, relay through another client, or invented conversation ID. The local policy status reports `retry_at` when the rolling budget is full. That timestamp does not reopen an exhausted eight-send chain or prove that an old request is still appropriate to answer.
+Reaching the conversation limit returns `conversation_limit`. Reaching the pair limit returns `bot_pair_limit`. Both failures occur before an outbox intent is created, so nothing is sent or queued. There is no automatic retry, relay through another client, or invented conversation ID. The error tells the agent what happened and when to try again:
+
+| Field | Meaning |
+| --- | --- |
+| `message` | Plain explanation: which limit was reached, the current usage, that nothing was sent, how long to wait, and that the agent must not switch conversations to avoid the limit. |
+| `limit`, `window_seconds` | The limit that applied, for example 30 sends per 3600 seconds. This includes any active operator grant. |
+| `sent_in_window` | How many sends the window already holds. |
+| `retry_after_seconds`, `retry_at`, `retry_at_utc` | The earliest time one more send fits, as a delay, a Unix timestamp, and an ISO 8601 UTC time. |
+
+The agent should wait until `retry_at` and then retry the same send in the same conversation. A rejected send creates no outbox record, so the same idempotency key is valid for the retry. The timestamp does not prove that an old request is still appropriate to answer.
+
+## Rolling send limits
+
+The operator sets the limits once for the whole state directory. Every agent process that uses this bot reads them from the shared state, so they always agree. No MCP tool can change them.
+
+| Limit | Default | Allowed range |
+| --- | --- | --- |
+| Sends per conversation per window | 30 | 1–1000 |
+| Conversation window | 3600 seconds | 60–86400 seconds |
+| Sends per external bot pair per window | 32 | 1–1000 |
+| Pair window | 3600 seconds | 60–86400 seconds |
+
+```sh
+# Inspect the current limits.
+"$AOT_BIN" --state-dir "$AOT_STATE" exchange-limits
+
+# Change one or more limits. Options you omit keep their current value.
+"$AOT_BIN" --state-dir "$AOT_STATE" exchange-limits \
+  --conversation-send-limit 60 --conversation-window-seconds 3600 \
+  --reason "Long agent coordination runs"
+
+# Return to the built-in defaults.
+"$AOT_BIN" --state-dir "$AOT_STATE" exchange-limits --reset --reason "Back to defaults"
+```
+
+A change needs a reason and takes effect on the next send. Running processes do not need a restart.
+
+The limits slow a loop between agents; they do not stop it. With the defaults, one looping conversation can still send 30 messages an hour, and each one can wake an agent. Lower the limits if that cost is too high.
 
 ## Local operator control
 
-An operator can grant a temporary allowance to one existing conversation after an explicit human request:
+An operator can raise the rolling limit of one existing conversation for a short time, after an explicit human request:
 
 ```sh
 "$AOT_BIN" --state-dir "$AOT_STATE" conversation-budget \
@@ -32,8 +71,8 @@ An operator can grant a temporary allowance to one existing conversation after a
   --reason "Human authorized a quota-break handoff"
 ```
 
-Omit the last three options to inspect the allowance. A grant permits at most 32 additional reservations for at most 24 hours.
-It applies only to the authenticated client and the admitted conversation. It preserves counters, reply lineage, and idempotency records.
+Omit the last three options to inspect the allowance. While a grant is active, the conversation may send up to `--additional-sends` more messages in each rolling window. A grant adds at most 32 sends and lasts at most 24 hours.
+It applies only to the authenticated client and the admitted conversation. It preserves counters, reply lineage, and idempotency records. Grants made by older versions were lifetime allowances; they do not apply to rolling windows and are ignored.
 The grant is recorded in an append-only table. It does not change the rolling pair budget, queue limits, sender permissions, or pause state.
 No MCP tool can grant an allowance. Existing processes must load the updated core to use it; older cores keep the default cap.
 Status and grant commands do not recover interrupted sends. Expired grants do not reopen a conversation.
@@ -59,7 +98,7 @@ Omitting `--enable` and `--disable` inspects the current policy. Inspection and 
 2. Coordinate a maintenance window for the selected account. Preserve a protected backup and account for pending or uncertain sends through the existing owner. Keep one receiver; do not inspect or copy credentials into a report.
 3. Move all cooperating local MCP/collector processes to the reviewed runtime. A plugin cache update alone does not change an existing project runtime. Do not mix old and new cores after policy enablement.
 4. Initialization adds `bot_exchange_policies`, `bot_exchange_members` and indexes. Existing conversations, send counts, inbox conversation IDs, ACKs, outbox records and idempotency keys are not rewritten. All policies default to disabled.
-5. Inspect the intended allowed bot and its scope. After explicit authorization, enable only that pair. Legacy outbox reservations and captured historical conversations with that verified bot then participate in its rolling budget. The exhausted legacy conversation remains exhausted.
+5. Inspect the intended allowed bot and its scope. After explicit authorization, enable only that pair. Legacy outbox reservations and captured historical conversations with that verified bot then participate in its rolling budget.
 6. Validate with a genuinely new, authorized bot request. Do not replay or reroute a blocked old reply. Verify actual handling, one publication, ACK, and persistent counters after restart.
 
 The new root policy applies to messages admitted after enablement. Already captured work keeps its original conversation. It does not automatically retry, reclassify, or resend any previously blocked status update.
@@ -68,6 +107,6 @@ For rollback, disable future root creation and review outstanding exchanges firs
 
 ## Offline verification
 
-`tests/test_bot_exchanges.py` covers legacy schema migration without counter changes, a fresh independent exchange after legacy exhaustion, permanent reply lineage, edits across policy disable, unknown replies and edits, a storm of fresh roots, rolling boundary behavior, restart and toggle persistence, uncertain/rejected sends, idempotency, concurrent last-slot allocation, sender/destination isolation, human-started lineage, reply budget borrowing, clock rollback, explicit CLI controls, disable without prior enablement, and human edit lineage after unknown-send recovery.
+`tests/test_bot_exchanges.py` covers legacy schema migration without counter changes, a fresh independent exchange after legacy exhaustion, reply lineage sharing its conversation window, edits across policy disable, unknown replies and edits, a storm of fresh roots, rolling boundary behavior, restart and toggle persistence, uncertain/rejected sends, idempotency, concurrent last-slot allocation, sender/destination isolation, human-started lineage, reply budget borrowing, clock rollback, explicit CLI controls, disable without prior enablement, and human edit lineage after unknown-send recovery.
 
 These checks use temporary state and `FakeTransport`. They do not establish live activation, cross-version operation, or compatibility with a peer that deliberately drops reply lineage. Keep live activation separate from this proposal.

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -81,8 +83,8 @@ ERROR_MESSAGES = {
     "idempotency_conflict": "This idempotency key was already used for different content.",
     "rate_limited": "The shared bot is rate limited; inspect status before retrying.",
     "loop_limit": "The automated exchange limit for this conversation was reached.",
-    "conversation_limit": "The automated exchange limit for this conversation was reached.",
-    "bot_pair_limit": "The external bot pair reached its rolling send limit. Do not retry automatically; ask the local operator to inspect bot-exchange-policy.",
+    "conversation_limit": "Send rate limit reached for this conversation. Nothing was sent or queued. Wait until retry_at, then retry the same send in the same conversation.",
+    "bot_pair_limit": "Send rate limit reached for conversations with this external bot. Nothing was sent or queued. Wait until retry_at, then retry the same send in the same conversation.",
     "reply_conversation_mismatch": "The reply belongs to another conversation. Use its admitted conversation; do not switch exchanges to bypass a limit.",
     "bot_sender_not_authorized": "The selected sender is not an authorized external bot.",
     "bot_removed": "The bot no longer has access to this destination.",
@@ -98,7 +100,12 @@ _OUTPUT_SCHEMA = {
         "result": {"type": "object"},
         "error": {
             "type": "object",
-            "properties": {"code": {"type": "string"}, "message": {"type": "string"}},
+            "properties": {
+                "code": {"type": "string"}, "message": {"type": "string"},
+                "retry_at": {"type": "number"}, "retry_at_utc": {"type": "string"},
+                "retry_after_seconds": {"type": "integer"}, "limit": {"type": "integer"},
+                "window_seconds": {"type": "integer"}, "sent_in_window": {"type": "integer"},
+            },
             "required": ["code", "message"],
             "additionalProperties": False,
         },
@@ -167,13 +174,60 @@ _TOOL_MAP = {tool.name: tool for tool in TOOLS}
 _VALIDATORS = {tool.name: Draft202012Validator(tool.inputSchema) for tool in TOOLS}
 
 
-def _error(code: str) -> types.CallToolResult:
+_LIMIT_SCOPES = {
+    "conversation_limit": "this conversation",
+    "bot_pair_limit": "all conversations between this agent and that external bot",
+}
+
+
+def _duration(seconds: int) -> str:
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return f"{hours} hour" + ("s" if hours != 1 else "")
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes} minute" + ("s" if minutes != 1 else "")
+    return f"{seconds} seconds"
+
+
+def _limit_error(code: str, details: Any) -> dict[str, Any] | None:
+    """Explain a rolling send limit to the agent, using only validated numbers."""
+    if code not in _LIMIT_SCOPES or not isinstance(details, dict):
+        return None
+    counts = [details.get(key) for key in ("sent_in_window", "limit", "window_seconds", "retry_after_seconds")]
+    retry_at = details.get("retry_at")
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in counts) or not _finite_number(retry_at):
+        return None
+    used, limit, window, wait = counts
+    try:
+        when = datetime.fromtimestamp(retry_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return None
+    message = (
+        f"Send rate limit reached. {_LIMIT_SCOPES[code][0].upper()}{_LIMIT_SCOPES[code][1:]} already sent "
+        f"{used} messages in the last {_duration(window)}; the limit is {limit} per rolling "
+        f"{_duration(window)}. This limit exists to stop agents from looping, and nothing is broken. "
+        f"This message was not sent or queued. Wait {wait} seconds (until {when}), then retry the same send "
+        "in the same conversation; reusing the same idempotency key is fine. Do not start a new "
+        "conversation or change keys to get around the limit. If the work cannot wait, tell the human: "
+        "the local operator can raise the limit with the `exchange-limits` or `conversation-budget` commands."
+    )
+    return {"code": code, "message": message, "retry_at": retry_at, "retry_at_utc": when,
+            "retry_after_seconds": wait, "limit": limit, "window_seconds": window, "sent_in_window": used}
+
+
+def _error(code: str, details: Any = None) -> types.CallToolResult:
     safe_code = code if code in ERROR_MESSAGES else "internal_error"
-    body = {"ok": False, "error": {"code": safe_code, "message": ERROR_MESSAGES[safe_code]}}
+    error = _limit_error(safe_code, details) or {"code": safe_code, "message": ERROR_MESSAGES[safe_code]}
+    body = {"ok": False, "error": error}
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=json.dumps(body, separators=(",", ":")))],
         structuredContent=body, isError=True,
     )
+
+
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def _exception_code(exc: Exception) -> str:
@@ -308,7 +362,7 @@ def create_server(core: Any, client_id: str) -> Server:
             value = await asyncio.to_thread(dispatch, name, arguments)
             return types.ServerResult(_result(value))
         except Exception as exc:
-            return types.ServerResult(_error(_exception_code(exc)))
+            return types.ServerResult(_error(_exception_code(exc), getattr(exc, "details", None)))
 
     server.request_handlers[types.CallToolRequest] = handle_call
     return server

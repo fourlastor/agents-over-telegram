@@ -174,6 +174,13 @@ def parser():
     confirm = sub.add_parser("pair-confirm")
     confirm.add_argument("--pairing-id", required=True)
     confirm.add_argument("--confirm", action="store_true", help="Confirm observed sender and destination after local inspection")
+    limits = sub.add_parser("exchange-limits", help="Inspect or change the rolling send limits for every agent on this bot")
+    limits.add_argument("--conversation-send-limit", type=int, help="Sends allowed per conversation in each rolling window")
+    limits.add_argument("--conversation-window-seconds", type=int, help="Length of the per-conversation rolling window")
+    limits.add_argument("--pair-send-limit", type=int, help="Sends allowed per external bot pair in each rolling window")
+    limits.add_argument("--pair-window-seconds", type=int, help="Length of the per-pair rolling window")
+    limits.add_argument("--reset", action="store_true", help="Return to the built-in defaults")
+    limits.add_argument("--reason", help="Why the limits change; required when changing them")
     sub.add_parser("collect")
     sub.add_parser("unassigned")
     flush = sub.add_parser("flush")
@@ -269,7 +276,8 @@ def run(args):
     state_dir = private_directory(args.state_dir)
     _mode(state_dir, args.fake)
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
-                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "watch", "conversation-budget"}))
+                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "watch",
+                                         "conversation-budget", "exchange-limits"}))
     if args.command.startswith("relay-"):
         from .relay import RelayStore
         store = RelayStore(core, project_validator=lambda binding: _relay_project_valid(core, binding, args.fake))
@@ -331,6 +339,12 @@ def run(args):
         return core.flush(client_id=_client(core, args.client_file, args.expected_client_id) if args.client_file else None)
     if args.command == "account-status":
         return core.accounts_status()
+    if args.command == "exchange-limits":
+        return core.exchange_limits(conversation_send_limit=args.conversation_send_limit,
+                                    conversation_window_seconds=args.conversation_window_seconds,
+                                    pair_send_limit=args.pair_send_limit,
+                                    pair_window_seconds=args.pair_window_seconds,
+                                    reset=args.reset, reason=args.reason)
     if args.command == "grant-peer":
         source = _client(core, args.source_client_file)
         target = _client(core, args.target_client_file)
@@ -445,7 +459,15 @@ def main():
         import re
         code = str(error.code)
         safe = code if re.fullmatch(r"[a-z0-9_]{1,64}", code) else "operation_failed"
-        print(json.dumps({"ok": False, "error": safe}), file=sys.stderr)
+        body = {"ok": False, "error": safe}
+        details = getattr(error, "details", None)
+        if isinstance(details, dict):
+            # Rolling limit details are numbers only; drop anything else.
+            numbers = {k: v for k, v in details.items() if isinstance(k, str) and re.fullmatch(r"[a-z_]{1,32}", k)
+                       and isinstance(v, (int, float)) and not isinstance(v, bool)}
+            if numbers:
+                body["details"] = numbers
+        print(json.dumps(body), file=sys.stderr)
         return 1
     except (KeyboardInterrupt, EOFError):
         print('{"ok":false,"error":"cancelled"}', file=sys.stderr)
