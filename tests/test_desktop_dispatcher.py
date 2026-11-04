@@ -298,6 +298,7 @@ def test_cli_preserves_scoped_validation_and_disables_outgoing_recovery(env, mon
                         'codex_home': Path('/fixture/home'), 'duration': 0, 'collect': True}
 
 
+
 def stuck_events(events):
     return [event for event in events if event['type'] == 'desktop_wake_stuck']
 
@@ -313,12 +314,12 @@ def hold_ambiguous(env, native):
 
 
 def test_listener_warns_about_long_held_uncertain_wake_without_resolving_it(env, native, monkeypatch):
-    from agents_over_telegram.relay import UNCERTAIN_WAKE_REVIEW_SECONDS
+    from agents_over_telegram.relay import UNRESOLVED_WAKE_REPORT_SECONDS
     store, alpha, held = hold_ambiguous(env, native)
     monkeypatch.setattr(desktop, 'STUCK_WAKE_CHECK_SECONDS', 0)
     _, events = run(env)
     assert stuck_events(events) == []
-    env[2].advance(UNCERTAIN_WAKE_REVIEW_SECONDS)
+    env[2].advance(UNRESOLVED_WAKE_REPORT_SECONDS)
     _, events = run(env)
     # Checked on every loop here, but warned only once per repeat interval.
     [warning] = stuck_events(events)
@@ -326,7 +327,8 @@ def test_listener_warns_about_long_held_uncertain_wake_without_resolving_it(env,
     assert warning['notification_id'] == held['notification_id']
     assert warning['client_id'] == alpha and warning['thread_id'] == ALPHA_THREAD
     assert warning['next_action'] == 'review_uncertain_wake'
-    assert warning['age_seconds'] >= UNCERTAIN_WAKE_REVIEW_SECONDS
+    assert warning['handoff_phase'] == 'enqueuing'
+    assert warning['age_seconds'] >= UNRESOLVED_WAKE_REPORT_SECONDS
     assert 'relay-resolve' in warning['message']
     # Report only: nothing is re-enqueued, retried or resolved.
     assert len(calls(native, 'enqueue')) == 1 and calls(native, 'wake') == []
@@ -334,12 +336,51 @@ def test_listener_warns_about_long_held_uncertain_wake_without_resolving_it(env,
 
 
 def test_listener_repeats_stuck_warning_after_interval_and_while_desktop_closed(env, native, monkeypatch):
-    from agents_over_telegram.relay import UNCERTAIN_WAKE_REVIEW_SECONDS
+    from agents_over_telegram.relay import UNRESOLVED_WAKE_REPORT_SECONDS
     hold_ambiguous(env, native)
-    env[2].advance(UNCERTAIN_WAKE_REVIEW_SECONDS)
+    env[2].advance(UNRESOLVED_WAKE_REPORT_SECONDS)
     monkeypatch.setattr(desktop, 'STUCK_WAKE_CHECK_SECONDS', 0)
     monkeypatch.setattr(desktop, 'STUCK_WAKE_WARNING_REPEAT_SECONDS', 0)
     native['running'] = False
     _, events = run(env)
     assert len(stuck_events(events)) > 1
     assert calls(native, 'enqueue')[1:] == []
+
+
+@pytest.mark.parametrize('blocker', ['closed', 'paused'])
+def test_queued_handoff_waiting_for_wake_url_is_not_sent_for_manual_resolution(env, native, monkeypatch, blocker):
+    # queued() marks the notification uncertain on purpose and the listener
+    # retries only the wake URL. A manual outcome would stop those retries.
+    from agents_over_telegram.onboarding import human_status
+    from agents_over_telegram.relay import UNRESOLVED_WAKE_REPORT_SECONDS
+    core, store, alpha = ready(env)
+    native['wake_error'] = desktop.DesktopQueueError('desktop_wake_failed')
+    run(env)
+    native['wake_error'] = None
+    [held] = store.status(alpha)['notifications']
+    assert held['status'] == 'uncertain'
+    if blocker == 'closed':
+        native['running'] = False
+    else:
+        core.pause(alpha)
+    env[2].advance(UNRESOLVED_WAKE_REPORT_SECONDS)
+    monkeypatch.setattr(desktop, 'STUCK_WAKE_CHECK_SECONDS', 0)
+    _, events = run(env)
+    [warning] = stuck_events(events)
+    assert (warning['next_action'], warning['handoff_phase']) == ('wait_for_desktop_wake', 'queued')
+    assert 'Do not resolve it by hand' in warning['message']
+    assert calls(native, 'wake')[1:] == []
+    status = core.connection_status(alpha)
+    assert status['unresolved_wake']['next_action'] == 'wait_for_desktop_wake'
+    assert 'relay-' not in status['next_action']['message']
+    if blocker == 'closed':
+        assert status['next_action']['code'] == 'wait_for_desktop_wake'
+        assert 'queued in the desktop' in human_status(status)
+    # Once the desktop is open and the connection is active, the retry completes on its own.
+    native['running'] = True
+    if blocker == 'paused':
+        core.pause(alpha, paused=False)
+    run(env)
+    assert len(calls(native, 'enqueue')) == 1 and len(calls(native, 'wake')) == 2
+    assert store.status(alpha)['bindings'][0]['notifications'] == {'accepted': 1}
+    assert core.connection_status(alpha)['unresolved_wake'] is None

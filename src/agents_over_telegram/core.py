@@ -519,10 +519,10 @@ class Core:
             senders = [{'sender_id': r['sender_id'], 'is_bot': bool(r['is_bot'])}
                        for r in db.execute('SELECT sender_id,is_bot FROM allowed_senders WHERE client_id=? ORDER BY sender_id', (client_id,))]
             gap = account['last_gap_at'] is not None or (account['last_intake'] is not None and now - account['last_intake'] >= self.HISTORY_WINDOW)
-            from .relay import uncertain_wakes
-            stuck = uncertain_wakes(db, now, client_id)
-            stuck_wake = {key: stuck[0][key] for key in ('notification_id', 'uncertain_since', 'age_seconds',
-                                                         'attempt', 'handoff_phase')} if stuck else None
+            from .relay import WAIT_FOR_DESKTOP_WAKE, unresolved_wakes
+            held = unresolved_wakes(db, now, client_id)
+            held_wake = {key: held[0][key] for key in ('notification_id', 'status', 'since', 'age_seconds',
+                                                       'attempt', 'handoff_phase', 'next_action')} if held else None
             if row is None:
                 if pairing is None:
                     state, action = 'unpaired', 'begin_pairing'
@@ -552,14 +552,18 @@ class Core:
                 if counts.get('unknown', 0):
                     action = 'review_unknown_delivery'
                     message = 'Review the uncertain outgoing delivery locally before attempting to resend it.'
-                elif stuck_wake:
-                    action = 'review_uncertain_wake'
-                    message = ('An automatic wake for this agent has been unresolved for a long time, so no new '
-                               'wakes are sent. Ask the local owner to reconcile it with relay-status and '
-                               'relay-resolve. Pending messages can still be polled.')
                 elif account['intake_error']:
                     action = 'review_intake'
                     message = 'Ask the local owner to review the intake error; already captured messages remain available.'
+                elif held_wake and held_wake['next_action'] == WAIT_FOR_DESKTOP_WAKE:
+                    action = WAIT_FOR_DESKTOP_WAKE
+                    message = ('A wake for this agent is queued in the desktop app but has not opened yet, so no new '
+                               'wakes are sent. The listener retries it while the desktop is open and this connection '
+                               'is active; nobody needs to resolve it. Pending messages can still be polled.')
+                elif held_wake:
+                    action = held_wake['next_action']
+                    message = ('An automatic wake for this agent has been unresolved for a long time, so no new '
+                               'wakes are sent. Ask the local owner to review it. Pending messages can still be polled.')
                 elif pending:
                     action = 'poll_messages'
                     message = 'Check the inbox to handle pending messages, then acknowledge only completed work.'
@@ -584,7 +588,7 @@ class Core:
                            'possible_offline_gap': bool(gap)},
                 'delivery': {'mode': 'on_demand', 'automatic': False, 'scope': 'inbox_core',
                              'listener_status': 'not_checked'},
-                'uncertain_wake': stuck_wake,
+                'unresolved_wake': held_wake,
                 'history': {'window_hours': self.HISTORY_WINDOW // 3600, 'kind': 'captured_only'},
                 'routing': {'delivery_filter': row['delivery_filter'],
                             'capture_context': bool(row['capture_context']),

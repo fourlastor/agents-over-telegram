@@ -20,16 +20,23 @@ WAKE_NOTICE = (
 )
 
 # A healthy handoff resolves within seconds, and wake URL retries back off to at
-# most 60 seconds. An uncertain wake older than this blocks every later wake for
-# its client until a human reconciles it, so status and the listener report it.
-UNCERTAIN_WAKE_REVIEW_SECONDS = 15 * 60
+# most 60 seconds. An unresolved wake older than this blocks every later wake for
+# its client, so status and the listener report it.
+UNRESOLVED_WAKE_REPORT_SECONDS = 15 * 60
+REVIEW_UNRESOLVED_WAKE = 'review_uncertain_wake'
+WAIT_FOR_DESKTOP_WAKE = 'wait_for_desktop_wake'
 
 
-def uncertain_wakes(db, now, client_id=None, threshold=UNCERTAIN_WAKE_REVIEW_SECONDS):
-    """List uncertain notifications held longer than ``threshold``. Read-only.
+def unresolved_wakes(db, now, client_id=None, threshold=UNRESOLVED_WAKE_REPORT_SECONDS):
+    """List inflight or uncertain notifications held longer than ``threshold``. Read-only.
 
-    This only reports. An uncertain handoff may already have reached the target,
+    This only reports. An unresolved handoff may already have reached the target,
     so it is never retried, failed or cancelled automatically.
+
+    ``wait_for_desktop_wake`` marks a desktop handoff whose native queue returned
+    a receipt. The listener keeps retrying only its wake URL, and a manual
+    outcome would stop those retries, so it must not be resolved by hand.
+    Everything else (``review_uncertain_wake``) needs a human to reconcile it.
     """
     tables = {row[0] for row in db.execute("""SELECT name FROM sqlite_master WHERE type='table'
         AND name IN ('relay_notifications','relay_desktop_handoffs')""")}
@@ -38,14 +45,17 @@ def uncertain_wakes(db, now, client_id=None, threshold=UNCERTAIN_WAKE_REVIEW_SEC
     phase, join = ('h.phase', 'LEFT JOIN relay_desktop_handoffs h ON h.notification_id=n.id') \
         if 'relay_desktop_handoffs' in tables else ('NULL', '')
     where, args = ('AND n.client_id=?', (client_id,)) if client_id is not None else ('', ())
-    rows = db.execute(f"""SELECT n.id,n.client_id,n.thread_id,n.attempt,n.updated,{phase} AS phase
+    # Repeat the partial index condition exactly, so SQLite reads only outstanding rows.
+    rows = db.execute(f"""SELECT n.id,n.client_id,n.thread_id,n.status,n.attempt,n.updated,{phase} AS phase
         FROM relay_notifications n {join}
-        WHERE n.status='uncertain' AND n.updated<=? {where}
+        WHERE n.status IN ('inflight','uncertain','retry') AND n.status<>'retry'
+        AND n.updated<=? {where}
         ORDER BY n.updated,n.id""", (now - threshold, *args)).fetchall()
     return [{'notification_id': row['id'], 'client_id': row['client_id'], 'thread_id': row['thread_id'],
-             'attempt': row['attempt'], 'uncertain_since': row['updated'],
+             'status': row['status'], 'attempt': row['attempt'], 'since': row['updated'],
              'age_seconds': int(now - row['updated']), 'handoff_phase': row['phase'],
-             'next_action': 'review_uncertain_wake'} for row in rows]
+             'next_action': WAIT_FOR_DESKTOP_WAKE if (row['status'] == 'uncertain' and row['phase'] == 'queued')
+             else REVIEW_UNRESOLVED_WAKE} for row in rows]
 
 
 class RelayStore:
@@ -212,8 +222,8 @@ class RelayStore:
                     AND (i.lease_until IS NULL OR i.lease_until<=?)
                     AND (d.inbox_id IS NULL OR d.notification_id=?)''',
                     (row['client_id'], now, outstanding['id'] if outstanding else None)).fetchone()[0] if dispatchable else 0
-                stuck = uncertain_wakes(db, now, row['client_id'])
-                value['uncertain_wake'] = stuck[0] if stuck else None
+                held = unresolved_wakes(db, now, row['client_id'])
+                value['unresolved_wake'] = held[0] if held else None
                 value['notifications'] = {r['status']: r['count'] for r in db.execute('''
                     SELECT status,count(*) AS count FROM relay_notifications WHERE client_id=?
                     GROUP BY status''', (row['client_id'],))}
@@ -225,10 +235,10 @@ class RelayStore:
                 ORDER BY created,id''', args)]
         return {'bindings': bindings, 'notifications': notifications}
 
-    def uncertain_wakes(self):
-        """Report long-held uncertain wakes for every client without changing them."""
+    def unresolved_wakes(self):
+        """Report long-held unresolved wakes for every client without changing them."""
         with self.core._db() as db:
-            return uncertain_wakes(db, self.core.clock())
+            return unresolved_wakes(db, self.core.clock())
 
     def recover_inflight(self):
         """Hold potentially handed-off work. Call only with the watcher lock held."""

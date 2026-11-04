@@ -81,20 +81,6 @@ The adapter saves its handoff phase before invoking the queue command and saves 
 
 Inspect `relay-status` and the exact target chat when a handoff is uncertain. A notification marked `accepted` means the native queue returned success and the OS opener accepted the wake URL. It does not mean that the model completed or handled Telegram work. Native queue acceptance, a successful OS opener exit, a completed model turn, an acknowledged inbox delivery and a sent Telegram publication are different pieces of evidence. An opener exit alone does not prove the chat handled the notice. Do not resolve an uncertain enqueue as failed simply because there is no Telegram reply. Reconcile against the saved queue receipt and actual chat history before deliberately retrying or cancelling.
 
-### A long-held uncertain wake blocks later wakes
-
-Each client has at most one outstanding notification. While a notification is `uncertain`, the listener sends no new wake for that client, even when new Telegram messages arrive. A wake that nobody reconciles therefore blocks every later wake for that client.
-
-The relay reports this condition, but it does not fix it. When an `uncertain` notification is older than 15 minutes:
-
-- `relay-status` shows it in the binding's `uncertain_wake` field.
-- The client's `connection_status` shows it in `uncertain_wake`, with the notification ID and the time it became uncertain. Its `next_action.code` is `review_uncertain_wake`, unless an unknown outgoing delivery (`review_unknown_delivery`) or a paused or suspended connection needs attention first. `status --human` prints a `Wake:` line.
-- `relay-desktop` writes a `desktop_wake_stuck` record with `"level": "warning"`. It checks once a minute and repeats the warning for the same notification at most once an hour.
-
-`handoff_phase` tells you how far the desktop handoff got. `queued` means the native queue returned a receipt, and the listener keeps retrying only the wake URL. `enqueuing` means the queue outcome is unknown. A missing phase means no desktop handoff was recorded, for example because `relay-watch` or `relay-dispatch` recorded the outcome.
-
-The relay never retries, fails, cancels or expires an uncertain wake by itself. An uncertain handoff can already have reached the target, so only a human can decide what happened. Check the target chat history and the queue receipt, then record one outcome with `relay-resolve`: `accepted` if the notice arrived, `failed` if it definitely did not, or `cancelled` to dismiss it. All three keep the pending inbox work. After that, the next new message can wake the client again.
-
 The target retains its model, project, permissions and native tools. The listener does not answer approvals, tool requests or authentication prompts on the target's behalf. Accepted notices are not repeated merely because inbox messages remain pending. A pause can race with an already queued notice; if that leaves pending work after resume, inspect scoped status and explicitly poll rather than duplicating the notice.
 
 To retire a resolved mapping:
@@ -104,6 +90,27 @@ To retire a resolved mapping:
 ```
 
 Unbinding stops new notifications for that mapping; it does not revoke Telegram access, delete captured context or remove an already queued native notice. Resolve outstanding handoffs first.
+
+### A long-held unresolved wake blocks later wakes
+
+Each client has at most one outstanding notification. While a notification is `inflight` or `uncertain`, no new wake is sent for that client, even when new Telegram messages arrive. A wake that stays unresolved therefore blocks every later wake for that client.
+
+The relay reports this condition, but it does not fix it. When an `inflight` or `uncertain` notification is older than 15 minutes:
+
+- `relay-status` shows it in the binding's `unresolved_wake` field.
+- The client's `connection_status` shows it in `unresolved_wake`, with the notification ID, its status, the time of its last change and its `next_action`. `status --human` prints a `Wake:` line.
+- `relay-desktop` writes a `desktop_wake_stuck` record with `"level": "warning"`. It checks once a minute and repeats the warning for the same notification at most once an hour. The listener keeps this limit in memory, so a restarted listener warns once again.
+
+The `next_action` code says who must act:
+
+| Code | Meaning | Action |
+| --- | --- | --- |
+| `wait_for_desktop_wake` | The native queue returned a receipt (`handoff_phase` is `queued`), but the wake URL has not succeeded yet. This happens when the desktop stays closed or the connection is paused. | Nobody resolves it. `relay-desktop` retries only the wake URL while the desktop is open and the connection is active. A manual `accepted` or `cancelled` would stop those retries and leave the queued notice unopened. |
+| `review_uncertain_wake` | Any other `uncertain` notification, or an `inflight` one. `relay-watch --once` leaves a notification `inflight` until the relay chat records a receipt, and a listener that was killed leaves it `inflight` until the next listener starts. | A human checks the target chat history and any queue receipt, then records one outcome with `relay-resolve`. |
+
+In `connection_status`, these codes come after `review_unknown_delivery` and `review_intake`, and after a paused or suspended state. The `unresolved_wake` field is present in every state. The agent-facing message only asks the agent to tell the local owner; it does not name relay commands.
+
+The relay never retries, fails, cancels or expires an unresolved wake by itself. An unresolved handoff can already have reached the target, so only a human can decide what happened. For `review_uncertain_wake`, record `accepted` if the notice arrived, `failed` if it definitely did not, or `cancelled` to dismiss it. All three keep the pending inbox work. After that, the next new message can wake the client again.
 
 ## Live acceptance check
 
