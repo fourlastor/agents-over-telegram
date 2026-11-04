@@ -31,13 +31,18 @@ def history(core, client):
 
 def test_defaults_keep_the_original_behaviour(group):
     core, transport, clock, client = group
-    assert core.connection_status(client)['routing'] == {'delivery_filter': 'all', 'capture_context': False}
+    assert core.connection_status(client)['routing'] == {
+        'delivery_filter': 'all', 'capture_context': False, 'accept_media': False}
     append(transport, 'plain owner message')
     append(transport, 'stranger message', sender=303)
     core.collect()
     assert [d['text'] for d in deliveries(core, client)] == ['plain owner message']
     assert rows(core, 'SELECT count(*) FROM inbox WHERE context=1') == [(0,)]
     assert rows(core, "SELECT reason FROM unmatched WHERE reason='sender_not_allowed'") == [('sender_not_allowed',)]
+    media(transport, caption='a file', document={'file_id': 'D', 'file_unique_id': 'uD'})
+    core.collect()
+    assert deliveries(core, client) == []
+    assert rows(core, "SELECT reason FROM unmatched WHERE reason='unsupported_message'") == [('unsupported_message',)]
 
 
 def test_addressed_filter_delivers_only_mentions_replies_and_commands(group):
@@ -167,22 +172,26 @@ def test_existing_state_migrates_with_original_defaults(group):
     with sqlite3.connect(core.database) as db:
         db.execute('ALTER TABLE bindings DROP COLUMN delivery_filter')
         db.execute('ALTER TABLE bindings DROP COLUMN capture_context')
+        db.execute('ALTER TABLE bindings DROP COLUMN accept_media')
+        db.execute('DROP INDEX inbox_context_expiry')
         db.execute('ALTER TABLE inbox DROP COLUMN context')
     core = Core(core.state_dir, transport, clock=clock)
-    assert core.connection_status(client)['routing'] == {'delivery_filter': 'all', 'capture_context': False}
+    assert core.connection_status(client)['routing'] == {
+        'delivery_filter': 'all', 'capture_context': False, 'accept_media': False}
     assert [d['text'] for d in deliveries(core, client)] == ['before upgrade']
 
 
 def test_delivery_settings_are_validated_and_operator_only(group):
     core, transport, clock, client = group
-    for bad in ({'delivery_filter': 'mentions'}, {'capture_context': 'on'}):
+    for bad in ({'delivery_filter': 'mentions'}, {'capture_context': 'on'}, {'accept_media': 1}):
         with pytest.raises(CoreError, match='invalid_delivery_settings'):
             core.delivery_settings(client, **bad)
     assert 'delivery_settings' not in {tool.name for tool in TOOLS}
-    args = parser().parse_args(['delivery-settings', '--client-file', 'c.json', '--filter', 'addressed', '--context', 'on'])
-    assert (args.delivery_filter, args.capture_context) == ('addressed', 'on')
+    args = parser().parse_args(['delivery-settings', '--client-file', 'c.json', '--filter', 'addressed',
+                                '--context', 'on', '--media', 'on'])
+    assert (args.delivery_filter, args.capture_context, args.accept_media) == ('addressed', 'on', 'on')
     unchanged = parser().parse_args(['delivery-settings', '--client-file', 'c.json'])
-    assert (unchanged.delivery_filter, unchanged.capture_context) == (None, None)
+    assert (unchanged.delivery_filter, unchanged.capture_context, unchanged.accept_media) == (None, None, None)
 
 
 def media(transport, *, caption=None, sender=101, **fields):
@@ -196,6 +205,7 @@ def media(transport, *, caption=None, sender=101, **fields):
 
 def test_media_messages_carry_caption_and_attachment_metadata(group):
     core, transport, clock, client = group
+    core.delivery_settings(client, accept_media=True)
     media(transport, caption='the plan', document={'file_id': 'DOC1', 'file_unique_id': 'uDoc1',
                                                     'file_name': 'plan.md', 'mime_type': 'text/markdown', 'file_size': 12})
     media(transport, photo=[{'file_id': 'small', 'file_unique_id': 'uS', 'file_size': 10},
@@ -213,6 +223,7 @@ def test_media_messages_carry_caption_and_attachment_metadata(group):
 
 def test_attachment_fetch_stores_privately_and_reuses_the_file(group):
     core, transport, clock, client = group
+    core.delivery_settings(client, accept_media=True)
     transport.files['DOC1'] = {'content': b'# plan\n'}
     media(transport, caption='see file', document={'file_id': 'DOC1', 'file_unique_id': 'uDoc1',
                                                     'file_name': '../../escape.md', 'file_size': 7})
@@ -235,7 +246,7 @@ def test_attachment_fetch_stores_privately_and_reuses_the_file(group):
 
 def test_attachment_size_limits_and_context_files(group):
     core, transport, clock, client = group
-    core.delivery_settings(client, delivery_filter='addressed')
+    core.delivery_settings(client, delivery_filter='addressed', accept_media=True)
     transport.files['BIG'] = {'content': b'x' * (MAX_ATTACHMENT_BYTES + 1)}
     transport.files['CTX'] = {'content': b'context file'}
     media(transport, caption=f'@{transport.username} big', document={'file_id': 'BIG', 'file_unique_id': 'uBig'})
@@ -256,3 +267,42 @@ def test_attachment_fetch_is_an_mcp_tool():
     tool = next(tool for tool in TOOLS if tool.name == 'attachment_fetch')
     assert set(tool.inputSchema['required']) == {'delivery_id', 'file_unique_id'}
     assert tool.annotations.openWorldHint is True
+
+
+def test_files_from_senders_that_are_not_allowed_are_never_fetched(group):
+    core, transport, clock, client = group
+    core.delivery_settings(client, capture_context=True, accept_media=True)
+    transport.files['X'] = {'content': b'payload'}
+    media(transport, sender=303, caption='take this', document={'file_id': 'X', 'file_unique_id': 'uX'})
+    core.collect()
+    entry = next(m for m in history(core, client) if m['status'] == 'context')
+    assert entry['context_reason'] == 'sender_not_allowed' and entry['attachments'][0]['file_unique_id'] == 'uX'
+    with pytest.raises(CoreError, match='attachment_sender_not_allowed'):
+        core.fetch_attachment(client, entry['delivery_id'], 'uX')
+    assert not (core.state_dir / 'attachments').exists()
+
+
+def test_pruning_deletes_fetched_files_and_never_the_newest_row(group):
+    core, transport, clock, client = group
+    core.delivery_settings(client, delivery_filter='addressed', accept_media=True)
+    transport.files['C'] = {'content': b'context file'}
+    media(transport, caption='aside', date=int(clock.now), document={'file_id': 'C', 'file_unique_id': 'uC'})
+    core.collect()
+    entry = next(m for m in history(core, client) if m['status'] == 'context')
+    path = core.fetch_attachment(client, entry['delivery_id'], 'uC')['path']
+    clock.advance(core.HISTORY_WINDOW + 10)
+    core.collect()
+    # The expired row is the newest inbox row, so it stays until something newer arrives.
+    assert os.path.exists(path)
+    assert rows(core, 'SELECT count(*) FROM inbox WHERE context=1') == [(1,)]
+    append(transport, 'later chatter', date=int(clock.now))
+    core.collect()
+    assert not os.path.exists(path)
+    assert rows(core, 'SELECT id FROM inbox WHERE id=?', (entry['delivery_id'],)) == []
+
+
+def test_pruning_uses_the_partial_context_index(group):
+    core, transport, clock, client = group
+    plan = rows(core, """EXPLAIN QUERY PLAN SELECT id FROM inbox WHERE context=1 AND COALESCE(event_at,created)<?
+        AND rowid<(SELECT MAX(rowid) FROM inbox)""", (0,))
+    assert any('inbox_context_expiry' in str(step) for step in plan)

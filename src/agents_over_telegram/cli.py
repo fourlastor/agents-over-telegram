@@ -168,6 +168,9 @@ def parser():
                                       "and keep the rest as context")
             command.add_argument("--context", dest="capture_context", choices=["on", "off"],
                                  help="on: also keep messages from senders that are not allowed, as context only")
+            command.add_argument("--media", dest="accept_media", choices=["on", "off"],
+                                 help="on: accept documents, photos, video, audio, voice notes and animations, "
+                                      "with their caption as text")
         if name == "bot-exchange-policy":
             command.add_argument("--sender-id", type=int, required=True)
             change = command.add_mutually_exclusive_group()
@@ -356,7 +359,8 @@ def run(args):
         return core.bot_exchange_policy(client_id, args.sender_id, enabled=args.exchange_enabled)
     if args.command == "delivery-settings":
         return core.delivery_settings(client_id, delivery_filter=args.delivery_filter,
-                                      capture_context=None if args.capture_context is None else args.capture_context == "on")
+                                      capture_context=None if args.capture_context is None else args.capture_context == "on",
+                                      accept_media=None if args.accept_media is None else args.accept_media == "on")
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command in {"pause", "resume"}:

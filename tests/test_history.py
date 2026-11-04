@@ -189,6 +189,7 @@ def test_legacy_rows_migrate_and_use_captured_time(env):
     core.collect()
     with sqlite3.connect(core.database) as db:
         db.execute('DROP INDEX inbox_history')
+        db.execute('DROP INDEX inbox_context_expiry')
         db.execute('ALTER TABLE inbox DROP COLUMN event_at')
         db.execute('DROP TABLE history_keys')
     restarted = Core(core.state_dir, transport, clock=clock, recover_sends=False)

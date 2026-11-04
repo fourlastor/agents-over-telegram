@@ -233,10 +233,14 @@ class Core:
                 db.execute("ALTER TABLE bindings ADD COLUMN delivery_filter TEXT NOT NULL DEFAULT 'all'")
             if 'capture_context' not in binding_columns:
                 db.execute('ALTER TABLE bindings ADD COLUMN capture_context INTEGER NOT NULL DEFAULT 0')
+            # Media messages stay unsupported unless the operator accepts them.
+            if 'accept_media' not in binding_columns:
+                db.execute('ALTER TABLE bindings ADD COLUMN accept_media INTEGER NOT NULL DEFAULT 0')
             # Context rows are stored acknowledged, so no poll, watch or wake path
             # ever claims them; history shows them as context.
             if 'context' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
                 db.execute('ALTER TABLE inbox ADD COLUMN context INTEGER NOT NULL DEFAULT 0')
+            db.execute('CREATE INDEX IF NOT EXISTS inbox_context_expiry ON inbox(COALESCE(event_at,created)) WHERE context=1')
             db.execute('INSERT OR IGNORE INTO history_keys(singleton,secret) VALUES(1,?)', (secrets.token_bytes(32),))
             db.execute('CREATE INDEX IF NOT EXISTS inbox_history ON inbox(client_id,COALESCE(event_at,created) DESC)')
             db.execute('CREATE INDEX IF NOT EXISTS outbox_history ON outbox(client_id,created DESC)')
@@ -441,7 +445,7 @@ class Core:
 
     DELIVERY_FILTERS = ('all', 'addressed')
 
-    def delivery_settings(self, client_id, delivery_filter=None, capture_context=None):
+    def delivery_settings(self, client_id, delivery_filter=None, capture_context=None, accept_media=None):
         """Local operator control; never exposed as an agent MCP mutation.
 
         ``delivery_filter`` 'all' (the default) delivers every message from an
@@ -449,10 +453,13 @@ class Core:
         reply to it or carry a command addressed to it; the rest are kept as
         context. ``capture_context`` also keeps messages from senders that are not
         allowed, as context only. Context is never delivered, leased or announced.
+        ``accept_media`` accepts documents, photos, video, audio, voice notes and
+        animations, with their caption as text; otherwise they stay unsupported.
+        Every setting defaults to off, which is the original behavior.
         """
         if delivery_filter is not None and delivery_filter not in self.DELIVERY_FILTERS:
             raise CoreError('invalid_delivery_settings')
-        if capture_context is not None and type(capture_context) is not bool:
+        if any(value is not None and type(value) is not bool for value in (capture_context, accept_media)):
             raise CoreError('invalid_delivery_settings')
         with self._tx() as db:
             self._binding(db, client_id)
@@ -460,9 +467,11 @@ class Core:
                 db.execute('UPDATE bindings SET delivery_filter=? WHERE client_id=? AND connected=1', (delivery_filter, client_id))
             if capture_context is not None:
                 db.execute('UPDATE bindings SET capture_context=? WHERE client_id=? AND connected=1', (int(capture_context), client_id))
+            if accept_media is not None:
+                db.execute('UPDATE bindings SET accept_media=? WHERE client_id=? AND connected=1', (int(accept_media), client_id))
             row = self._binding(db, client_id)
         return {'delivery_filter': row['delivery_filter'], 'capture_context': bool(row['capture_context']),
-                'context_window_seconds': self.HISTORY_WINDOW}
+                'accept_media': bool(row['accept_media']), 'context_window_seconds': self.HISTORY_WINDOW}
 
     def _bot_pair_usage(self, db, client_id, sender_id, now):
         stamps = [r[0] for r in db.execute('''SELECT o.created FROM bot_exchange_members p
@@ -568,7 +577,8 @@ class Core:
                              'listener_status': 'not_checked'},
                 'history': {'window_hours': self.HISTORY_WINDOW // 3600, 'kind': 'captured_only'},
                 'routing': {'delivery_filter': row['delivery_filter'],
-                            'capture_context': bool(row['capture_context'])} if row else None,
+                            'capture_context': bool(row['capture_context']),
+                            'accept_media': bool(row['accept_media'])} if row else None,
                 'state': state, 'next_action': {'code': action, 'message': message},
             }
 
@@ -654,6 +664,9 @@ class Core:
         if binding is None:
             self._unmatched(db, update_id, chat_id, 'unbound_destination', now)
             return
+        if attachments and not binding['accept_media']:
+            self._unmatched(db, update_id, chat_id, 'unsupported_message', now)
+            return
         allowed = db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?', (binding['client_id'], sender_id, int(sender['is_bot']))).fetchone()
         if not allowed and not binding['capture_context']:
             self._unmatched(db, update_id, chat_id, 'sender_not_allowed', now)
@@ -719,11 +732,16 @@ class Core:
                                          json.dumps(payload, ensure_ascii=False), now, conversation_id, event_at))
 
     def _prune_context(self, db, now):
-        """Drop context older than the history window, with its local bookkeeping rows."""
-        stale = [row[0] for row in db.execute('SELECT id FROM inbox WHERE context=1 AND COALESCE(event_at,created)<?',
-                                              (now - self.HISTORY_WINDOW,))]
+        """Drop context older than the history window, with its bookkeeping rows and fetched files.
+
+        The highest inbox rowid is never deleted, so SQLite cannot hand it to a new
+        row inside a history snapshot that was frozen at that rowid.
+        """
+        stale = [row[0] for row in db.execute('''SELECT id FROM inbox WHERE context=1 AND COALESCE(event_at,created)<?
+            AND rowid<(SELECT MAX(rowid) FROM inbox)''', (now - self.HISTORY_WINDOW,))]
         if not stale:
             return
+        self._delete_attachment_files(stale)
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for start in range(0, len(stale), 500):
             chunk = stale[start:start + 500]
@@ -838,8 +856,10 @@ class Core:
     def history(self, client_id, limit=20, cursor=None):
         """Read captured context without claiming or acknowledging any work.
 
-        A cursor freezes the event window and row membership for 15 minutes.
-        Acknowledgment and publication statuses reflect the time of each read.
+        A cursor freezes the event window and row membership for 15 minutes,
+        except that context older than the history window can be pruned between
+        pages and then drops out. Acknowledgment and publication statuses reflect
+        the time of each read.
         """
         if not _integer(limit) or not 1 <= limit <= 50:
             raise CoreError('invalid_history_options')
@@ -994,6 +1014,18 @@ class Core:
             db.execute('UPDATE outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND (client_id=? OR recipient=?)', (self.clock(), client_id, client_id))
         return {'client_id': client_id, 'connected': False, 'revoked': True, 'queued_work_preserved': True}
 
+    def _delete_attachment_files(self, delivery_ids):
+        directory = self.state_dir / 'attachments'
+        prefixes = tuple(f'{delivery_id}-' for delivery_id in delivery_ids)
+        try:
+            names = os.listdir(directory)
+        except FileNotFoundError:
+            return
+        for name in names:
+            if name.startswith(prefixes):
+                with contextlib.suppress(FileNotFoundError):
+                    (directory / name).unlink()
+
     def fetch_attachment(self, client_id, delivery_id, file_unique_id):
         """Download one attachment of this client's captured message into private local state.
 
@@ -1006,10 +1038,13 @@ class Core:
         with self._db() as db:
             self._binding(db, client_id)
             row = db.execute('SELECT payload FROM inbox WHERE id=? AND client_id=?', (delivery_id, client_id)).fetchone()
-        attachments = json.loads(row['payload']).get('attachments', []) if row else []
-        item = next((a for a in attachments if a.get('file_unique_id') == file_unique_id), None)
+        payload = json.loads(row['payload']) if row else {}
+        item = next((a for a in payload.get('attachments', []) if a.get('file_unique_id') == file_unique_id), None)
         if item is None:
             raise CoreError('unknown_attachment')
+        # Context capture keeps such messages readable; it never lets their files in.
+        if payload.get('context_reason') == 'sender_not_allowed':
+            raise CoreError('attachment_sender_not_allowed')
         if item.get('file_size', 0) > MAX_ATTACHMENT_BYTES:
             raise CoreError('attachment_too_large')
         try:

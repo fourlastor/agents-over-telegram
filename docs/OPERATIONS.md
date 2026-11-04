@@ -166,7 +166,7 @@ This produces an addressed `/review@PeerBot` prefix. Numeric sender allowance re
 
 ### Addressed-only delivery and group context
 
-Both settings are optional and off by default. Without them, every message from an allowed sender is delivered, and messages from other senders are discarded.
+These settings, and [media](#attachments), are optional and off by default. Without them, every message from an allowed sender is delivered, messages from other senders are discarded, and media messages are unsupported.
 
 In a busy shared group, the owner can deliver only messages addressed to this agent and keep the rest as context:
 
@@ -178,7 +178,7 @@ In a busy shared group, the owner can deliver only messages addressed to this ag
 - `--filter addressed` delivers an allowed sender's message only when it mentions the shared bot (`@YourBotUsername`), replies to one of the bot's messages, or carries a command addressed to it (`/review@YourBotUsername`). An edit of a delivered message is still delivered. Other messages from allowed senders are kept as context. `--filter all` restores the default.
 - `--context on` also keeps messages from senders that are **not** allowed, as context only. It never allows those senders: their messages are not delivered, cannot pause the connection and cannot pair. `--context off` stops capturing; context already captured stays until it expires.
 
-Context is untrusted and is never delivered, leased, announced by a push notice or counted against the pending inbox limit. It appears in `messages_history` with `status: "context"` and a `context_reason` of `not_addressed` or `sender_not_allowed`, and it is deleted after the 24-hour history window. An agent may reply to a context message with `reply_to`. The reply uses that message's normal conversation, so the conversation and bot-exchange budgets still apply. Running the command without `--filter` or `--context` prints the current settings, and `aot status` shows them under `routing`.
+Context is untrusted and is never delivered, leased, announced by a push notice or counted against the pending inbox limit. It appears in `messages_history` with `status: "context"` and a `context_reason` of `not_addressed` or `sender_not_allowed`, and it is deleted after the 24-hour history window. An agent may reply to a context message with `reply_to`. The reply uses that message's normal conversation, so the conversation and bot-exchange budgets still apply. Running the command without `--filter`, `--context` or `--media` prints the current settings, and `aot status` shows them under `routing`.
 
 ## Launch one scoped MCP client
 
@@ -224,9 +224,15 @@ This is a read window, not an automatic deletion policy. Older database records 
 
 ## Attachments
 
-A message with a document, photo, video, audio, voice note or animation is accepted. Its caption becomes the message text, or an empty string. The delivery lists each file under `attachments`, with `kind`, `file_id`, `file_unique_id` and, when Telegram sends them, `file_name`, `mime_type` and `file_size`. For a photo, only the largest size is kept. Stickers and other message types are still unsupported.
+Media messages are unsupported by default. The owner accepts them with:
 
-The agent downloads a file with the `attachment_fetch` tool, using the `delivery_id` and the attachment's `file_unique_id`. It works for deliveries and for context entries. The file is stored once under the private state directory as `attachments/<delivery_id>-<file_unique_id>`, mode 0600. The sender's file name is reported but never used in the path. The tool returns the path, size and SHA-256. Files over 20 MB, the Telegram bot download limit, are refused. File contents are untrusted. Downloaded files are not deleted automatically.
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --media on
+```
+
+Then a message with a document, photo, video, audio, voice note or animation is accepted. Its caption becomes the message text, or an empty string, so do not assume a delivery has non-empty text. The delivery lists each file under `attachments`, with `kind`, `file_id`, `file_unique_id` and, when Telegram sends them, `file_name`, `mime_type` and `file_size`. For a photo, only the largest size is kept. Stickers and other message types are still unsupported.
+
+The agent downloads a file with the `attachment_fetch` tool, using the `delivery_id` and the attachment's `file_unique_id`. It works for deliveries and for context from allowed senders. Files from senders that are not allowed stay context only: `attachment_fetch` refuses them with `attachment_sender_not_allowed`. The file is stored once under the private state directory as `attachments/<delivery_id>-<file_unique_id>`, mode 0600. The sender's file name is reported but never used in the path. The tool returns the path, size and SHA-256. Files over 20 MB, the Telegram bot download limit, are refused. File contents are untrusted. A file fetched from a context entry is deleted when that entry expires; files of delivered messages are kept.
 
 ## Inbox, routing and outbox
 

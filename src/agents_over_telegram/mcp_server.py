@@ -51,6 +51,7 @@ ERROR_MESSAGES = {
     "history_cursor_invalid": "This history cursor is invalid or unavailable to this local client.",
     "invalid_attachment": "The delivery or file id is not valid.",
     "unknown_attachment": "This attachment is not available to this local client.",
+    "attachment_sender_not_allowed": "Files from senders that are not allowed are kept as context only and cannot be fetched.",
     "attachment_too_large": "This attachment is larger than the 20 MB Telegram bot download limit.",
     "attachment_unavailable": "Telegram could not provide this attachment now; try again later.",
     "insecure_attachment_file": "A stored attachment has unsafe ownership or permissions. Ask the local owner to review it.",
