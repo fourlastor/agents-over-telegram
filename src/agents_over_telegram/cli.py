@@ -137,7 +137,7 @@ def parser():
     create = sub.add_parser("client-create")
     create.add_argument("--label", required=True)
     create.add_argument("--client-file", type=Path, required=True)
-    for name in ("pair-begin", "status", "history", "pause", "resume", "unsuspend", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "delivery-settings", "watch"):
+    for name in ("pair-begin", "status", "history", "pause", "resume", "unsuspend", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "delivery-settings", "watch", "conversation-budget"):
         command = (sub.add_parser(name, help="Owner only: check with Telegram that a suspended destination works again, then clear it")
                    if name == "unsuspend" else sub.add_parser(name))
         command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume", "unsuspend", "mcp", "watch"})
@@ -176,9 +176,23 @@ def parser():
             change = command.add_mutually_exclusive_group()
             change.add_argument("--enable", dest="exchange_enabled", action="store_const", const=True)
             change.add_argument("--disable", dest="exchange_enabled", action="store_const", const=False)
+        if name == "conversation-budget":
+            command.add_argument("--conversation-id", required=True)
+            command.add_argument("--additional-sends", type=int)
+            command.add_argument("--duration-seconds", type=int)
+            command.add_argument("--reason")
     confirm = sub.add_parser("pair-confirm")
     confirm.add_argument("--pairing-id", required=True)
     confirm.add_argument("--confirm", action="store_true", help="Confirm observed sender and destination after local inspection")
+    limits = sub.add_parser("exchange-limits", help="Inspect or change the rolling send limits for every agent on this bot")
+    limits.add_argument("--conversation-send-limit", type=int, help="Sends allowed per conversation in each rolling window")
+    limits.add_argument("--conversation-window-seconds", type=int, help="Length of the per-conversation rolling window")
+    limits.add_argument("--client-send-limit", type=int, help="Sends allowed per agent across all its conversations in each rolling window")
+    limits.add_argument("--client-window-seconds", type=int, help="Length of the per-agent rolling window")
+    limits.add_argument("--pair-send-limit", type=int, help="Sends allowed per external bot pair in each rolling window")
+    limits.add_argument("--pair-window-seconds", type=int, help="Length of the per-pair rolling window")
+    limits.add_argument("--reset", action="store_true", help="Return to the built-in defaults")
+    limits.add_argument("--reason", help="Why the limits change; required when changing them")
     sub.add_parser("collect")
     sub.add_parser("unassigned")
     flush = sub.add_parser("flush")
@@ -258,6 +272,20 @@ def register_account(core, state_dir, fake, receiver_handoff_confirmed):
     return {"registered": True, "bot_id": bot["id"], "username": bot["username"], "mode": "fake" if fake else "live"}
 
 
+def _confirm_operator(summary):
+    """Ask the human at a terminal before raising or changing send limits.
+
+    Agents usually run commands without a terminal, so this stops an agent from
+    lifting its own limit by accident. It is not a security boundary: an agent
+    running as the same user could still drive a terminal on purpose.
+    """
+    if not sys.stdin.isatty():
+        raise CredentialError("operator_confirmation_required")
+    print(summary + " Type yes to continue:", file=sys.stderr, flush=True)
+    if input().strip().lower() != "yes":
+        raise CredentialError("operator_confirmation_declined")
+
+
 def run(args):
     from .core import Core, CoreError
     if args.command == "demo":
@@ -274,7 +302,8 @@ def run(args):
     state_dir = private_directory(args.state_dir)
     _mode(state_dir, args.fake)
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
-                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "delivery-settings", "watch"}))
+                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "delivery-settings", "watch",
+                                         "conversation-budget", "exchange-limits"}))
     if args.command.startswith("relay-"):
         from .relay import RelayStore
         store = RelayStore(core, project_validator=lambda binding: _relay_project_valid(core, binding, args.fake))
@@ -336,6 +365,23 @@ def run(args):
         return core.flush(client_id=_client(core, args.client_file, args.expected_client_id) if args.client_file else None)
     if args.command == "account-status":
         return core.accounts_status()
+    if args.command == "exchange-limits":
+        changes = {"conversation_send_limit": args.conversation_send_limit,
+                   "conversation_window_seconds": args.conversation_window_seconds,
+                   "client_send_limit": args.client_send_limit,
+                   "client_window_seconds": args.client_window_seconds,
+                   "pair_send_limit": args.pair_send_limit, "pair_window_seconds": args.pair_window_seconds}
+        if args.reset or any(value is not None for value in changes.values()):
+            described = "reset to the defaults" if args.reset else ", ".join(
+                f"{name}={value}" for name, value in changes.items() if value is not None)
+            _confirm_operator(f"Change the Telegram send limits for every agent on this bot: {described}.")
+        return core.exchange_limits(conversation_send_limit=args.conversation_send_limit,
+                                    conversation_window_seconds=args.conversation_window_seconds,
+                                    client_send_limit=args.client_send_limit,
+                                    client_window_seconds=args.client_window_seconds,
+                                    pair_send_limit=args.pair_send_limit,
+                                    pair_window_seconds=args.pair_window_seconds,
+                                    reset=args.reset, reason=args.reason)
     if args.command == "grant-peer":
         source = _client(core, args.source_client_file)
         target = _client(core, args.target_client_file)
@@ -363,6 +409,13 @@ def run(args):
                                       accept_media=None if args.accept_media is None else args.accept_media == "on")
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
+    if args.command == "conversation-budget":
+        if args.additional_sends is not None:
+            _confirm_operator(f"Allow {args.additional_sends} more sends per rolling window in conversation "
+                              f"{args.conversation_id!r} for {args.duration_seconds} seconds.")
+        return core.conversation_budget(client_id, args.conversation_id,
+                                        additional_sends=args.additional_sends,
+                                        duration_seconds=args.duration_seconds, reason=args.reason)
     if args.command in {"pause", "resume"}:
         return core.pause(client_id, paused=args.command == "pause" and not args.resume)
     if args.command == "disconnect":
@@ -450,7 +503,15 @@ def main():
         import re
         code = str(error.code)
         safe = code if re.fullmatch(r"[a-z0-9_]{1,64}", code) else "operation_failed"
-        print(json.dumps({"ok": False, "error": safe}), file=sys.stderr)
+        body = {"ok": False, "error": safe}
+        details = getattr(error, "details", None)
+        if isinstance(details, dict):
+            # Rolling limit details are numbers only; drop anything else.
+            numbers = {k: v for k, v in details.items() if isinstance(k, str) and re.fullmatch(r"[a-z_]{1,32}", k)
+                       and isinstance(v, (int, float)) and not isinstance(v, bool)}
+            if numbers:
+                body["details"] = numbers
+        print(json.dumps(body), file=sys.stderr)
         return 1
     except (KeyboardInterrupt, EOFError):
         print('{"ok":false,"error":"cancelled"}', file=sys.stderr)

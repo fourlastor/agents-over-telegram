@@ -522,7 +522,7 @@ def test_broker_capacity_failure_rolls_back_outbox(env):
     assert len(transport.sent) == 1
 
 
-def test_chain_limit_persists_through_broker_and_human_does_not_reset_it(env):
+def test_conversation_limit_is_rolling_through_broker_and_human_does_not_reset_it(env):
     core, transport, clock = env
     a, _ = bind(core, transport)
     b, _ = bind(core, transport, 'Beta', -200)
@@ -530,13 +530,15 @@ def test_chain_limit_persists_through_broker_and_human_does_not_reset_it(env):
     core.grant_peer(b, a)
     current, target = a, b
     conversation = None
-    for n in range(core.MAX_CHAIN):
+    first = clock()
+    for n in range(core.CONVERSATION_SEND_LIMIT):
         result = core.send(current, f'hop{n}', f'hop{n}', recipient=target, conversation_id=conversation)
         conversation = result['conversation_id']
         current, target = target, current
         clock.advance(2)
-    with pytest.raises(CoreError, match='conversation_limit'):
-        core.send(current, 'ninth', 'ninth', recipient=target, conversation_id=conversation)
+    with pytest.raises(CoreError, match='conversation_limit') as blocked:
+        core.send(current, 'over', 'over', recipient=target, conversation_id=conversation)
+    assert blocked.value.retry_at == first + core.CONVERSATION_WINDOW
     append(transport, 'unrelated human', chat=-100)
     core.collect()
     with pytest.raises(CoreError, match='conversation_limit'):
@@ -545,6 +547,9 @@ def test_chain_limit_persists_through_broker_and_human_does_not_reset_it(env):
     assert result['conversation_id'] != conversation
     with pytest.raises(CoreError, match='unknown_conversation'):
         core.send(a, 'invent reset', 'fake-chain', conversation_id='invented')
+    clock.now = blocked.value.retry_at
+    reopened = core.send(a, 'window has room', 'reopened', recipient=b, conversation_id=conversation)
+    assert reopened['conversation_id'] == conversation
 
 
 def test_cross_bot_loop_limit_and_configured_command(env):
@@ -553,7 +558,7 @@ def test_cross_bot_loop_limit_and_configured_command(env):
     core.allow_sender(a, 202, is_bot=True)
     core.configure_peer_command(a, 'peer_test_bot', 'coordinate')
     conversation = None
-    for n in range(core.MAX_CHAIN):
+    for n in range(core.CONVERSATION_SEND_LIMIT):
         append(transport, f'peer message {n}', sender=202, bot=True)
         core.collect()
         page = core.poll(a)
@@ -565,7 +570,7 @@ def test_cross_bot_loop_limit_and_configured_command(env):
         clock.advance(2)
     assert transport.sent[0]['text'].startswith('/coordinate@peer_test_bot\n[Agent: Alpha')
     with pytest.raises(CoreError, match='conversation_limit'):
-        core.send(a, 'too many', 'peer9', conversation_id=conversation)
+        core.send(a, 'too many', 'peer-over', conversation_id=conversation)
 
 
 def test_replies_must_belong_to_destination_and_inherit_conversation(env):

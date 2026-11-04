@@ -508,3 +508,59 @@ async def test_history_maximum_page_supports_bounded_multibyte_text():
         result = await session.call_tool("messages_history", {"limit": 50})
         assert not result.isError
         assert len(payload(result)["result"]["messages"]) == 50
+
+
+
+LIMIT_DETAILS = {"sent_in_window": 30, "limit": 30, "window_seconds": 3600,
+                 "retry_at": 1793810123.5, "retry_after_seconds": 754}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("code,scope", [
+    ("conversation_limit", "This conversation already sent 30 messages"),
+    ("bot_pair_limit", "All conversations between this agent and that external bot already sent 30 messages"),
+    ("client_limit", "This agent, across all its conversations, already sent 30 messages"),
+])
+async def test_rolling_limit_errors_explain_what_happened_and_when_to_retry(code, scope):
+    core = AdapterCore()
+    core.failure = ValueError("fake-limit-detail-MUST-NOT-LEAK")
+    core.failure.code = code
+    core.failure.details = dict(LIMIT_DETAILS)
+    async with create_connected_server_and_client_session(create_server(core, "client-a")) as session:
+        result = await session.call_tool("messages_history", {})
+        assert result.isError
+        error = payload(result)["error"]
+        assert Draft202012Validator(TOOLS[0].outputSchema).is_valid(payload(result))
+        assert error["code"] == code
+        assert error["retry_at"] == 1793810123.5
+        assert error["retry_at_utc"] == "2026-11-04T16:35:23Z"
+        assert (error["retry_after_seconds"], error["limit"], error["window_seconds"], error["sent_in_window"]) == (754, 30, 3600, 30)
+        for text in (scope, "the limit is 30 per rolling 1 hour", "not sent or queued",
+                     "Wait 754 seconds (until 2026-11-04T16:35:23Z)", "same conversation",
+                     "Do not start a new conversation", "stop and tell the human"):
+            assert text in error["message"]
+        assert ("tell the human in your local session" in error["message"]) == (code == "client_limit")
+        # The agent must not be told how to lift its own limit.
+        for command in ("exchange-limits", "conversation-budget", "--reason"):
+            assert command not in error["message"]
+        assert "MUST-NOT-LEAK" not in result.model_dump_json()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("code,details", [
+    ("conversation_limit", None),
+    ("conversation_limit", dict(LIMIT_DETAILS, retry_at=float("inf"))),
+    ("conversation_limit", dict(LIMIT_DETAILS, limit=True)),
+    ("conversation_limit", dict(LIMIT_DETAILS, limit="30 <script>")),
+    ("not_a_public_code", LIMIT_DETAILS),
+    ("paused", LIMIT_DETAILS),
+])
+async def test_malformed_limit_details_fall_back_to_the_fixed_message(code, details):
+    core = AdapterCore()
+    core.failure = ValueError("fake")
+    core.failure.code = code
+    core.failure.details = details
+    async with create_connected_server_and_client_session(create_server(core, "client-a")) as session:
+        error = payload(await session.call_tool("messages_history", {}))["error"]
+        assert set(error) == {"code", "message"}
+        assert error["code"] == (code if code != "not_a_public_code" else "internal_error")

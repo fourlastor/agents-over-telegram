@@ -35,7 +35,7 @@ When beginning or returning to an authorized communication task (not merely hand
 4. For another logical agent on the same bot, select only an operator-granted peer connection. The bridge creates broker delivery; do not wait for Telegram to echo the bot's own publication, copy labels into fabricated inbound messages, or repeat sends to create an echo.
 5. Inspect `delivery_status` after an ambiguous result. An `unknown` outcome is not a failure to retry: stop retries of that send and any exchange depending on its success, then direct the operator to [uncertain-send recovery](../../docs/OPERATIONS.md#uncertain-sends). Never change the idempotency key to get around an unknown outcome or limit.
 
-Respect pause, disconnect, rate/queue limits and bounded exchange limits. Do not create a new conversation just to continue a limited automated exchange. A human pause ends automated sending until the user requests resume. Report delivery problems without claiming success.
+Respect pause, disconnect, rate/queue limits and rolling send limits. If a send fails with `conversation_limit`, `client_limit` or `bot_pair_limit`, nothing was sent. Read the error message, wait until its `retry_at`, then retry the same send in the same conversation. Do not create, reuse or switch conversations, or change the idempotency key, to get around a limit. Never run commands that change the limits yourself. If the work cannot wait, stop and tell the user. A human pause ends automated sending until the user requests resume. Report delivery problems without claiming success.
 
 ## Lifecycle and evidence
 

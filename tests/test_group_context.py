@@ -142,8 +142,9 @@ def test_replying_to_bot_context_stays_inside_the_bot_chain(group):
     event = append(transport, 'bot chatter', sender=202, bot=True)
     core.collect()
     assert deliveries(core, client) == []
-    for n in range(core.MAX_CHAIN):
-        core.send(client, 'reply', f'chain-{n}', reply_to=event['message']['message_id'])
+    for n in range(core.CONVERSATION_SEND_LIMIT):
+        sent = core.send(client, 'reply', f'chain-{n}', reply_to=event['message']['message_id'])
+        assert sent['conversation_id'] == f'bot:{client}:202'
         clock.advance(2)
     with pytest.raises(CoreError, match='conversation_limit'):
         core.send(client, 'one more', 'chain-over', reply_to=event['message']['message_id'])

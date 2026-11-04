@@ -28,8 +28,12 @@ from .credentials import CredentialError, private_directory
 class CoreError(Exception):
     """Public errors contain only a fixed, non-sensitive code."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, details: dict | None = None):
         self.code = code
+        # Only rolling send limits set details. They hold numbers only: the
+        # limit, its window, current usage and the earliest retry time.
+        self.details = details
+        self.retry_at = (details or {}).get('retry_at')
         super().__init__(code)
 
 
@@ -107,9 +111,18 @@ def _addressed(msg, text, account):
 
 class Core:
     PAIR_TTL = 600
-    MAX_CHAIN = 8
+    # Defaults for the rolling send limits. The operator can change them for
+    # the whole state directory with exchange_limits().
+    CONVERSATION_SEND_LIMIT = 30
+    CONVERSATION_WINDOW = 3600
+    # A ceiling per agent across all its conversations, so the total does not
+    # grow with the number of conversations an agent or bot can reach.
+    CLIENT_SEND_LIMIT = 60
+    CLIENT_WINDOW = 3600
     BOT_PAIR_SEND_LIMIT = 32
     BOT_PAIR_WINDOW = 3600
+    SEND_LIMIT_RANGE = (1, 1000)
+    WINDOW_RANGE = (60, 86400)
     UNMATCHED_LIMIT = 100
     BOT_INTERVAL = 0.05
     DESTINATION_INTERVAL = 1.0
@@ -200,6 +213,19 @@ class Core:
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY, send_count INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS conversation_budget_grants (
+                    id INTEGER PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id),
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    send_limit INTEGER NOT NULL, created REAL NOT NULL,
+                    expires_at REAL NOT NULL, reason TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS exchange_limits (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    conversation_send_limit INTEGER NOT NULL, conversation_window INTEGER NOT NULL,
+                    pair_send_limit INTEGER NOT NULL, pair_window INTEGER NOT NULL,
+                    updated REAL NOT NULL, reason TEXT NOT NULL,
+                    client_send_limit INTEGER, client_window INTEGER
+                );
                 CREATE TABLE IF NOT EXISTS bot_exchange_policies (
                     client_id TEXT NOT NULL REFERENCES clients(id), sender_id INTEGER NOT NULL,
                     enabled INTEGER NOT NULL, PRIMARY KEY(client_id,sender_id)
@@ -241,6 +267,18 @@ class Core:
             if 'context' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
                 db.execute('ALTER TABLE inbox ADD COLUMN context INTEGER NOT NULL DEFAULT 0')
             db.execute('CREATE INDEX IF NOT EXISTS inbox_context_expiry ON inbox(COALESCE(event_at,created)) WHERE context=1')
+            if 'window_reset_at' not in {row['name'] for row in db.execute('PRAGMA table_info(conversations)')}:
+                # Set when the owner posts in a conversation; NULL means never.
+                db.execute('ALTER TABLE conversations ADD COLUMN window_reset_at REAL')
+            if 'additional_sends' not in {row['name'] for row in db.execute('PRAGMA table_info(conversation_budget_grants)')}:
+                # Older grants were lifetime allowances. They do not apply to
+                # rolling windows, so they keep a NULL value and are ignored.
+                db.execute('ALTER TABLE conversation_budget_grants ADD COLUMN additional_sends INTEGER')
+            limit_columns = {row['name'] for row in db.execute('PRAGMA table_info(exchange_limits)')}
+            for column in ('client_send_limit', 'client_window'):
+                if column not in limit_columns:
+                    # NULL means the built-in default.
+                    db.execute(f'ALTER TABLE exchange_limits ADD COLUMN {column} INTEGER')
             db.execute('INSERT OR IGNORE INTO history_keys(singleton,secret) VALUES(1,?)', (secrets.token_bytes(32),))
             db.execute('CREATE INDEX IF NOT EXISTS inbox_history ON inbox(client_id,COALESCE(event_at,created) DESC)')
             db.execute('CREATE INDEX IF NOT EXISTS outbox_history ON outbox(client_id,created DESC)')
@@ -259,7 +297,10 @@ class Core:
             db.execute('PRAGMA foreign_keys=ON')
             db.execute('PRAGMA synchronous=FULL')
             yield db
-        except sqlite3.Error:
+        except sqlite3.Error as error:
+            code = getattr(error, 'sqlite_errorcode', None)
+            if isinstance(code, int) and code & 0xff in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise CoreError('storage_busy') from None
             raise CoreError('storage_error') from None
         finally:
             if db is not None:
@@ -268,7 +309,14 @@ class Core:
     @contextlib.contextmanager
     def _tx(self):
         with self._db() as db:
-            db.execute('BEGIN IMMEDIATE')
+            try:
+                db.execute('BEGIN IMMEDIATE')
+            except sqlite3.OperationalError as error:
+                code = getattr(error, 'sqlite_errorcode', None)
+                if not isinstance(code, int) or code & 0xff != sqlite3.SQLITE_BUSY:
+                    raise
+                # No transaction started. Retry acquisition once without replaying work.
+                db.execute('BEGIN IMMEDIATE')
             try:
                 yield db
                 db.execute('COMMIT')
@@ -437,11 +485,15 @@ class Core:
                                        (admitted['conversation_id'], client_id, sender_id))
             policy = db.execute('SELECT enabled FROM bot_exchange_policies WHERE client_id=? AND sender_id=?',
                                 (client_id, sender_id)).fetchone()
-            usage = self._bot_pair_usage(db, client_id, sender_id, self.clock())
+            limits = self._limits(db)
+            usage = self._bot_pair_usage(db, client_id, sender_id, self.clock(), limits)
         return {'sender_id': sender_id, 'enabled': bool(policy and policy[0]),
-                'max_sends_per_exchange': self.MAX_CHAIN, 'pair_send_limit': self.BOT_PAIR_SEND_LIMIT,
-                'window_seconds': self.BOT_PAIR_WINDOW, 'reserved_in_window': usage[0],
-                'retry_at': usage[1] if usage[0] >= self.BOT_PAIR_SEND_LIMIT else None}
+                'max_sends_per_exchange': limits['conversation_send_limit'],
+                'conversation_send_limit': limits['conversation_send_limit'],
+                'conversation_window_seconds': limits['conversation_window_seconds'],
+                'pair_send_limit': limits['pair_send_limit'],
+                'window_seconds': limits['pair_window_seconds'], 'reserved_in_window': usage[0],
+                'retry_at': usage[1]}
 
     DELIVERY_FILTERS = ('all', 'addressed')
 
@@ -473,15 +525,110 @@ class Core:
         return {'delivery_filter': row['delivery_filter'], 'capture_context': bool(row['capture_context']),
                 'accept_media': bool(row['accept_media']), 'context_window_seconds': self.HISTORY_WINDOW}
 
-    def _bot_pair_usage(self, db, client_id, sender_id, now):
+    def _limits(self, db):
+        row = db.execute('SELECT * FROM exchange_limits WHERE singleton=1').fetchone()
+        if row is None:
+            return {'conversation_send_limit': self.CONVERSATION_SEND_LIMIT,
+                    'conversation_window_seconds': self.CONVERSATION_WINDOW,
+                    'client_send_limit': self.CLIENT_SEND_LIMIT,
+                    'client_window_seconds': self.CLIENT_WINDOW,
+                    'pair_send_limit': self.BOT_PAIR_SEND_LIMIT,
+                    'pair_window_seconds': self.BOT_PAIR_WINDOW, 'source': 'default'}
+        return {'conversation_send_limit': row['conversation_send_limit'],
+                'conversation_window_seconds': row['conversation_window'],
+                'client_send_limit': row['client_send_limit'] or self.CLIENT_SEND_LIMIT,
+                'client_window_seconds': row['client_window'] or self.CLIENT_WINDOW,
+                'pair_send_limit': row['pair_send_limit'],
+                'pair_window_seconds': row['pair_window'], 'source': 'operator',
+                'updated_at': row['updated'], 'reason': row['reason']}
+
+    def exchange_limits(self, *, conversation_send_limit=None, conversation_window_seconds=None,
+                        client_send_limit=None, client_window_seconds=None,
+                        pair_send_limit=None, pair_window_seconds=None, reset=False, reason=None):
+        """Inspect or change the rolling send limits through the local operator CLI.
+
+        The values live in the shared state, so every agent process using this
+        bot applies the same limits. No MCP tool can change them.
+        """
+        values = {'conversation_send_limit': (conversation_send_limit, self.SEND_LIMIT_RANGE),
+                  'conversation_window_seconds': (conversation_window_seconds, self.WINDOW_RANGE),
+                  'client_send_limit': (client_send_limit, self.SEND_LIMIT_RANGE),
+                  'client_window_seconds': (client_window_seconds, self.WINDOW_RANGE),
+                  'pair_send_limit': (pair_send_limit, self.SEND_LIMIT_RANGE),
+                  'pair_window_seconds': (pair_window_seconds, self.WINDOW_RANGE)}
+        changing = reset or any(value is not None for value, _ in values.values())
+        for value, (low, high) in values.values():
+            if value is not None and (not _integer(value) or not low <= value <= high):
+                raise CoreError('invalid_exchange_limits')
+        if reset and any(value is not None for value, _ in values.values()):
+            raise CoreError('invalid_exchange_limits')
+        if changing and (not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 500):
+            raise CoreError('invalid_exchange_limits')
+        if not changing and reason is not None:
+            raise CoreError('invalid_exchange_limits')
+        with self._tx() as db:
+            if reset:
+                db.execute('DELETE FROM exchange_limits')
+            elif changing:
+                current = self._limits(db)
+                merged = {key: value if value is not None else current[key]
+                          for key, (value, _) in values.items()}
+                db.execute('INSERT INTO exchange_limits(singleton,conversation_send_limit,conversation_window,'
+                           'pair_send_limit,pair_window,updated,reason,client_send_limit,client_window) '
+                           'VALUES(1,?,?,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET '
+                           'conversation_send_limit=excluded.conversation_send_limit,'
+                           'conversation_window=excluded.conversation_window,'
+                           'pair_send_limit=excluded.pair_send_limit,pair_window=excluded.pair_window,'
+                           'updated=excluded.updated,reason=excluded.reason,'
+                           'client_send_limit=excluded.client_send_limit,client_window=excluded.client_window',
+                           (merged['conversation_send_limit'], merged['conversation_window_seconds'],
+                            merged['pair_send_limit'], merged['pair_window_seconds'],
+                            self.clock(), reason.strip(),
+                            merged['client_send_limit'], merged['client_window_seconds']))
+            return self._limits(db)
+
+    @staticmethod
+    def _window_usage(stamps, limit, window):
+        """Count reservations in a rolling window, newest first.
+
+        Returns the count and, when the window is full, the time the newest
+        limit-th reservation expires so that one more send fits.
+        """
+        return len(stamps), (stamps[limit - 1] + window if len(stamps) >= limit else None)
+
+    def _bot_pair_usage(self, db, client_id, sender_id, now, limits):
+        window = limits['pair_window_seconds']
         stamps = [r[0] for r in db.execute('''SELECT o.created FROM bot_exchange_members p
             JOIN outbox o ON o.conversation_id=p.conversation_id
             WHERE p.client_id=? AND p.sender_id=? AND o.created>?
             ORDER BY o.created DESC''',
-            (client_id, sender_id, now - self.BOT_PAIR_WINDOW))]
-        # The newest Nth reservation must expire before the next one can fit.
-        return len(stamps), (stamps[self.BOT_PAIR_SEND_LIMIT - 1] + self.BOT_PAIR_WINDOW
-                             if len(stamps) >= self.BOT_PAIR_SEND_LIMIT else None)
+            (client_id, sender_id, now - window))]
+        return self._window_usage(stamps, limits['pair_send_limit'], window)
+
+    def _conversation_usage(self, db, conversation_id, now, limit, limits):
+        window = limits['conversation_window_seconds']
+        # A message from the owner in this conversation starts its window again:
+        # sends before it no longer count toward this conversation's limit.
+        # A send at the same instant as the owner's message still counts.
+        row = db.execute('SELECT window_reset_at FROM conversations WHERE id=?', (conversation_id,)).fetchone()
+        reset_at = row[0] if row and row[0] is not None else None
+        stamps = [r[0] for r in db.execute(
+            'SELECT created FROM outbox WHERE conversation_id=? AND created>? AND created>=? ORDER BY created DESC',
+            (conversation_id, now - window, reset_at if reset_at is not None else now - window))]
+        return self._window_usage(stamps, limit, window)
+
+    def _client_usage(self, db, client_id, now, limits):
+        window = limits['client_window_seconds']
+        stamps = [r[0] for r in db.execute(
+            'SELECT created FROM outbox WHERE client_id=? AND created>? ORDER BY created DESC',
+            (client_id, now - window))]
+        return self._window_usage(stamps, limits['client_send_limit'], window)
+
+    @staticmethod
+    def _limit_error(code, used, limit, window, retry_at, now):
+        return CoreError(code, details={
+            'sent_in_window': used, 'limit': limit, 'window_seconds': window,
+            'retry_at': retry_at, 'retry_after_seconds': max(0, math.ceil(retry_at - now))})
 
     def unassigned(self, limit=20):
         if not _integer(limit) or not 1 <= limit <= self.UNMATCHED_LIMIT:
@@ -677,7 +824,9 @@ class Core:
         # A human message starts its own conversation unless it replies to a known
         # outbound message. Bot replies inherit a known conversation; unsolicited
         # bot messages keep the legacy chain unless the operator enables bounded
-        # roots. Reply lineage and edits cannot mint another exchange budget.
+        # roots. Every conversation has its own rolling send window, and the
+        # per-agent ceiling bounds the total across all of them, so reusing old
+        # conversations or minting new ones cannot raise an agent's throughput.
         reply_to = _mapping(msg.get('reply_to_message')).get('message_id')
         known = db.execute('SELECT conversation_id FROM outbox WHERE chat_id=? AND thread_id=? AND message_id=? AND status=\'sent\' ORDER BY created DESC LIMIT 1', (chat_id, thread_id, reply_to)).fetchone() if _integer(reply_to) else None
         if known:
@@ -714,6 +863,16 @@ class Core:
             payload['attachments'] = attachments
         stamp = msg.get('edit_date' if kind == 'edited_message' else 'date')
         event_at = stamp if _integer(stamp) and 0 < stamp <= now else now
+        if (allowed and not sender['is_bot'] and sender_id == binding['owner_id'] and kind == 'message'
+                and not db.execute('SELECT 1 FROM inbox WHERE client_id=? AND event_key=?',
+                                   (binding['client_id'], f'tg:{update_id}')).fetchone()):
+            # The owner taking part shows a human is following this exchange, so
+            # its conversation window starts again from the message's own time.
+            # Edits and reprocessed updates do not count, and the per-agent
+            # ceiling and pair budgets are not reset.
+            db.execute('INSERT INTO conversations(id,window_reset_at) VALUES(?,?) '
+                       'ON CONFLICT(id) DO UPDATE SET window_reset_at=excluded.window_reset_at',
+                       (conversation, event_at))
         if not allowed:
             reason = 'sender_not_allowed'
         elif binding['delivery_filter'] == 'addressed' and not edited_delivery and not _addressed(msg, text, account):
@@ -1014,6 +1173,57 @@ class Core:
             db.execute('UPDATE outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND (client_id=? OR recipient=?)', (self.clock(), client_id, client_id))
         return {'client_id': client_id, 'connected': False, 'revoked': True, 'queued_work_preserved': True}
 
+    def _conversation_send_limit(self, db, conversation_id, now, limits):
+        # A grant raises the limit for every sender in the conversation, because
+        # every sender's reservations count toward the same window. Only a
+        # client that already takes part in the conversation can create one.
+        extra = db.execute(
+            'SELECT MAX(additional_sends) FROM conversation_budget_grants '
+            'WHERE conversation_id=? AND created<=? AND expires_at>?',
+            (conversation_id, now, now)).fetchone()[0]
+        return limits['conversation_send_limit'] + (extra or 0)
+
+    def conversation_budget(self, client_id, conversation_id, *, additional_sends=None,
+                            duration_seconds=None, reason=None):
+        """Inspect or grant a temporary higher rolling limit through the local operator CLI."""
+        if conversation_id is None:
+            raise CoreError('invalid_conversation')
+        changing = additional_sends is not None
+        if changing:
+            if (not _integer(additional_sends) or not 1 <= additional_sends <= 32
+                    or not _integer(duration_seconds) or not 1 <= duration_seconds <= 86400
+                    or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 500):
+                raise CoreError('invalid_conversation_budget')
+        elif duration_seconds is not None or reason is not None:
+            raise CoreError('invalid_conversation_budget')
+        now = self.clock()
+        with self._tx() as db:
+            self._binding(db, client_id, usable=changing)
+            conversation = self._conversation(db, client_id, conversation_id)
+            row = db.execute('SELECT send_count FROM conversations WHERE id=?', (conversation,)).fetchone()
+            count = row['send_count'] if row else 0
+            limits = self._limits(db)
+            if changing:
+                db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
+                # A grant raises this conversation's rolling-window limit while it is active.
+                db.execute(
+                    'INSERT INTO conversation_budget_grants'
+                    '(client_id,conversation_id,send_limit,created,expires_at,reason,additional_sends)'
+                    ' VALUES(?,?,?,?,?,?,?)',
+                    (client_id, conversation, limits['conversation_send_limit'] + additional_sends,
+                     now, now + duration_seconds, reason.strip(), additional_sends))
+            grants = [dict(row) for row in db.execute(
+                'SELECT id,additional_sends,created,expires_at,reason FROM conversation_budget_grants '
+                'WHERE client_id=? AND conversation_id=? ORDER BY id', (client_id, conversation))]
+            limit = self._conversation_send_limit(db, conversation, now, limits)
+            used, retry_at = self._conversation_usage(db, conversation, now, limit, limits)
+            reset = db.execute('SELECT window_reset_at FROM conversations WHERE id=?', (conversation,)).fetchone()
+            reset_at = reset[0] if reset else None
+        return {'conversation_id': conversation, 'send_count': count, 'send_limit': limit,
+                'window_seconds': limits['conversation_window_seconds'], 'sent_in_window': used,
+                'window_reset_at': reset_at,
+                'remaining_sends': max(0, limit - used), 'retry_at': retry_at, 'grants': grants}
+
     def _delete_attachment_files(self, delivery_ids):
         directory = self.state_dir / 'attachments'
         prefixes = tuple(f'{delivery_id}-' for delivery_id in delivery_ids)
@@ -1092,7 +1302,7 @@ class Core:
                 raise CoreError('unknown_conversation')
             return conversation_id
         # Continue the most recent admitted conversation, including broker work.
-        # Explicit conversation IDs always retain their own durable chain budget.
+        # Explicit conversation IDs always keep their own rolling send budget.
         row = db.execute('SELECT conversation_id FROM inbox WHERE client_id=? AND context=0 ORDER BY created DESC,rowid DESC LIMIT 1', (client_id,)).fetchone()
         if row:
             return row['conversation_id']
@@ -1141,13 +1351,27 @@ class Core:
                 if reply_conversation is not None and reply_conversation != conversation:
                     raise CoreError('reply_conversation_mismatch')
                 db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
-                count = db.execute('SELECT send_count FROM conversations WHERE id=?', (conversation,)).fetchone()[0]
-                if count >= self.MAX_CHAIN:
-                    raise CoreError('conversation_limit')
+                limits = self._limits(db)
+                limit = self._conversation_send_limit(db, conversation, now, limits)
+                used, retry_at = self._conversation_usage(db, conversation, now, limit, limits)
+                if used >= limit:
+                    raise self._limit_error('conversation_limit', used, limit,
+                                            limits['conversation_window_seconds'], retry_at, now)
+                used, retry_at = self._client_usage(db, client_id, now, limits)
+                if used >= limits['client_send_limit']:
+                    raise self._limit_error('client_limit', used, limits['client_send_limit'],
+                                            limits['client_window_seconds'], retry_at, now)
+                full = []
                 for pair in db.execute('SELECT client_id,sender_id FROM bot_exchange_members WHERE conversation_id=?',
                                        (conversation,)).fetchall():
-                    if self._bot_pair_usage(db, pair['client_id'], pair['sender_id'], now)[0] >= self.BOT_PAIR_SEND_LIMIT:
-                        raise CoreError('bot_pair_limit')
+                    used, retry_at = self._bot_pair_usage(db, pair['client_id'], pair['sender_id'], now, limits)
+                    if used >= limits['pair_send_limit']:
+                        full.append((retry_at, used))
+                if full:
+                    # Report the latest time, when every full pair has room again.
+                    retry_at, used = max(full)
+                    raise self._limit_error('bot_pair_limit', used, limits['pair_send_limit'],
+                                            limits['pair_window_seconds'], retry_at, now)
                 outbox_id = 'out_' + secrets.token_hex(12)
                 publication = f'[Agent: {client["label"]} | shared bot @{account["username"]}]\n{text}'
                 peer = db.execute('SELECT * FROM peer_commands WHERE client_id=?', (client_id,)).fetchone() if recipient is None else None

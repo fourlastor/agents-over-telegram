@@ -29,9 +29,9 @@ def receive(core, transport, client, **fields):
     return conversation, event
 
 
-def send_n(core, clock, client, conversation, prefix, count=8):
+def send_n(core, clock, client, conversation, prefix, count=None):
     sent = []
-    for n in range(count):
+    for n in range(core.CONVERSATION_SEND_LIMIT if count is None else count):
         sent.append(core.send(client, 'reply', f'{prefix}-{n}', conversation_id=conversation))
         clock.advance(2)
     return sent
@@ -56,7 +56,7 @@ def test_existing_state_keeps_legacy_policy_and_counters(setup_pair):
     with pytest.raises(CoreError, match='conversation_limit'):
         core.send(client, 'blocked', 'legacy-blocked', conversation_id=fresh)
     result = core.bot_exchange_policy(client, 202, enabled=True)
-    assert result['reserved_in_window'] == 8
+    assert result['reserved_in_window'] == core.CONVERSATION_SEND_LIMIT
     assert rows(core, 'SELECT * FROM conversations') == before
     fresh, _ = receive(core, transport, client)
     assert fresh != conv
@@ -65,19 +65,25 @@ def test_existing_state_keeps_legacy_policy_and_counters(setup_pair):
         core.send(client, 'old still blocked', 'old-still-blocked', conversation_id=conv)
 
 
-def test_reply_lineage_never_expires_or_resets(setup_pair):
+def test_reply_lineage_shares_the_rolling_conversation_window(setup_pair):
     core, transport, clock, client = setup_pair
     core.bot_exchange_policy(client, 202, enabled=True)
     conv, _ = receive(core, transport, client)
     sent = send_n(core, clock, client, conv, 'lineage')
-    clock.advance(core.BOT_PAIR_WINDOW + 1)
     reply, _ = receive(core, transport, client, reply_to_message={'message_id': sent[-1]['message_id']})
     assert reply == conv
-    with pytest.raises(CoreError, match='conversation_limit'):
-        core.send(client, 'ninth', 'ninth', conversation_id=reply)
+    with pytest.raises(CoreError, match='conversation_limit') as blocked:
+        core.send(client, 'over the limit', 'over', conversation_id=reply)
+    assert blocked.value.retry_at == sent[0]['created_at'] + core.CONVERSATION_WINDOW
     fresh, _ = receive(core, transport, client)
     assert fresh != conv
     assert core.send(client, 'fresh', 'fresh', conversation_id=fresh)['status'] == 'sent'
+    # Time alone reopens the same conversation; no human message is needed.
+    clock.now = blocked.value.retry_at - 1
+    with pytest.raises(CoreError, match='conversation_limit'):
+        core.send(client, 'still early', 'early', conversation_id=reply)
+    clock.now = blocked.value.retry_at
+    assert core.send(client, 'window has room', 'later', conversation_id=reply)['status'] == 'sent'
 
 
 @pytest.mark.parametrize('disable', [False, True])
@@ -119,8 +125,9 @@ def test_many_fresh_roots_share_rolling_budget_across_restart_and_toggle(setup_p
     conv, _ = receive(core, transport, client)
     core = Core(core.state_dir, transport, clock=clock)
     core.bot_exchange_policy(client, 202, enabled=False)
-    with pytest.raises(CoreError, match='bot_pair_limit'):
+    with pytest.raises(CoreError, match='bot_pair_limit') as blocked:
         core.send(client, 'disable is not a reset', 'disabled-blocked', conversation_id=conv)
+    assert blocked.value.retry_at == first_reserved + core.BOT_PAIR_WINDOW
     policy = core.bot_exchange_policy(client, 202, enabled=True)
     assert policy['reserved_in_window'] == 32
     assert policy['retry_at'] == first_reserved + core.BOT_PAIR_WINDOW
