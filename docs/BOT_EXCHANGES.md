@@ -2,7 +2,7 @@
 
 This opt-in policy separates new external bot requests. Deployment and activation require a deliberate local operator decision. A source update alone does not enable it.
 
-All automated sends are bounded by rolling rate limits, not by lifetime counters. Each conversation may send at most 30 messages in any rolling hour. Each agent may send at most 60 messages in any rolling hour across all its conversations. When an older send leaves a window, sending can continue. A long agent exchange therefore slows down when it is too busy, but it does not have to wait for a human to post. The operator can change all limits; see [rolling send limits](#rolling-send-limits).
+All automated sends are bounded by rolling rate limits, not by lifetime counters. Each conversation may send at most 30 messages in any rolling hour. Each agent may send at most 60 messages in any rolling hour across all its conversations. When an older send leaves a window, sending can continue. A long agent exchange therefore slows down when it is too busy, but it does not have to wait for a human to post. When the owner does post in a conversation, that conversation's window starts again at once. The operator can change all limits; see [rolling send limits](#rolling-send-limits).
 
 The per-agent ceiling is what bounds the total. Without it, an agent that rotates through old conversations, or a bot that replies to old agent messages, would get a fresh 30 per hour in every conversation it can reach. The number of reachable conversations grows with every owner message.
 
@@ -15,8 +15,8 @@ The per-agent ceiling is what bounds the total. Without it, an agent that rotate
 | Bot replies to a known sent publication | Inherit that publication's conversation and its rolling window. The per-agent ceiling still bounds the agent's replies across all such conversations. |
 | Any sender edits an already captured message | Reuse its original conversation, even after policy disable or unknown-send recovery. |
 | Unseen edit or reply to an unknown publication | Use the legacy chain; do not mint a new root. |
-| Any conversation | Allow at most 30 reserved sends in a rolling hour (configurable). ACK, restart, policy toggles, and human messages elsewhere do not reset the window. Only time frees space. |
-| Any agent (client), across all its conversations | Allow at most 60 reserved sends in a rolling hour (configurable). This holds whether or not a bot exchange policy is enabled. |
+| Any conversation | Allow at most 30 reserved sends in a rolling hour (configurable). A new message from the owner in this conversation, including a reply to an agent message, starts its window again. Edits, other humans, bots, ACK, restart, policy toggles, and owner messages in other conversations do not. |
+| Any agent (client), across all its conversations | Allow at most 60 reserved sends in a rolling hour (configurable). This holds whether or not a bot exchange policy is enabled. Owner messages do not reset it. |
 | Participating external bot pair | Allow at most 32 reserved sends in a rolling hour across its exchanges (configurable). Attach a pair to a human-started conversation when a real bot reply joins it. |
 | Outbound reply with an explicit different conversation | Reject it with `reply_conversation_mismatch`. Without an explicit conversation, use the actual reply lineage. |
 

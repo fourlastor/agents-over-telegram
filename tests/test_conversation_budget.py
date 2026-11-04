@@ -1,5 +1,6 @@
 """Offline checks for explicit, scoped operator allowances."""
 from concurrent.futures import ThreadPoolExecutor
+import json
 
 import pytest
 
@@ -343,3 +344,65 @@ def test_cli_limit_changes_need_a_human_at_a_terminal(tmp_path, monkeypatch, tty
         assert core.exchange_limits()['source'] == 'default'
     else:
         assert run(parser().parse_args(change))['client_send_limit'] == 500
+
+
+def owner_conversation_at_limit(core, transport, clock, client):
+    append(transport, 'owner starts work')
+    core.collect()
+    conv = rows(core, 'SELECT conversation_id FROM inbox WHERE client_id=? ORDER BY created DESC,rowid DESC LIMIT 1',
+                (client,))[0][0]
+    sent = send_n(core, clock, client, conv, 'fill')
+    with pytest.raises(CoreError, match='conversation_limit'):
+        core.send(client, 'blocked', 'blocked', conversation_id=conv)
+    return conv, sent
+
+
+def test_owner_reply_restores_the_conversation_window(setup_pair):
+    # Seen live: the owner replied to an agent message in a blocked conversation,
+    # and the next send in that conversation was still refused.
+    core, transport, clock, client = setup_pair
+    conv, sent = owner_conversation_at_limit(core, transport, clock, client)
+    append(transport, '@agent carry on', reply_to_message={'message_id': sent[-1]['message_id']})
+    core.collect()
+    assert rows(core, 'SELECT conversation_id FROM inbox ORDER BY created DESC,rowid DESC LIMIT 1') == [(conv,)]
+    assert core.conversation_budget(client, conv)['remaining_sends'] == core.CONVERSATION_SEND_LIMIT
+    clock.advance(2)
+    assert core.send(client, 'thanks', 'after-owner', conversation_id=conv)['conversation_id'] == conv
+
+
+@pytest.mark.parametrize('who', ['participant', 'bot', 'owner_edit'])
+def test_only_a_new_owner_message_restores_the_window(setup_pair, who):
+    core, transport, clock, client = setup_pair
+    core.allow_sender(client, 303, is_bot=False)
+    conv, sent = owner_conversation_at_limit(core, transport, clock, client)
+    reply = {'reply_to_message': {'message_id': sent[-1]['message_id']}}
+    if who == 'participant':
+        append(transport, 'not the owner', sender=303, **reply)
+    elif who == 'bot':
+        append(transport, 'a bot', sender=202, bot=True, **reply)
+    else:
+        original = rows(core, "SELECT payload FROM inbox WHERE client_id=? AND json_extract(payload,'$.text')='owner starts work'",
+                        (client,))[0][0]
+        number = json.loads(original)['message_id']
+        event = append(transport, 'edited')
+        event['edited_message'] = dict(event.pop('message'), message_id=number, edit_date=int(clock()))
+    core.collect()
+    clock.advance(2)
+    with pytest.raises(CoreError, match='conversation_limit'):
+        core.send(client, 'still blocked', 'still', conversation_id=conv)
+
+
+def test_owner_reply_does_not_reset_the_agent_ceiling(setup_pair):
+    core, transport, clock, client = setup_pair
+    core.exchange_limits(conversation_send_limit=2, client_send_limit=3, reason='Small limits')
+    append(transport, 'owner starts work')
+    core.collect()
+    conv = rows(core, 'SELECT conversation_id FROM inbox ORDER BY created DESC,rowid DESC LIMIT 1')[0][0]
+    sent = send_n(core, clock, client, conv, 'a', count=2)
+    append(transport, 'go on', reply_to_message={'message_id': sent[-1]['message_id']})
+    core.collect()
+    clock.advance(2)
+    core.send(client, 'third', 'third', conversation_id=conv)
+    clock.advance(2)
+    with pytest.raises(CoreError, match='client_limit'):
+        core.send(client, 'fourth', 'fourth', conversation_id=conv)

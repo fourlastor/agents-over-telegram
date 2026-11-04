@@ -267,6 +267,9 @@ class Core:
             if 'context' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
                 db.execute('ALTER TABLE inbox ADD COLUMN context INTEGER NOT NULL DEFAULT 0')
             db.execute('CREATE INDEX IF NOT EXISTS inbox_context_expiry ON inbox(COALESCE(event_at,created)) WHERE context=1')
+            if 'window_reset_at' not in {row['name'] for row in db.execute('PRAGMA table_info(conversations)')}:
+                # Set when the owner posts in a conversation; NULL means never.
+                db.execute('ALTER TABLE conversations ADD COLUMN window_reset_at REAL')
             if 'additional_sends' not in {row['name'] for row in db.execute('PRAGMA table_info(conversation_budget_grants)')}:
                 # Older grants were lifetime allowances. They do not apply to
                 # rolling windows, so they keep a NULL value and are ignored.
@@ -604,9 +607,14 @@ class Core:
 
     def _conversation_usage(self, db, conversation_id, now, limit, limits):
         window = limits['conversation_window_seconds']
+        # A message from the owner in this conversation starts its window again:
+        # sends before it no longer count toward this conversation's limit.
+        # A send at the same instant as the owner's message still counts.
+        row = db.execute('SELECT window_reset_at FROM conversations WHERE id=?', (conversation_id,)).fetchone()
+        reset_at = row[0] if row and row[0] is not None else None
         stamps = [r[0] for r in db.execute(
-            'SELECT created FROM outbox WHERE conversation_id=? AND created>? ORDER BY created DESC',
-            (conversation_id, now - window))]
+            'SELECT created FROM outbox WHERE conversation_id=? AND created>? AND created>=? ORDER BY created DESC',
+            (conversation_id, now - window, reset_at if reset_at is not None else now - window))]
         return self._window_usage(stamps, limit, window)
 
     def _client_usage(self, db, client_id, now, limits):
@@ -843,6 +851,13 @@ class Core:
                     conversation = original['conversation_id']
                     edited_delivery = not original['context']
                     break
+        if allowed and not sender['is_bot'] and sender_id == binding['owner_id'] and kind == 'message':
+            # The owner taking part shows a human is following this exchange, so
+            # its conversation window starts again. Edits do not count, and the
+            # per-agent ceiling and pair budgets are not reset.
+            db.execute('INSERT INTO conversations(id,window_reset_at) VALUES(?,?) '
+                       'ON CONFLICT(id) DO UPDATE SET window_reset_at=excluded.window_reset_at',
+                       (conversation, now))
         # Membership is recorded for context too: a later reply to a context
         # message from an opted-in bot must stay inside that pair's send budget.
         if sender['is_bot'] and db.execute('''SELECT 1 FROM bot_exchange_policies
@@ -1199,8 +1214,11 @@ class Core:
                 'WHERE client_id=? AND conversation_id=? ORDER BY id', (client_id, conversation))]
             limit = self._conversation_send_limit(db, conversation, now, limits)
             used, retry_at = self._conversation_usage(db, conversation, now, limit, limits)
+            reset = db.execute('SELECT window_reset_at FROM conversations WHERE id=?', (conversation,)).fetchone()
+            reset_at = reset[0] if reset else None
         return {'conversation_id': conversation, 'send_count': count, 'send_limit': limit,
                 'window_seconds': limits['conversation_window_seconds'], 'sent_in_window': used,
+                'window_reset_at': reset_at,
                 'remaining_sends': max(0, limit - used), 'retry_at': retry_at, 'grants': grants}
 
     def _delete_attachment_files(self, delivery_ids):
