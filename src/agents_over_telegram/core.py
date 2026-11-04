@@ -59,6 +59,10 @@ class Core:
     # the whole state directory with exchange_limits().
     CONVERSATION_SEND_LIMIT = 30
     CONVERSATION_WINDOW = 3600
+    # A ceiling per agent across all its conversations, so the total does not
+    # grow with the number of conversations an agent or bot can reach.
+    CLIENT_SEND_LIMIT = 60
+    CLIENT_WINDOW = 3600
     BOT_PAIR_SEND_LIMIT = 32
     BOT_PAIR_WINDOW = 3600
     SEND_LIMIT_RANGE = (1, 1000)
@@ -163,7 +167,8 @@ class Core:
                     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                     conversation_send_limit INTEGER NOT NULL, conversation_window INTEGER NOT NULL,
                     pair_send_limit INTEGER NOT NULL, pair_window INTEGER NOT NULL,
-                    updated REAL NOT NULL, reason TEXT NOT NULL
+                    updated REAL NOT NULL, reason TEXT NOT NULL,
+                    client_send_limit INTEGER, client_window INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS bot_exchange_policies (
                     client_id TEXT NOT NULL REFERENCES clients(id), sender_id INTEGER NOT NULL,
@@ -195,6 +200,11 @@ class Core:
                 # Older grants were lifetime allowances. They do not apply to
                 # rolling windows, so they keep a NULL value and are ignored.
                 db.execute('ALTER TABLE conversation_budget_grants ADD COLUMN additional_sends INTEGER')
+            limit_columns = {row['name'] for row in db.execute('PRAGMA table_info(exchange_limits)')}
+            for column in ('client_send_limit', 'client_window'):
+                if column not in limit_columns:
+                    # NULL means the built-in default.
+                    db.execute(f'ALTER TABLE exchange_limits ADD COLUMN {column} INTEGER')
             db.execute('INSERT OR IGNORE INTO history_keys(singleton,secret) VALUES(1,?)', (secrets.token_bytes(32),))
             db.execute('CREATE INDEX IF NOT EXISTS inbox_history ON inbox(client_id,COALESCE(event_at,created) DESC)')
             db.execute('CREATE INDEX IF NOT EXISTS outbox_history ON outbox(client_id,created DESC)')
@@ -404,6 +414,7 @@ class Core:
             limits = self._limits(db)
             usage = self._bot_pair_usage(db, client_id, sender_id, self.clock(), limits)
         return {'sender_id': sender_id, 'enabled': bool(policy and policy[0]),
+                'max_sends_per_exchange': limits['conversation_send_limit'],
                 'conversation_send_limit': limits['conversation_send_limit'],
                 'conversation_window_seconds': limits['conversation_window_seconds'],
                 'pair_send_limit': limits['pair_send_limit'],
@@ -415,15 +426,20 @@ class Core:
         if row is None:
             return {'conversation_send_limit': self.CONVERSATION_SEND_LIMIT,
                     'conversation_window_seconds': self.CONVERSATION_WINDOW,
+                    'client_send_limit': self.CLIENT_SEND_LIMIT,
+                    'client_window_seconds': self.CLIENT_WINDOW,
                     'pair_send_limit': self.BOT_PAIR_SEND_LIMIT,
                     'pair_window_seconds': self.BOT_PAIR_WINDOW, 'source': 'default'}
         return {'conversation_send_limit': row['conversation_send_limit'],
                 'conversation_window_seconds': row['conversation_window'],
+                'client_send_limit': row['client_send_limit'] or self.CLIENT_SEND_LIMIT,
+                'client_window_seconds': row['client_window'] or self.CLIENT_WINDOW,
                 'pair_send_limit': row['pair_send_limit'],
                 'pair_window_seconds': row['pair_window'], 'source': 'operator',
                 'updated_at': row['updated'], 'reason': row['reason']}
 
     def exchange_limits(self, *, conversation_send_limit=None, conversation_window_seconds=None,
+                        client_send_limit=None, client_window_seconds=None,
                         pair_send_limit=None, pair_window_seconds=None, reset=False, reason=None):
         """Inspect or change the rolling send limits through the local operator CLI.
 
@@ -432,6 +448,8 @@ class Core:
         """
         values = {'conversation_send_limit': (conversation_send_limit, self.SEND_LIMIT_RANGE),
                   'conversation_window_seconds': (conversation_window_seconds, self.WINDOW_RANGE),
+                  'client_send_limit': (client_send_limit, self.SEND_LIMIT_RANGE),
+                  'client_window_seconds': (client_window_seconds, self.WINDOW_RANGE),
                   'pair_send_limit': (pair_send_limit, self.SEND_LIMIT_RANGE),
                   'pair_window_seconds': (pair_window_seconds, self.WINDOW_RANGE)}
         changing = reset or any(value is not None for value, _ in values.values())
@@ -451,14 +469,18 @@ class Core:
                 current = self._limits(db)
                 merged = {key: value if value is not None else current[key]
                           for key, (value, _) in values.items()}
-                db.execute('INSERT INTO exchange_limits VALUES(1,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET '
+                db.execute('INSERT INTO exchange_limits(singleton,conversation_send_limit,conversation_window,'
+                           'pair_send_limit,pair_window,updated,reason,client_send_limit,client_window) '
+                           'VALUES(1,?,?,?,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET '
                            'conversation_send_limit=excluded.conversation_send_limit,'
                            'conversation_window=excluded.conversation_window,'
                            'pair_send_limit=excluded.pair_send_limit,pair_window=excluded.pair_window,'
-                           'updated=excluded.updated,reason=excluded.reason',
+                           'updated=excluded.updated,reason=excluded.reason,'
+                           'client_send_limit=excluded.client_send_limit,client_window=excluded.client_window',
                            (merged['conversation_send_limit'], merged['conversation_window_seconds'],
                             merged['pair_send_limit'], merged['pair_window_seconds'],
-                            self.clock(), reason.strip()))
+                            self.clock(), reason.strip(),
+                            merged['client_send_limit'], merged['client_window_seconds']))
             return self._limits(db)
 
     @staticmethod
@@ -485,6 +507,13 @@ class Core:
             'SELECT created FROM outbox WHERE conversation_id=? AND created>? ORDER BY created DESC',
             (conversation_id, now - window))]
         return self._window_usage(stamps, limit, window)
+
+    def _client_usage(self, db, client_id, now, limits):
+        window = limits['client_window_seconds']
+        stamps = [r[0] for r in db.execute(
+            'SELECT created FROM outbox WHERE client_id=? AND created>? ORDER BY created DESC',
+            (client_id, now - window))]
+        return self._window_usage(stamps, limits['client_send_limit'], window)
 
     @staticmethod
     def _limit_error(code, used, limit, window, retry_at, now):
@@ -677,7 +706,9 @@ class Core:
         # A human message starts its own conversation unless it replies to a known
         # outbound message. Bot replies inherit a known conversation; unsolicited
         # bot messages keep the legacy chain unless the operator enables bounded
-        # roots. Reply lineage and edits cannot mint another exchange budget.
+        # roots. Every conversation has its own rolling send window, and the
+        # per-agent ceiling bounds the total across all of them, so reusing old
+        # conversations or minting new ones cannot raise an agent's throughput.
         reply_to = _mapping(msg.get('reply_to_message')).get('message_id')
         known = db.execute('SELECT conversation_id FROM outbox WHERE chat_id=? AND thread_id=? AND message_id=? AND status=\'sent\' ORDER BY created DESC LIMIT 1', (chat_id, thread_id, reply_to)).fetchone() if _integer(reply_to) else None
         if known:
@@ -970,11 +1001,14 @@ class Core:
             db.execute('UPDATE outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND (client_id=? OR recipient=?)', (self.clock(), client_id, client_id))
         return {'client_id': client_id, 'connected': False, 'revoked': True, 'queued_work_preserved': True}
 
-    def _conversation_send_limit(self, db, client_id, conversation_id, now, limits):
+    def _conversation_send_limit(self, db, conversation_id, now, limits):
+        # A grant raises the limit for every sender in the conversation, because
+        # every sender's reservations count toward the same window. Only a
+        # client that already takes part in the conversation can create one.
         extra = db.execute(
             'SELECT MAX(additional_sends) FROM conversation_budget_grants '
-            'WHERE client_id=? AND conversation_id=? AND created<=? AND expires_at>?',
-            (client_id, conversation_id, now, now)).fetchone()[0]
+            'WHERE conversation_id=? AND created<=? AND expires_at>?',
+            (conversation_id, now, now)).fetchone()[0]
         return limits['conversation_send_limit'] + (extra or 0)
 
     def conversation_budget(self, client_id, conversation_id, *, additional_sends=None,
@@ -1009,7 +1043,7 @@ class Core:
             grants = [dict(row) for row in db.execute(
                 'SELECT id,additional_sends,created,expires_at,reason FROM conversation_budget_grants '
                 'WHERE client_id=? AND conversation_id=? ORDER BY id', (client_id, conversation))]
-            limit = self._conversation_send_limit(db, client_id, conversation, now, limits)
+            limit = self._conversation_send_limit(db, conversation, now, limits)
             used, retry_at = self._conversation_usage(db, conversation, now, limit, limits)
         return {'conversation_id': conversation, 'send_count': count, 'send_limit': limit,
                 'window_seconds': limits['conversation_window_seconds'], 'sent_in_window': used,
@@ -1073,17 +1107,26 @@ class Core:
                     raise CoreError('reply_conversation_mismatch')
                 db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
                 limits = self._limits(db)
-                limit = self._conversation_send_limit(db, client_id, conversation, now, limits)
+                limit = self._conversation_send_limit(db, conversation, now, limits)
                 used, retry_at = self._conversation_usage(db, conversation, now, limit, limits)
                 if used >= limit:
                     raise self._limit_error('conversation_limit', used, limit,
                                             limits['conversation_window_seconds'], retry_at, now)
+                used, retry_at = self._client_usage(db, client_id, now, limits)
+                if used >= limits['client_send_limit']:
+                    raise self._limit_error('client_limit', used, limits['client_send_limit'],
+                                            limits['client_window_seconds'], retry_at, now)
+                full = []
                 for pair in db.execute('SELECT client_id,sender_id FROM bot_exchange_members WHERE conversation_id=?',
                                        (conversation,)).fetchall():
                     used, retry_at = self._bot_pair_usage(db, pair['client_id'], pair['sender_id'], now, limits)
                     if used >= limits['pair_send_limit']:
-                        raise self._limit_error('bot_pair_limit', used, limits['pair_send_limit'],
-                                                limits['pair_window_seconds'], retry_at, now)
+                        full.append((retry_at, used))
+                if full:
+                    # Report the latest time, when every full pair has room again.
+                    retry_at, used = max(full)
+                    raise self._limit_error('bot_pair_limit', used, limits['pair_send_limit'],
+                                            limits['pair_window_seconds'], retry_at, now)
                 outbox_id = 'out_' + secrets.token_hex(12)
                 publication = f'[Agent: {client["label"]} | shared bot @{account["username"]}]\n{text}'
                 peer = db.execute('SELECT * FROM peer_commands WHERE client_id=?', (client_id,)).fetchone() if recipient is None else None

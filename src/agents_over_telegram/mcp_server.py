@@ -85,6 +85,7 @@ ERROR_MESSAGES = {
     "loop_limit": "The automated exchange limit for this conversation was reached.",
     "conversation_limit": "Send rate limit reached for this conversation. Nothing was sent or queued. Wait until retry_at, then retry the same send in the same conversation.",
     "bot_pair_limit": "Send rate limit reached for conversations with this external bot. Nothing was sent or queued. Wait until retry_at, then retry the same send in the same conversation.",
+    "client_limit": "Send rate limit reached for this agent across all its conversations. Nothing was sent or queued. Wait until retry_at, then retry the same send in the same conversation.",
     "reply_conversation_mismatch": "The reply belongs to another conversation. Use its admitted conversation; do not switch exchanges to bypass a limit.",
     "bot_sender_not_authorized": "The selected sender is not an authorized external bot.",
     "bot_removed": "The bot no longer has access to this destination.",
@@ -177,6 +178,7 @@ _VALIDATORS = {tool.name: Draft202012Validator(tool.inputSchema) for tool in TOO
 _LIMIT_SCOPES = {
     "conversation_limit": "this conversation",
     "bot_pair_limit": "all conversations between this agent and that external bot",
+    "client_limit": "this agent, across all its conversations,",
 }
 
 
@@ -209,8 +211,9 @@ def _limit_error(code: str, details: Any) -> dict[str, Any] | None:
         f"{_duration(window)}. This limit exists to stop agents from looping, and nothing is broken. "
         f"This message was not sent or queued. Wait {wait} seconds (until {when}), then retry the same send "
         "in the same conversation; reusing the same idempotency key is fine. Do not start a new "
-        "conversation or change keys to get around the limit. If the work cannot wait, tell the human: "
-        "the local operator can raise the limit with the `exchange-limits` or `conversation-budget` commands."
+        "conversation, switch to another one, or change keys to get around the limit. If the work "
+        "cannot wait, stop and tell the human. Only the human operator can change this limit; do not "
+        "try to change it yourself."
     )
     return {"code": code, "message": message, "retry_at": retry_at, "retry_at_utc": when,
             "retry_after_seconds": wait, "limit": limit, "window_seconds": window, "sent_in_window": used}

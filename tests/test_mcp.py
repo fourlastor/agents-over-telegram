@@ -519,6 +519,7 @@ LIMIT_DETAILS = {"sent_in_window": 30, "limit": 30, "window_seconds": 3600,
 @pytest.mark.parametrize("code,scope", [
     ("conversation_limit", "This conversation already sent 30 messages"),
     ("bot_pair_limit", "All conversations between this agent and that external bot already sent 30 messages"),
+    ("client_limit", "This agent, across all its conversations, already sent 30 messages"),
 ])
 async def test_rolling_limit_errors_explain_what_happened_and_when_to_retry(code, scope):
     core = AdapterCore()
@@ -536,8 +537,11 @@ async def test_rolling_limit_errors_explain_what_happened_and_when_to_retry(code
         assert (error["retry_after_seconds"], error["limit"], error["window_seconds"], error["sent_in_window"]) == (754, 30, 3600, 30)
         for text in (scope, "the limit is 30 per rolling 1 hour", "not sent or queued",
                      "Wait 754 seconds (until 2026-11-04T16:35:23Z)", "same conversation",
-                     "Do not start a new conversation", "exchange-limits"):
+                     "Do not start a new conversation", "stop and tell the human"):
             assert text in error["message"]
+        # The agent must not be told how to lift its own limit.
+        for command in ("exchange-limits", "conversation-budget", "--reason"):
+            assert command not in error["message"]
         assert "MUST-NOT-LEAK" not in result.model_dump_json()
 
 

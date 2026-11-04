@@ -177,6 +177,8 @@ def parser():
     limits = sub.add_parser("exchange-limits", help="Inspect or change the rolling send limits for every agent on this bot")
     limits.add_argument("--conversation-send-limit", type=int, help="Sends allowed per conversation in each rolling window")
     limits.add_argument("--conversation-window-seconds", type=int, help="Length of the per-conversation rolling window")
+    limits.add_argument("--client-send-limit", type=int, help="Sends allowed per agent across all its conversations in each rolling window")
+    limits.add_argument("--client-window-seconds", type=int, help="Length of the per-agent rolling window")
     limits.add_argument("--pair-send-limit", type=int, help="Sends allowed per external bot pair in each rolling window")
     limits.add_argument("--pair-window-seconds", type=int, help="Length of the per-pair rolling window")
     limits.add_argument("--reset", action="store_true", help="Return to the built-in defaults")
@@ -260,6 +262,20 @@ def register_account(core, state_dir, fake, receiver_handoff_confirmed):
     return {"registered": True, "bot_id": bot["id"], "username": bot["username"], "mode": "fake" if fake else "live"}
 
 
+def _confirm_operator(summary):
+    """Ask the human at a terminal before raising or changing send limits.
+
+    Agents usually run commands without a terminal, so this stops an agent from
+    lifting its own limit by accident. It is not a security boundary: an agent
+    running as the same user could still drive a terminal on purpose.
+    """
+    if not sys.stdin.isatty():
+        raise CredentialError("operator_confirmation_required")
+    print(summary + " Type yes to continue:", file=sys.stderr, flush=True)
+    if input().strip().lower() != "yes":
+        raise CredentialError("operator_confirmation_declined")
+
+
 def run(args):
     from .core import Core, CoreError
     if args.command == "demo":
@@ -340,8 +356,19 @@ def run(args):
     if args.command == "account-status":
         return core.accounts_status()
     if args.command == "exchange-limits":
+        changes = {"conversation_send_limit": args.conversation_send_limit,
+                   "conversation_window_seconds": args.conversation_window_seconds,
+                   "client_send_limit": args.client_send_limit,
+                   "client_window_seconds": args.client_window_seconds,
+                   "pair_send_limit": args.pair_send_limit, "pair_window_seconds": args.pair_window_seconds}
+        if args.reset or any(value is not None for value in changes.values()):
+            described = "reset to the defaults" if args.reset else ", ".join(
+                f"{name}={value}" for name, value in changes.items() if value is not None)
+            _confirm_operator(f"Change the Telegram send limits for every agent on this bot: {described}.")
         return core.exchange_limits(conversation_send_limit=args.conversation_send_limit,
                                     conversation_window_seconds=args.conversation_window_seconds,
+                                    client_send_limit=args.client_send_limit,
+                                    client_window_seconds=args.client_window_seconds,
                                     pair_send_limit=args.pair_send_limit,
                                     pair_window_seconds=args.pair_window_seconds,
                                     reset=args.reset, reason=args.reason)
@@ -369,6 +396,9 @@ def run(args):
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command == "conversation-budget":
+        if args.additional_sends is not None:
+            _confirm_operator(f"Allow {args.additional_sends} more sends per rolling window in conversation "
+                              f"{args.conversation_id!r} for {args.duration_seconds} seconds.")
         return core.conversation_budget(client_id, args.conversation_id,
                                         additional_sends=args.additional_sends,
                                         duration_seconds=args.duration_seconds, reason=args.reason)

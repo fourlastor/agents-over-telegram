@@ -59,8 +59,7 @@ def test_allowance_is_scoped_to_client_and_existing_conversation(setup_pair):
         grant(core, client, 'invented')
     with core._db() as db:
         limits = core._limits(db)
-        assert core._conversation_send_limit(db, other, conv, clock(), limits) == core.CONVERSATION_SEND_LIMIT
-        assert core._conversation_send_limit(db, client, 'other', clock(), limits) == core.CONVERSATION_SEND_LIMIT
+        assert core._conversation_send_limit(db, 'other', clock(), limits) == core.CONVERSATION_SEND_LIMIT
 
 
 def test_concurrent_last_slot_is_reserved_once(setup_pair):
@@ -104,7 +103,13 @@ def test_grants_reject_unbounded_or_invalid_values(setup_pair, sends, seconds):
     assert not rows(core, 'SELECT id FROM conversation_budget_grants')
 
 
-def test_cli_grant_keeps_interrupted_send(tmp_path):
+@pytest.fixture
+def operator_says_yes(monkeypatch):
+    import agents_over_telegram.cli as cli
+    monkeypatch.setattr(cli, '_confirm_operator', lambda summary: None)
+
+
+def test_cli_grant_keeps_interrupted_send(tmp_path, operator_says_yes):
     from agents_over_telegram.transport import FakeTransport
     core = Core(tmp_path / 'state', FakeTransport())
     core.register_account(900001, 'aot_test_bot')
@@ -178,7 +183,7 @@ def test_exchange_limits_reject_invalid_changes(setup_pair, kwargs):
     assert core.exchange_limits()['source'] == 'default'
 
 
-def test_cli_exchange_limits_round_trip(tmp_path):
+def test_cli_exchange_limits_round_trip(tmp_path, operator_says_yes):
     from agents_over_telegram.transport import FakeTransport
     core = Core(tmp_path / 'state', FakeTransport())
     core.register_account(900001, 'aot_test_bot')
@@ -197,3 +202,144 @@ def test_legacy_lifetime_grants_do_not_change_rolling_limits(setup_pair):
         db.execute('INSERT INTO conversation_budget_grants(client_id,conversation_id,send_limit,created,expires_at,reason)'
                    ' VALUES(?,?,?,?,?,?)', (client, conv, 500, clock(), clock() + 600, 'old lifetime grant'))
     assert core.conversation_budget(client, conv)['send_limit'] == core.CONVERSATION_SEND_LIMIT
+
+
+def human_conversations(core, transport, client, count):
+    conversations = []
+    for n in range(count):
+        append(transport, f'owner request {n}')
+        core.collect()
+        conversations.append(rows(core, 'SELECT conversation_id FROM inbox WHERE client_id=? ORDER BY created DESC,rowid DESC LIMIT 1',
+                                  (client,))[0][0])
+    return conversations
+
+
+def send_all(core, clock, client, conversations, rounds, prefix):
+    """Try to send `rounds` times into every conversation; return the successes."""
+    sent = 0
+    for r in range(rounds):
+        for n, conv in enumerate(conversations):
+            try:
+                core.send(client, 'loop', f'{prefix}-{r}-{n}', conversation_id=conv)
+                sent += 1
+            except CoreError as error:
+                assert error.code == 'client_limit', error.code
+            clock.advance(1)
+    return sent
+
+
+def test_rotating_old_conversations_cannot_exceed_the_agent_ceiling(setup_pair):
+    # Review reproduction: ten old conversations used to allow 300 sends an hour.
+    core, transport, clock, client = setup_pair
+    conversations = human_conversations(core, transport, client, 10)
+    start = clock()
+    assert send_all(core, clock, client, conversations, 30, 'hour1') == core.CLIENT_SEND_LIMIT
+    assert clock() - start < core.CLIENT_WINDOW
+    with pytest.raises(CoreError, match='client_limit') as blocked:
+        core.send(client, 'over', 'over', conversation_id=conversations[0])
+    details = blocked.value.details
+    assert (details['limit'], details['window_seconds'], details['sent_in_window']) == (60, 3600, 60)
+    # The ceiling refills with time and does not grow with the number of conversations.
+    clock.now = start + 3 * core.CLIENT_WINDOW
+    assert send_all(core, clock, client, conversations, 30, 'later') == core.CLIENT_SEND_LIMIT
+
+
+def test_bot_replying_to_old_messages_is_bounded_with_default_settings(setup_pair):
+    # Review reproduction: an allowed bot replying to ten old agent messages,
+    # without the bot exchange policy, used to drive 300 agent sends an hour.
+    core, transport, clock, client = setup_pair
+    conversations = human_conversations(core, transport, client, 10)
+    sent = []
+    for n, conv in enumerate(conversations):
+        sent.append(core.send(client, 'first', f'first-{n}', conversation_id=conv))
+        assert sent[-1]['status'] == 'sent'
+        clock.advance(2)
+    allowed = len(sent)
+    for r in range(30):
+        for n, first in enumerate(sent):
+            conv, _ = receive(core, transport, client, reply_to_message={'message_id': first['message_id']})
+            assert conv == conversations[n]
+            try:
+                core.send(client, 'reply', f'reply-{r}-{n}', conversation_id=conv)
+                allowed += 1
+            except CoreError as error:
+                assert error.code == 'client_limit'
+        clock.advance(10)
+    assert allowed == core.CLIENT_SEND_LIMIT
+
+
+def test_client_ceiling_is_configurable_and_counts_broker_sends(setup_pair):
+    core, transport, clock, client = setup_pair
+    core.exchange_limits(client_send_limit=3, client_window_seconds=300, reason='Tight agent ceiling')
+    conversations = human_conversations(core, transport, client, 3)
+    assert send_all(core, clock, client, conversations, 2, 'tight') == 3
+    assert core.exchange_limits()['client_send_limit'] == 3
+
+
+def test_grant_raises_the_limit_for_every_sender_in_the_conversation(setup_pair):
+    core, transport, clock, client = setup_pair
+    peer, _ = bind(core, transport, 'Peer', chat=-200)
+    core.grant_peer(client, peer)
+    core.grant_peer(peer, client)
+    core.exchange_limits(conversation_send_limit=2, reason='Small window')
+    conv = core.send(client, 'hello peer', 'hello', recipient=peer)['conversation_id']
+    clock.advance(2)
+    core.send(peer, 'hello back', 'back', recipient=client, conversation_id=conv)
+    clock.advance(2)
+    with pytest.raises(CoreError, match='conversation_limit'):
+        core.send(client, 'third', 'third', recipient=peer, conversation_id=conv)
+    grant(core, client, conv, sends=2)
+    core.send(client, 'third', 'third', recipient=peer, conversation_id=conv)
+    clock.advance(2)
+    # The peer was not the granting client, but its sends share the window and the grant.
+    assert core.send(peer, 'fourth', 'fourth', recipient=client, conversation_id=conv)['conversation_id'] == conv
+
+
+def test_bot_pair_limit_reports_the_latest_retry_time(setup_pair):
+    core, transport, clock, client = setup_pair
+    core.allow_sender(client, 303, is_bot=True)
+    core.bot_exchange_policy(client, 202, enabled=True)
+    core.bot_exchange_policy(client, 303, enabled=True)
+    core.exchange_limits(pair_send_limit=3, pair_window_seconds=120, reason='Small pair budget')
+    start = clock()
+    only_202, _ = receive(core, transport, client)
+    shared, _ = receive(core, transport, client)
+    core.send(client, 'a', 'a0', conversation_id=only_202)
+    clock.advance(2)
+    core.send(client, 'a', 'a1', conversation_id=only_202)
+    clock.advance(2)
+    joined = core.send(client, 's', 's0', conversation_id=shared)
+    clock.advance(2)
+    reply, _ = receive(core, transport, client, sender=303, reply_to_message={'message_id': joined['message_id']})
+    assert reply == shared
+    only_303, _ = receive(core, transport, client, sender=303)
+    core.send(client, 'b', 'b0', conversation_id=only_303)
+    clock.advance(2)
+    core.send(client, 'b', 'b1', conversation_id=only_303)
+    clock.advance(2)
+    with pytest.raises(CoreError, match='bot_pair_limit') as blocked:
+        core.send(client, 's', 's1', conversation_id=shared)
+    # Pair 202 frees a slot at start+120; pair 303 only at start+4+120.
+    assert blocked.value.retry_at == start + 4 + 120
+
+
+@pytest.mark.parametrize('tty,answer,expected', [(False, None, 'operator_confirmation_required'),
+                                                 (True, 'no', 'operator_confirmation_declined'),
+                                                 (True, 'yes', None)])
+def test_cli_limit_changes_need_a_human_at_a_terminal(tmp_path, monkeypatch, tty, answer, expected):
+    from agents_over_telegram.credentials import CredentialError
+    from agents_over_telegram.transport import FakeTransport
+    core = Core(tmp_path / 'state', FakeTransport())
+    core.register_account(900001, 'aot_test_bot')
+    monkeypatch.setattr('sys.stdin.isatty', lambda: tty)
+    monkeypatch.setattr('builtins.input', lambda: answer)
+    base = ['--state-dir', str(core.state_dir), '--fake', 'exchange-limits']
+    # Inspecting never asks.
+    assert run(parser().parse_args(base))['source'] == 'default'
+    change = base + ['--client-send-limit', '500', '--reason', 'Agent asked for more']
+    if expected:
+        with pytest.raises(CredentialError, match=expected):
+            run(parser().parse_args(change))
+        assert core.exchange_limits()['source'] == 'default'
+    else:
+        assert run(parser().parse_args(change))['client_send_limit'] == 500
