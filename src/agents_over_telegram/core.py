@@ -851,13 +851,6 @@ class Core:
                     conversation = original['conversation_id']
                     edited_delivery = not original['context']
                     break
-        if allowed and not sender['is_bot'] and sender_id == binding['owner_id'] and kind == 'message':
-            # The owner taking part shows a human is following this exchange, so
-            # its conversation window starts again. Edits do not count, and the
-            # per-agent ceiling and pair budgets are not reset.
-            db.execute('INSERT INTO conversations(id,window_reset_at) VALUES(?,?) '
-                       'ON CONFLICT(id) DO UPDATE SET window_reset_at=excluded.window_reset_at',
-                       (conversation, now))
         # Membership is recorded for context too: a later reply to a context
         # message from an opted-in bot must stay inside that pair's send budget.
         if sender['is_bot'] and db.execute('''SELECT 1 FROM bot_exchange_policies
@@ -870,6 +863,16 @@ class Core:
             payload['attachments'] = attachments
         stamp = msg.get('edit_date' if kind == 'edited_message' else 'date')
         event_at = stamp if _integer(stamp) and 0 < stamp <= now else now
+        if (allowed and not sender['is_bot'] and sender_id == binding['owner_id'] and kind == 'message'
+                and not db.execute('SELECT 1 FROM inbox WHERE client_id=? AND event_key=?',
+                                   (binding['client_id'], f'tg:{update_id}')).fetchone()):
+            # The owner taking part shows a human is following this exchange, so
+            # its conversation window starts again from the message's own time.
+            # Edits and reprocessed updates do not count, and the per-agent
+            # ceiling and pair budgets are not reset.
+            db.execute('INSERT INTO conversations(id,window_reset_at) VALUES(?,?) '
+                       'ON CONFLICT(id) DO UPDATE SET window_reset_at=excluded.window_reset_at',
+                       (conversation, event_at))
         if not allowed:
             reason = 'sender_not_allowed'
         elif binding['delivery_filter'] == 'addressed' and not edited_delivery and not _addressed(msg, text, account):

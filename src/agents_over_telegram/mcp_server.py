@@ -224,6 +224,9 @@ def _limit_error(code: str, details: Any) -> dict[str, Any] | None:
         "cannot wait, stop and tell the human. Only the human operator can change this limit; do not "
         "try to change it yourself."
     )
+    if code == "client_limit":
+        message += (" This limit blocks all your Telegram sends, including replies to the owner, so tell "
+                    "the human in your local session, not over Telegram.")
     return {"code": code, "message": message, "retry_at": retry_at, "retry_at_utc": when,
             "retry_after_seconds": wait, "limit": limit, "window_seconds": window, "sent_in_window": used}
 

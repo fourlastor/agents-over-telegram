@@ -4,6 +4,8 @@ This opt-in policy separates new external bot requests. Deployment and activatio
 
 All automated sends are bounded by rolling rate limits, not by lifetime counters. Each conversation may send at most 30 messages in any rolling hour. Each agent may send at most 60 messages in any rolling hour across all its conversations. When an older send leaves a window, sending can continue. A long agent exchange therefore slows down when it is too busy, but it does not have to wait for a human to post. When the owner does post in a conversation, that conversation's window starts again at once. The operator can change all limits; see [rolling send limits](#rolling-send-limits).
 
+When an agent reaches its ceiling, all its Telegram sends stop until the window frees space, including replies to the owner. A busy loop with a bot can therefore keep an agent from answering the owner for up to an hour. The `client_limit` error tells the agent to report this in its local session, because it cannot send over Telegram.
+
 The per-agent ceiling is what bounds the total. Without it, an agent that rotates through old conversations, or a bot that replies to old agent messages, would get a fresh 30 per hour in every conversation it can reach. The number of reachable conversations grows with every owner message.
 
 ## Contract

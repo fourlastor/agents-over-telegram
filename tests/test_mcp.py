@@ -539,6 +539,7 @@ async def test_rolling_limit_errors_explain_what_happened_and_when_to_retry(code
                      "Wait 754 seconds (until 2026-11-04T16:35:23Z)", "same conversation",
                      "Do not start a new conversation", "stop and tell the human"):
             assert text in error["message"]
+        assert ("tell the human in your local session" in error["message"]) == (code == "client_limit")
         # The agent must not be told how to lift its own limit.
         for command in ("exchange-limits", "conversation-budget", "--reason"):
             assert command not in error["message"]

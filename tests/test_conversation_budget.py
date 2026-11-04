@@ -406,3 +406,25 @@ def test_owner_reply_does_not_reset_the_agent_ceiling(setup_pair):
     clock.advance(2)
     with pytest.raises(CoreError, match='client_limit'):
         core.send(client, 'fourth', 'fourth', conversation_id=conv)
+
+
+def test_owner_reset_uses_message_time_and_ignores_reprocessed_updates(setup_pair):
+    core, transport, clock, client = setup_pair
+    conv, sent = owner_conversation_at_limit(core, transport, clock, client)
+    written = int(clock()) - 5
+    event = append(transport, 'go on', date=written, reply_to_message={'message_id': sent[-1]['message_id']})
+    core.collect()
+    assert rows(core, 'SELECT window_reset_at FROM conversations WHERE id=?', (conv,)) == [(written,)]
+    clock.advance(2)
+    after = core.send(client, 'after reset', 'after-reset', conversation_id=conv)
+    clock.advance(30)
+    later = int(clock())
+    append(transport, 'and again', date=later, reply_to_message={'message_id': after['message_id']})
+    core.collect()
+    assert rows(core, 'SELECT window_reset_at FROM conversations WHERE id=?', (conv,)) == [(later,)]
+    # Collecting the first update again must not move the reset back to its time.
+    transport.updates[:] = [event]
+    with core._tx() as db:
+        db.execute('UPDATE account SET cursor=?', (event['update_id'],))
+    core.collect()
+    assert rows(core, 'SELECT window_reset_at FROM conversations WHERE id=?', (conv,)) == [(later,)]
