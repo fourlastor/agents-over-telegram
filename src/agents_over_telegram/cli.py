@@ -21,7 +21,7 @@ class LazyTransport:
         self.transport = None
 
     def __getattr__(self, name):
-        if name not in {"get_me", "get_webhook_info", "get_updates", "send_message", "get_chat_member"}:
+        if name not in {"get_me", "get_webhook_info", "get_updates", "send_message", "get_chat_member", "download_file"}:
             raise AttributeError(name)
         if self.transport is None:
             self.transport = make_transport(self.state_dir, fake=self.fake)
@@ -137,7 +137,7 @@ def parser():
     create = sub.add_parser("client-create")
     create.add_argument("--label", required=True)
     create.add_argument("--client-file", type=Path, required=True)
-    for name in ("pair-begin", "status", "history", "pause", "resume", "unsuspend", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "watch"):
+    for name in ("pair-begin", "status", "history", "pause", "resume", "unsuspend", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "delivery-settings", "watch"):
         command = (sub.add_parser(name, help="Owner only: check with Telegram that a suspended destination works again, then clear it")
                    if name == "unsuspend" else sub.add_parser(name))
         command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume", "unsuspend", "mcp", "watch"})
@@ -161,6 +161,13 @@ def parser():
         if name == "allow-sender":
             command.add_argument("--sender-id", type=int, required=True)
             command.add_argument("--bot", action="store_true")
+        if name == "delivery-settings":
+            command.add_argument("--filter", dest="delivery_filter", choices=["all", "addressed"],
+                                 help="all (default): deliver every allowed message; addressed: deliver only "
+                                      "messages that mention the bot, reply to it or address a command to it, "
+                                      "and keep the rest as context")
+            command.add_argument("--context", dest="capture_context", choices=["on", "off"],
+                                 help="on: also keep messages from senders that are not allowed, as context only")
         if name == "bot-exchange-policy":
             command.add_argument("--sender-id", type=int, required=True)
             change = command.add_mutually_exclusive_group()
@@ -264,7 +271,7 @@ def run(args):
     state_dir = private_directory(args.state_dir)
     _mode(state_dir, args.fake)
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
-                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "watch"}))
+                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "delivery-settings", "watch"}))
     if args.command.startswith("relay-"):
         from .relay import RelayStore
         store = RelayStore(core, project_validator=lambda binding: _relay_project_valid(core, binding, args.fake))
@@ -347,6 +354,9 @@ def run(args):
         return core.allow_sender(client_id, args.sender_id, is_bot=args.bot)
     if args.command == "bot-exchange-policy":
         return core.bot_exchange_policy(client_id, args.sender_id, enabled=args.exchange_enabled)
+    if args.command == "delivery-settings":
+        return core.delivery_settings(client_id, delivery_filter=args.delivery_filter,
+                                      capture_context=None if args.capture_context is None else args.capture_context == "on")
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command in {"pause", "resume"}:

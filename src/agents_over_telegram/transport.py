@@ -4,9 +4,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 import copy
 import fcntl
+import base64
 import json
 import os
 from pathlib import Path
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -116,6 +118,45 @@ class TelegramTransport:
             raise TransportError("invalid_chat_member")
         return _chat_member(result)
 
+    def download_file(self, file_id, max_bytes):
+        """Resolve a file with getFile, then read at most max_bytes; no redirects."""
+        result = self._call("getFile", {"file_id": file_id})
+        if not isinstance(result, dict):
+            raise TransportError("invalid_file")
+        size = result.get("file_size")
+        if type(size) is int and size > max_bytes:
+            raise TransportError("file_too_large")
+        request = urllib.request.Request(
+            "https://api.telegram.org/file/bot" + self._token + "/" + _file_path(result.get("file_path")), method="GET")
+        try:
+            with self._opener.open(request, timeout=60) as response:
+                data = response.read(max_bytes + 1)
+        except urllib.error.HTTPError as error:
+            raise TransportError(error.code if 400 <= error.code < 500 else "http_failure") from None
+        except Exception:
+            raise TransportError("transport_failure") from None
+        if len(data) > max_bytes:
+            raise TransportError("file_too_large")
+        return data
+
+
+def _file_path(value):
+    """Telegram's relative file path, refused unless it is plainly relative."""
+    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_./-]{1,256}", value)
+            or value.startswith("/") or ".." in value.split("/")):
+        raise TransportError("invalid_file")
+    return value
+
+
+def _fake_file(files, file_id, max_bytes):
+    entry = files.get(file_id)
+    if not isinstance(entry, dict):
+        raise TransportError(400)
+    data = base64.b64decode(entry["content_b64"]) if "content_b64" in entry else entry["content"]
+    if len(data) > max_bytes:
+        raise TransportError("file_too_large")
+    return bytes(data)
+
 
 def _chat_member(value):
     """Keep only the fields the suspension check reads; never user profile data."""
@@ -146,6 +187,7 @@ class FakeTransport:
         self.sent = []
         self.poll_offsets = []
         self.chat_members = {}  # {str(chat_id): {str(user_id): ChatMember dict}}
+        self.files = {}  # {file_id: {"content": bytes}}
         self._lock = threading.RLock()
 
     def get_me(self):
@@ -180,6 +222,10 @@ class FakeTransport:
     def get_chat_member(self, chat_id, user_id):
         with self._lock:
             return _fake_chat_member(self.chat_members, chat_id, user_id)
+
+    def download_file(self, file_id, max_bytes):
+        with self._lock:
+            return _fake_file(self.files, file_id, max_bytes)
 
 
 class FileFakeTransport:
@@ -233,6 +279,10 @@ class FileFakeTransport:
     def get_chat_member(self, chat_id, user_id):
         with self._data() as data:
             return _fake_chat_member(data.get("chat_members", {}), chat_id, user_id)
+
+    def download_file(self, file_id, max_bytes):
+        with self._data() as data:
+            return _fake_file(data.get("files", {}), file_id, max_bytes)
 
 
 def make_transport(state_dir, *, fake=False):

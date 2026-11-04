@@ -164,6 +164,22 @@ For an external bot already present in the same bound destination, the owner can
 
 This produces an addressed `/review@PeerBot` prefix. Numeric sender allowance remains separate. Cross-human bot discovery, remote relay and end-to-end interoperability are not automated.
 
+### Addressed-only delivery and group context
+
+Both settings are optional and off by default. Without them, every message from an allowed sender is delivered, and messages from other senders are discarded.
+
+In a busy shared group, the owner can deliver only messages addressed to this agent and keep the rest as context:
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --filter addressed
+"$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --context on
+```
+
+- `--filter addressed` delivers an allowed sender's message only when it mentions the shared bot (`@YourBotUsername`), replies to one of the bot's messages, or carries a command addressed to it (`/review@YourBotUsername`). An edit of a delivered message is still delivered. Other messages from allowed senders are kept as context. `--filter all` restores the default.
+- `--context on` also keeps messages from senders that are **not** allowed, as context only. It never allows those senders: their messages are not delivered, cannot pause the connection and cannot pair. `--context off` stops capturing; context already captured stays until it expires.
+
+Context is untrusted and is never delivered, leased, announced by a push notice or counted against the pending inbox limit. It appears in `messages_history` with `status: "context"` and a `context_reason` of `not_addressed` or `sender_not_allowed`, and it is deleted after the 24-hour history window. An agent may reply to a context message with `reply_to`. The reply uses that message's normal conversation, so the conversation and bot-exchange budgets still apply. Running the command without `--filter` or `--context` prints the current settings, and `aot status` shows them under `routing`.
+
 ## Launch one scoped MCP client
 
 ```sh
@@ -202,9 +218,15 @@ The equivalent local command is:
 
 The first read fixes the snapshot's 24-hour window. Telegram entries use their valid message/edit timestamp, falling back to local receipt time for records without one; outbound and broker entries use local creation time. Continue with the returned opaque cursor to page through that snapshot. Cursors expire after 15 minutes; omit an expired cursor, or omit it when new activity may have arrived, to start a fresh snapshot. History reads do not contact Telegram, collect updates, flush sends, claim leases, acknowledge deliveries, or replay work. Use `messages_poll` separately for new pending work and acknowledge only deliveries obtained through that flow.
 
-The 24-hour view covers records captured locally for this client, not a complete download of the destination's preceding day. Telegram's `getUpdates` only exposes still-pending updates within its retention window. Updates consumed by another receiver, messages missed before binding, and bodies discarded from unconfigured destinations or unapproved senders are absent. The old bridge's history is not imported. A new client or new pairing therefore does not acquire complete preconnection context; if earlier context matters, the human must provide it through an authorized channel.
+The 24-hour view covers records captured locally for this client, not a complete download of the destination's preceding day. Telegram's `getUpdates` only exposes still-pending updates within its retention window. Updates consumed by another receiver, messages missed before binding, and bodies discarded from unconfigured destinations or unapproved senders are absent. When the owner turned on [group context](#addressed-only-delivery-and-group-context), messages that were not delivered also appear, with `status: "context"`. The old bridge's history is not imported. A new client or new pairing therefore does not acquire complete preconnection context; if earlier context matters, the human must provide it through an authorized channel.
 
 This is a read window, not an automatic deletion policy. Older database records may still be retained, and acknowledgment does not delete a record or remove it from the 24-hour view. See the retention and disconnect limits below.
+
+## Attachments
+
+A message with a document, photo, video, audio, voice note or animation is accepted. Its caption becomes the message text, or an empty string. The delivery lists each file under `attachments`, with `kind`, `file_id`, `file_unique_id` and, when Telegram sends them, `file_name`, `mime_type` and `file_size`. For a photo, only the largest size is kept. Stickers and other message types are still unsupported.
+
+The agent downloads a file with the `attachment_fetch` tool, using the `delivery_id` and the attachment's `file_unique_id`. It works for deliveries and for context entries. The file is stored once under the private state directory as `attachments/<delivery_id>-<file_unique_id>`, mode 0600. The sender's file name is reported but never used in the path. The tool returns the path, size and SHA-256. Files over 20 MB, the Telegram bot download limit, are refused. File contents are untrusted. Downloaded files are not deleted automatically.
 
 ## Inbox, routing and outbox
 
