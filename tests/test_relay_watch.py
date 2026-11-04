@@ -185,7 +185,11 @@ def test_profile_drift_blocks_wake_without_losing_work(relay):
     profile, core, store = relay
     config = Path(profile['config_file'])
     saved = config.read_text()
-    config.write_text(saved.replace('agents-over-telegram', 'wrong-runtime'))
+    # Drift the server command itself. The checkout path need not contain any
+    # particular name, so a replacement that might not match would test nothing.
+    drifted = saved.replace('/aot"', '/wrong-runtime"')
+    assert drifted != saved
+    config.write_text(drifted)
     add_update(profile)
     core.collect()
     process = launch(profile, '--once', '--duration', '.2')
