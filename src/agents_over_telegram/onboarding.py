@@ -1,6 +1,7 @@
 """Local operator onboarding and exact-directory, non-secret profile references."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -405,6 +406,15 @@ def human_status(value):
         lines.append('Intake: ' + str(intake['error']))
     if intake.get('possible_offline_gap'):
         lines.append('History coverage: a collection gap is possible.')
+    wake = value.get('unresolved_wake') or {}
+    if wake.get('notification_id'):
+        since = datetime.fromtimestamp(wake['since'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        if wake.get('next_action') == 'wait_for_desktop_wake':
+            lines.append(f"Wake: {wake['notification_id']} queued in the desktop since {since}; "
+                         'new wakes wait until the desktop opens it.')
+        else:
+            lines.append(f"Wake: {wake['notification_id']} {wake.get('status', 'unresolved')} since {since}; "
+                         'new wakes are blocked until the local owner reviews it.')
     action = value.get('next_action') or {}
     if action.get('message'):
         lines.append('Next: ' + action['message'])
