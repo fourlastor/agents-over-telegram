@@ -49,6 +49,62 @@ def _bounded(value: Any, maximum: int = 128) -> str:
     return ''.join(c for c in str(value)[:maximum] if c.isprintable())
 
 
+_MEDIA_KINDS = ('document', 'photo', 'video', 'audio', 'voice', 'animation')
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # The Bot API getFile limit.
+
+
+def _attachment(kind, media):
+    """Keep only bounded file metadata; Telegram's file_id is what fetching needs."""
+    file_id, unique = media.get('file_id'), media.get('file_unique_id')
+    if not isinstance(file_id, str) or not 1 <= len(file_id) <= 256:
+        return None
+    if not isinstance(unique, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', unique):
+        return None
+    item = {'kind': kind, 'file_id': file_id, 'file_unique_id': unique}
+    if isinstance(media.get('file_name'), str):
+        item['file_name'] = _bounded(media['file_name'], 255)
+    if isinstance(media.get('mime_type'), str):
+        item['mime_type'] = _bounded(media['mime_type'], 128)
+    if _integer(media.get('file_size')) and media['file_size'] >= 0:
+        item['file_size'] = media['file_size']
+    return item
+
+
+def _message_content(msg):
+    """Return (text, attachments), or (None, []) for an unsupported message.
+
+    A media message carries its caption as text, or an empty string."""
+    attachments = []
+    for kind in _MEDIA_KINDS:
+        media = msg.get(kind)
+        if kind == 'photo':
+            # Telegram sends one entry per size; keep the largest.
+            sizes = [size for size in media if isinstance(size, dict)] if isinstance(media, list) else []
+            media = max(sizes, key=lambda size: size.get('file_size') if _integer(size.get('file_size')) else 0,
+                        default=None)
+        if isinstance(media, dict):
+            item = _attachment(kind, media)
+            if item is not None:
+                attachments.append(item)
+    text = msg.get('text') if isinstance(msg.get('text'), str) else msg.get('caption')
+    if not isinstance(text, str):
+        text = '' if attachments else None
+    if text is None or len(text) > 4096:
+        return None, []
+    return text, attachments
+
+
+def _addressed(msg, text, account):
+    """True when the message mentions the shared bot, replies to it, or addresses a command to it."""
+    username = re.escape(account['username'])
+    if re.search(r'(?<![\w@])@' + username + r'(?!\w)', text, re.IGNORECASE):
+        return True
+    if re.search(r'(?<![\w/])/[A-Za-z0-9_]+@' + username + r'(?!\w)', text, re.IGNORECASE):
+        return True
+    replied = _mapping(_mapping(msg.get('reply_to_message')).get('from'))
+    return replied.get('id') == account['bot_id']
+
+
 class Core:
     PAIR_TTL = 600
     MAX_CHAIN = 8
@@ -168,8 +224,23 @@ class Core:
                 db.execute('ALTER TABLE account ADD COLUMN last_gap_at REAL')
             if 'event_at' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
                 db.execute('ALTER TABLE inbox ADD COLUMN event_at REAL')
-            if 'suspension_seq' not in {row['name'] for row in db.execute('PRAGMA table_info(bindings)')}:
+            binding_columns = {row['name'] for row in db.execute('PRAGMA table_info(bindings)')}
+            if 'suspension_seq' not in binding_columns:
                 db.execute('ALTER TABLE bindings ADD COLUMN suspension_seq INTEGER NOT NULL DEFAULT 0')
+            # Both default to the original behavior: every allowed message is
+            # delivered, and nothing from other senders is retained.
+            if 'delivery_filter' not in binding_columns:
+                db.execute("ALTER TABLE bindings ADD COLUMN delivery_filter TEXT NOT NULL DEFAULT 'all'")
+            if 'capture_context' not in binding_columns:
+                db.execute('ALTER TABLE bindings ADD COLUMN capture_context INTEGER NOT NULL DEFAULT 0')
+            # Media messages stay unsupported unless the operator accepts them.
+            if 'accept_media' not in binding_columns:
+                db.execute('ALTER TABLE bindings ADD COLUMN accept_media INTEGER NOT NULL DEFAULT 0')
+            # Context rows are stored acknowledged, so no poll, watch or wake path
+            # ever claims them; history shows them as context.
+            if 'context' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
+                db.execute('ALTER TABLE inbox ADD COLUMN context INTEGER NOT NULL DEFAULT 0')
+            db.execute('CREATE INDEX IF NOT EXISTS inbox_context_expiry ON inbox(COALESCE(event_at,created)) WHERE context=1')
             db.execute('INSERT OR IGNORE INTO history_keys(singleton,secret) VALUES(1,?)', (secrets.token_bytes(32),))
             db.execute('CREATE INDEX IF NOT EXISTS inbox_history ON inbox(client_id,COALESCE(event_at,created) DESC)')
             db.execute('CREATE INDEX IF NOT EXISTS outbox_history ON outbox(client_id,created DESC)')
@@ -358,7 +429,7 @@ class Core:
                 if enabled:
                     db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
                                (f'bot:{client_id}:{sender_id}', client_id, sender_id))
-                    for admitted in db.execute('SELECT conversation_id,payload FROM inbox WHERE client_id=?', (client_id,)).fetchall():
+                    for admitted in db.execute('SELECT conversation_id,payload FROM inbox WHERE client_id=? AND context=0', (client_id,)).fetchall():
                         payload = json.loads(admitted['payload'])
                         sender = _mapping(payload.get('sender'))
                         if payload.get('origin') == 'telegram' and sender.get('id') == sender_id and sender.get('is_bot') is True:
@@ -371,6 +442,36 @@ class Core:
                 'max_sends_per_exchange': self.MAX_CHAIN, 'pair_send_limit': self.BOT_PAIR_SEND_LIMIT,
                 'window_seconds': self.BOT_PAIR_WINDOW, 'reserved_in_window': usage[0],
                 'retry_at': usage[1] if usage[0] >= self.BOT_PAIR_SEND_LIMIT else None}
+
+    DELIVERY_FILTERS = ('all', 'addressed')
+
+    def delivery_settings(self, client_id, delivery_filter=None, capture_context=None, accept_media=None):
+        """Local operator control; never exposed as an agent MCP mutation.
+
+        ``delivery_filter`` 'all' (the default) delivers every message from an
+        allowed sender. 'addressed' delivers only messages that mention the bot,
+        reply to it or carry a command addressed to it; the rest are kept as
+        context. ``capture_context`` also keeps messages from senders that are not
+        allowed, as context only. Context is never delivered, leased or announced.
+        ``accept_media`` accepts documents, photos, video, audio, voice notes and
+        animations, with their caption as text; otherwise they stay unsupported.
+        Every setting defaults to off, which is the original behavior.
+        """
+        if delivery_filter is not None and delivery_filter not in self.DELIVERY_FILTERS:
+            raise CoreError('invalid_delivery_settings')
+        if any(value is not None and type(value) is not bool for value in (capture_context, accept_media)):
+            raise CoreError('invalid_delivery_settings')
+        with self._tx() as db:
+            self._binding(db, client_id)
+            if delivery_filter is not None:
+                db.execute('UPDATE bindings SET delivery_filter=? WHERE client_id=? AND connected=1', (delivery_filter, client_id))
+            if capture_context is not None:
+                db.execute('UPDATE bindings SET capture_context=? WHERE client_id=? AND connected=1', (int(capture_context), client_id))
+            if accept_media is not None:
+                db.execute('UPDATE bindings SET accept_media=? WHERE client_id=? AND connected=1', (int(accept_media), client_id))
+            row = self._binding(db, client_id)
+        return {'delivery_filter': row['delivery_filter'], 'capture_context': bool(row['capture_context']),
+                'accept_media': bool(row['accept_media']), 'context_window_seconds': self.HISTORY_WINDOW}
 
     def _bot_pair_usage(self, db, client_id, sender_id, now):
         stamps = [r[0] for r in db.execute('''SELECT o.created FROM bot_exchange_members p
@@ -475,6 +576,9 @@ class Core:
                 'delivery': {'mode': 'on_demand', 'automatic': False, 'scope': 'inbox_core',
                              'listener_status': 'not_checked'},
                 'history': {'window_hours': self.HISTORY_WINDOW // 3600, 'kind': 'captured_only'},
+                'routing': {'delivery_filter': row['delivery_filter'],
+                            'capture_context': bool(row['capture_context']),
+                            'accept_media': bool(row['accept_media'])} if row else None,
                 'state': state, 'next_action': {'code': action, 'message': message},
             }
 
@@ -539,17 +643,19 @@ class Core:
             return
         sender = _mapping(msg.get('from'))
         sender_id = sender.get('id')
-        text = msg.get('text')
         if not _integer(sender_id) or sender_id <= 0 or not isinstance(sender.get('is_bot'), bool) or msg.get('sender_chat'):
             self._unmatched(db, update_id, chat_id, 'unverified_sender', now)
             return
         if sender_id == account['bot_id']:
             self._unmatched(db, update_id, chat_id, 'shared_bot_echo', now)
             return
-        if not isinstance(text, str) or len(text) > 4096 or not _integer(msg.get('message_id')):
+        text, attachments = _message_content(msg)
+        if text is None or not _integer(msg.get('message_id')):
             self._unmatched(db, update_id, chat_id, 'unsupported_message', now)
             return
-        command = re.fullmatch(r'/pair@([A-Za-z0-9_]+) ([A-F0-9]{12})', text)
+        # Commands are only ever read from message text, never from a caption.
+        command_text = msg['text'] if isinstance(msg.get('text'), str) else ''
+        command = re.fullmatch(r'/pair@([A-Za-z0-9_]+) ([A-F0-9]{12})', command_text)
         if command and command.group(1).lower() == account['username'].lower():
             if not sender['is_bot'] and kind == 'message':
                 db.execute('UPDATE pairings SET sender_id=?,chat_id=?,thread_id=?,title=?,observed=? WHERE code_hash=? AND consumed=0 AND expires>? AND sender_id IS NULL', (sender_id, chat_id, thread_id, _bounded(chat.get('title', ''), 128), now, _digest(command.group(2)), now))
@@ -558,10 +664,14 @@ class Core:
         if binding is None:
             self._unmatched(db, update_id, chat_id, 'unbound_destination', now)
             return
-        if not db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?', (binding['client_id'], sender_id, int(sender['is_bot']))).fetchone():
+        if attachments and not binding['accept_media']:
+            self._unmatched(db, update_id, chat_id, 'unsupported_message', now)
+            return
+        allowed = db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?', (binding['client_id'], sender_id, int(sender['is_bot']))).fetchone()
+        if not allowed and not binding['capture_context']:
             self._unmatched(db, update_id, chat_id, 'sender_not_allowed', now)
             return
-        if not sender['is_bot'] and sender_id == binding['owner_id'] and text.lower() == f'/pause@{account["username"]}'.lower() and kind == 'message':
+        if allowed and not sender['is_bot'] and sender_id == binding['owner_id'] and command_text.lower() == f'/pause@{account["username"]}'.lower() and kind == 'message':
             db.execute('UPDATE bindings SET paused=1 WHERE client_id=?', (binding['client_id'],))
             return
         # A human message starts its own conversation unless it replies to a known
@@ -582,23 +692,64 @@ class Core:
             conversation = f'tg:{chat_id}:{thread_id}:{msg["message_id"]}'
         else:
             conversation = f'participant:{binding["client_id"]}:{sender_id}'
+        edited_delivery = False
         if kind == 'edited_message':
-            for original in db.execute('SELECT payload,conversation_id FROM inbox WHERE client_id=? ORDER BY created,rowid',
+            for original in db.execute('SELECT payload,conversation_id,context FROM inbox WHERE client_id=? ORDER BY created,rowid',
                                        (binding['client_id'],)):
                 prior = json.loads(original['payload'])
                 if (prior.get('origin') == 'telegram' and prior.get('message_id') == msg['message_id']
                         and _mapping(prior.get('sender')).get('id') == sender_id):
                     conversation = original['conversation_id']
+                    edited_delivery = not original['context']
                     break
+        # Membership is recorded for context too: a later reply to a context
+        # message from an opted-in bot must stay inside that pair's send budget.
         if sender['is_bot'] and db.execute('''SELECT 1 FROM bot_exchange_policies
                 WHERE client_id=? AND sender_id=? AND enabled=1''',
                 (binding['client_id'], sender_id)).fetchone():
             db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
                        (conversation, binding['client_id'], sender_id))
         payload = {'origin': 'telegram', 'kind': 'edited' if kind == 'edited_message' else 'message', 'update_id': update_id, 'message_id': msg['message_id'], 'chat_id': chat_id, 'thread_id': thread_id or None, 'sender': {'id': sender_id, 'is_bot': sender['is_bot'], 'username': _bounded(sender.get('username', ''), 64)}, 'text': text, 'reply_to': reply_to if _integer(reply_to) else None}
+        if attachments:
+            payload['attachments'] = attachments
         stamp = msg.get('edit_date' if kind == 'edited_message' else 'date')
         event_at = stamp if _integer(stamp) and 0 < stamp <= now else now
-        self._enqueue(db, binding['client_id'], f'tg:{update_id}', payload, conversation, now, event_at=event_at)
+        if not allowed:
+            reason = 'sender_not_allowed'
+        elif binding['delivery_filter'] == 'addressed' and not edited_delivery and not _addressed(msg, text, account):
+            reason = 'not_addressed'
+        else:
+            self._enqueue(db, binding['client_id'], f'tg:{update_id}', payload, conversation, now, event_at=event_at)
+            return
+        self._keep_context(db, binding['client_id'], f'tg:{update_id}', {**payload, 'context_reason': reason},
+                           conversation, now, event_at)
+
+    def _keep_context(self, db, client_id, event_key, payload, conversation_id, now, event_at):
+        # Stored acknowledged and outside the queue bound: history reads it, no
+        # poll, watch, relay or push path ever claims or announces it.
+        db.execute('''INSERT OR IGNORE INTO inbox(id,client_id,event_key,payload,created,conversation_id,event_at,acknowledged,context)
+            VALUES(?,?,?,?,?,?,?,1,1)''', ('msg_' + secrets.token_hex(12), client_id, event_key,
+                                         json.dumps(payload, ensure_ascii=False), now, conversation_id, event_at))
+
+    def _prune_context(self, db, now):
+        """Drop context older than the history window, with its bookkeeping rows and fetched files.
+
+        The highest inbox rowid is never deleted, so SQLite cannot hand it to a new
+        row inside a history snapshot that was frozen at that rowid.
+        """
+        stale = [row[0] for row in db.execute('''SELECT id FROM inbox WHERE context=1 AND COALESCE(event_at,created)<?
+            AND rowid<(SELECT MAX(rowid) FROM inbox)''', (now - self.HISTORY_WINDOW,))]
+        if not stale:
+            return
+        self._delete_attachment_files(stale)
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for start in range(0, len(stale), 500):
+            chunk = stale[start:start + 500]
+            marks = ','.join('?' * len(chunk))
+            for table in ('push_announcements', 'relay_deliveries'):
+                if table in tables:
+                    db.execute(f'DELETE FROM {table} WHERE inbox_id IN ({marks})', chunk)
+            db.execute(f'DELETE FROM inbox WHERE context=1 AND id IN ({marks})', chunk)
 
     def collect(self, *, timeout=0):
         if not _integer(timeout) or not 0 <= timeout <= 20:
@@ -628,6 +779,7 @@ class Core:
                         self._route_update(db, update, account, self.clock())
                         cursor = update['update_id'] + 1
                         accepted += 1
+                    self._prune_context(db, self.clock())
                     db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL WHERE singleton=1', (cursor, self.clock(), self.clock(), self.clock(), self.clock()))
                 return {'status': 'ok', 'updates': accepted, 'cursor': cursor}
             except (TransportError, CoreError) as error:
@@ -704,8 +856,10 @@ class Core:
     def history(self, client_id, limit=20, cursor=None):
         """Read captured context without claiming or acknowledging any work.
 
-        A cursor freezes the event window and row membership for 15 minutes.
-        Acknowledgment and publication statuses reflect the time of each read.
+        A cursor freezes the event window and row membership for 15 minutes,
+        except that context older than the history window can be pruned between
+        pages and then drops out. Acknowledgment and publication statuses reflect
+        the time of each read.
         """
         if not _integer(limit) or not 1 <= limit <= 50:
             raise CoreError('invalid_history_options')
@@ -751,7 +905,7 @@ class Core:
                     row = db.execute('SELECT * FROM inbox WHERE id=? AND client_id=?', (event['id'], client_id)).fetchone()
                     message = json.loads(row['payload'])
                     message.update(direction='incoming', delivery_id=row['id'], conversation_id=row['conversation_id'],
-                                   status='acknowledged' if row['acknowledged'] else 'pending',
+                                   status='context' if row['context'] else 'acknowledged' if row['acknowledged'] else 'pending',
                                    event_at=event['stamp'], captured_at=row['created'], context_only=True)
                     if row['outbox_id']:
                         publication = db.execute('SELECT status,message_id FROM outbox WHERE id=?', (row['outbox_id'],)).fetchone()
@@ -860,6 +1014,76 @@ class Core:
             db.execute('UPDATE outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND (client_id=? OR recipient=?)', (self.clock(), client_id, client_id))
         return {'client_id': client_id, 'connected': False, 'revoked': True, 'queued_work_preserved': True}
 
+    def _delete_attachment_files(self, delivery_ids):
+        directory = self.state_dir / 'attachments'
+        prefixes = tuple(f'{delivery_id}-' for delivery_id in delivery_ids)
+        try:
+            names = os.listdir(directory)
+        except FileNotFoundError:
+            return
+        for name in names:
+            if name.startswith(prefixes):
+                with contextlib.suppress(FileNotFoundError):
+                    (directory / name).unlink()
+
+    def fetch_attachment(self, client_id, delivery_id, file_unique_id):
+        """Download one attachment of this client's captured message into private local state.
+
+        The file is named from the delivery and Telegram's unique file id, never
+        from the sender's file name. A second fetch reuses the stored file.
+        """
+        if (not isinstance(delivery_id, str) or not re.fullmatch(r'msg_[0-9a-f]{24}', delivery_id)
+                or not isinstance(file_unique_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', file_unique_id)):
+            raise CoreError('invalid_attachment')
+        with self._db() as db:
+            self._binding(db, client_id)
+            row = db.execute('SELECT payload FROM inbox WHERE id=? AND client_id=?', (delivery_id, client_id)).fetchone()
+        payload = json.loads(row['payload']) if row else {}
+        item = next((a for a in payload.get('attachments', []) if a.get('file_unique_id') == file_unique_id), None)
+        if item is None:
+            raise CoreError('unknown_attachment')
+        # Context capture keeps such messages readable; it never lets their files in.
+        if payload.get('context_reason') == 'sender_not_allowed':
+            raise CoreError('attachment_sender_not_allowed')
+        if item.get('file_size', 0) > MAX_ATTACHMENT_BYTES:
+            raise CoreError('attachment_too_large')
+        try:
+            directory = private_directory(self.state_dir / 'attachments')
+        except CredentialError:
+            raise CoreError('insecure_state_directory') from None
+        target = directory / f'{delivery_id}-{file_unique_id}'
+        try:
+            info = target.lstat()
+        except FileNotFoundError:
+            try:
+                data = self.transport.download_file(item['file_id'], MAX_ATTACHMENT_BYTES)
+            except TransportError as error:
+                raise CoreError('attachment_too_large' if error.code == 'file_too_large' else 'attachment_unavailable') from None
+            if not isinstance(data, bytes) or len(data) > MAX_ATTACHMENT_BYTES:
+                raise CoreError('attachment_unavailable')
+            partial = directory / f'.{target.name}.{secrets.token_hex(8)}.partial'
+            fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            try:
+                with os.fdopen(fd, 'wb') as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(partial, target)
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    partial.unlink()
+                raise
+            info = target.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+            raise CoreError('insecure_attachment_file')
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        result = {'delivery_id': delivery_id, 'file_unique_id': file_unique_id, 'kind': item['kind'],
+                  'path': str(target), 'size': info.st_size, 'sha256': digest, 'content_trust': 'untrusted'}
+        for key in ('file_name', 'mime_type'):
+            if key in item:
+                result[key] = item[key]
+        return result
+
     def _conversation(self, db, client_id, conversation_id):
         if conversation_id is not None:
             if not isinstance(conversation_id, str) or len(conversation_id) > 200:
@@ -869,7 +1093,7 @@ class Core:
             return conversation_id
         # Continue the most recent admitted conversation, including broker work.
         # Explicit conversation IDs always retain their own durable chain budget.
-        row = db.execute('SELECT conversation_id FROM inbox WHERE client_id=? ORDER BY created DESC,rowid DESC LIMIT 1', (client_id,)).fetchone()
+        row = db.execute('SELECT conversation_id FROM inbox WHERE client_id=? AND context=0 ORDER BY created DESC,rowid DESC LIMIT 1', (client_id,)).fetchone()
         if row:
             return row['conversation_id']
         return 'local:' + client_id

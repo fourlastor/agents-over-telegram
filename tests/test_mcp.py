@@ -97,7 +97,7 @@ async def test_official_sdk_initialization_schemas_and_fixed_identity():
     async with create_connected_server_and_client_session(create_server(core, "client-a")) as session:
         tools = (await session.list_tools()).tools
         assert {tool.name for tool in tools} == {tool.name for tool in TOOLS}
-        assert len(tools) == 11
+        assert len(tools) == 12
         for tool in tools:
             Draft202012Validator.check_schema(tool.inputSchema)
             Draft202012Validator.check_schema(tool.outputSchema)
