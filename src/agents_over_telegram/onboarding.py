@@ -412,6 +412,9 @@ def human_status(value):
         if wake.get('next_action') == 'wait_for_desktop_wake':
             lines.append(f"Wake: {wake['notification_id']} queued in the desktop since {since}; "
                          'new wakes wait until the desktop opens it.')
+        elif wake.get('next_action') == 'review_failing_wake':
+            lines.append(f"Wake: {wake['notification_id']} queued in the desktop since {since}, but its wake URL "
+                         f"failed {wake.get('wake_attempts')} times; the local owner should check the target chat.")
         else:
             lines.append(f"Wake: {wake['notification_id']} {wake.get('status', 'unresolved')} since {since}; "
                          'new wakes are blocked until the local owner reviews it.')

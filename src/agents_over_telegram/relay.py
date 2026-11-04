@@ -25,6 +25,12 @@ WAKE_NOTICE = (
 UNRESOLVED_WAKE_REPORT_SECONDS = 15 * 60
 REVIEW_UNRESOLVED_WAKE = 'review_uncertain_wake'
 WAIT_FOR_DESKTOP_WAKE = 'wait_for_desktop_wake'
+REVIEW_FAILING_WAKE = 'review_failing_wake'
+# The listener tries a queued wake URL only while the desktop runs and the
+# connection is active, with backoff up to 60 seconds. After this many attempts
+# under those conditions the URL is unlikely to start working by itself: the
+# target chat may be gone or the OS opener may always fail.
+WAKE_URL_ATTEMPT_LIMIT = 10
 
 
 def unresolved_wakes(db, now, client_id=None, threshold=UNRESOLVED_WAKE_REPORT_SECONDS):
@@ -34,19 +40,23 @@ def unresolved_wakes(db, now, client_id=None, threshold=UNRESOLVED_WAKE_REPORT_S
     so it is never retried, failed or cancelled automatically.
 
     ``wait_for_desktop_wake`` marks a desktop handoff whose native queue returned
-    a receipt. The listener keeps retrying only its wake URL, and a manual
+    a receipt. A running listener keeps retrying only its wake URL, and a manual
     outcome would stop those retries, so it must not be resolved by hand.
-    Everything else (``review_uncertain_wake``) needs a human to reconcile it.
+    ``review_failing_wake`` is the same handoff after its wake URL failed
+    ``WAKE_URL_ATTEMPT_LIMIT`` times while it could be opened, so a human should
+    check the target. Everything else (``review_uncertain_wake``) needs a human
+    to reconcile it.
     """
     tables = {row[0] for row in db.execute("""SELECT name FROM sqlite_master WHERE type='table'
         AND name IN ('relay_notifications','relay_desktop_handoffs')""")}
     if 'relay_notifications' not in tables:
         return []
-    phase, join = ('h.phase', 'LEFT JOIN relay_desktop_handoffs h ON h.notification_id=n.id') \
-        if 'relay_desktop_handoffs' in tables else ('NULL', '')
+    phase, wakes, join = ('h.phase', 'h.wake_attempt', 'LEFT JOIN relay_desktop_handoffs h ON h.notification_id=n.id') \
+        if 'relay_desktop_handoffs' in tables else ('NULL', 'NULL', '')
     where, args = ('AND n.client_id=?', (client_id,)) if client_id is not None else ('', ())
     # Repeat the partial index condition exactly, so SQLite reads only outstanding rows.
-    rows = db.execute(f"""SELECT n.id,n.client_id,n.thread_id,n.status,n.attempt,n.updated,{phase} AS phase
+    rows = db.execute(f"""SELECT n.id,n.client_id,n.thread_id,n.status,n.attempt,n.updated,{phase} AS phase,
+        {wakes} AS wake_attempts
         FROM relay_notifications n {join}
         WHERE n.status IN ('inflight','uncertain','retry') AND n.status<>'retry'
         AND n.updated<=? {where}
@@ -54,8 +64,15 @@ def unresolved_wakes(db, now, client_id=None, threshold=UNRESOLVED_WAKE_REPORT_S
     return [{'notification_id': row['id'], 'client_id': row['client_id'], 'thread_id': row['thread_id'],
              'status': row['status'], 'attempt': row['attempt'], 'since': row['updated'],
              'age_seconds': int(now - row['updated']), 'handoff_phase': row['phase'],
-             'next_action': WAIT_FOR_DESKTOP_WAKE if (row['status'] == 'uncertain' and row['phase'] == 'queued')
-             else REVIEW_UNRESOLVED_WAKE} for row in rows]
+             'wake_attempts': row['wake_attempts'], 'next_action': _next_action(row)} for row in rows]
+
+
+def _next_action(row):
+    if row['status'] != 'uncertain' or row['phase'] != 'queued':
+        return REVIEW_UNRESOLVED_WAKE
+    if (row['wake_attempts'] or 0) >= WAKE_URL_ATTEMPT_LIMIT:
+        return REVIEW_FAILING_WAKE
+    return WAIT_FOR_DESKTOP_WAKE
 
 
 class RelayStore:

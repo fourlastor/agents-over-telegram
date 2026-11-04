@@ -384,3 +384,67 @@ def test_queued_handoff_waiting_for_wake_url_is_not_sent_for_manual_resolution(e
     assert len(calls(native, 'enqueue')) == 1 and len(calls(native, 'wake')) == 2
     assert store.status(alpha)['bindings'][0]['notifications'] == {'accepted': 1}
     assert core.connection_status(alpha)['unresolved_wake'] is None
+
+
+def test_wake_url_that_keeps_failing_is_sent_for_review(env, native, monkeypatch):
+    # With the desktop open and the connection active, a wake URL that always
+    # fails (a deleted chat, a broken opener) would otherwise wait forever.
+    from agents_over_telegram.onboarding import human_status
+    from agents_over_telegram.relay import UNRESOLVED_WAKE_REPORT_SECONDS, WAKE_URL_ATTEMPT_LIMIT
+    core, store, alpha = ready(env)
+    native['wake_error'] = desktop.DesktopQueueError('desktop_wake_failed')
+    monkeypatch.setattr(desktop, 'STUCK_WAKE_CHECK_SECONDS', 0)
+    run(env)
+    while len(calls(native, 'wake')) < WAKE_URL_ATTEMPT_LIMIT - 1:
+        env[2].advance(60)
+        run(env)
+    # One attempt short of the limit, it still waits for the listener.
+    env[2].advance(UNRESOLVED_WAKE_REPORT_SECONDS)
+    _, events = run(env)
+    [warning] = stuck_events(events)
+    assert (warning['next_action'], warning['wake_attempts']) == ('wait_for_desktop_wake', WAKE_URL_ATTEMPT_LIMIT - 1)
+    # That run made the last attempt, which also failed.
+    assert len(calls(native, 'wake')) == WAKE_URL_ATTEMPT_LIMIT
+    status = core.connection_status(alpha)
+    assert status['next_action']['code'] == 'review_failing_wake'
+    assert status['unresolved_wake']['wake_attempts'] == WAKE_URL_ATTEMPT_LIMIT
+    assert 'local owner' in status['next_action']['message']
+    assert 'relay-' not in status['next_action']['message']
+    assert f'wake URL failed {WAKE_URL_ATTEMPT_LIMIT} times' in human_status(status)
+    _, events = run(env)
+    [warning] = stuck_events(events)
+    assert warning['next_action'] == 'review_failing_wake'
+    assert 'relay-resolve' in warning['message']
+    # Report only: the notice is never re-enqueued and nothing is resolved.
+    assert len(calls(native, 'enqueue')) == 1
+    [held] = store.status(alpha)['notifications']
+    assert held['status'] == 'uncertain'
+    # The documented outcome works and stops the retries.
+    with pytest.raises(CoreError, match='desktop_queue_already_accepted'):
+        store.resolve(held['notification_id'], 'failed')
+    store.resolve(held['notification_id'], 'accepted')
+    env[2].advance(120)
+    run(env)
+    assert len(calls(native, 'wake')) == WAKE_URL_ATTEMPT_LIMIT
+    assert core.connection_status(alpha)['unresolved_wake'] is None
+
+
+def test_wake_attempts_while_desktop_closed_or_paused_do_not_count(env, native):
+    # Only attempts made while the wake could open count toward the limit.
+    from agents_over_telegram.relay import UNRESOLVED_WAKE_REPORT_SECONDS, WAKE_URL_ATTEMPT_LIMIT
+    core, store, alpha = ready(env)
+    native['wake_error'] = desktop.DesktopQueueError('desktop_wake_failed')
+    run(env)
+    native['running'] = False
+    for _ in range(WAKE_URL_ATTEMPT_LIMIT):
+        env[2].advance(60)
+        run(env)
+    native['running'] = True
+    core.pause(alpha)
+    for _ in range(WAKE_URL_ATTEMPT_LIMIT):
+        env[2].advance(60)
+        run(env)
+    env[2].advance(UNRESOLVED_WAKE_REPORT_SECONDS)
+    assert len(calls(native, 'wake')) == 1
+    [wake] = store.unresolved_wakes()
+    assert (wake['next_action'], wake['wake_attempts']) == ('wait_for_desktop_wake', 1)

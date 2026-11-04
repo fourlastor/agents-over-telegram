@@ -669,7 +669,8 @@ class Core:
             from .relay import WAIT_FOR_DESKTOP_WAKE, unresolved_wakes
             held = unresolved_wakes(db, now, client_id)
             held_wake = {key: held[0][key] for key in ('notification_id', 'status', 'since', 'age_seconds',
-                                                       'attempt', 'handoff_phase', 'next_action')} if held else None
+                                                       'attempt', 'handoff_phase', 'wake_attempts',
+                                                       'next_action')} if held else None
             if row is None:
                 if pairing is None:
                     state, action = 'unpaired', 'begin_pairing'
@@ -705,8 +706,9 @@ class Core:
                 elif held_wake and held_wake['next_action'] == WAIT_FOR_DESKTOP_WAKE:
                     action = WAIT_FOR_DESKTOP_WAKE
                     message = ('A wake for this agent is queued in the desktop app but has not opened yet, so no new '
-                               'wakes are sent. The listener retries it while the desktop is open and this connection '
-                               'is active; nobody needs to resolve it. Pending messages can still be polled.')
+                               'wakes are sent. A running listener retries it while the desktop is open and this '
+                               'connection is active; nobody needs to resolve it. If no listener is running, ask the '
+                               'local owner to start one. Pending messages can still be polled.')
                 elif held_wake:
                     action = held_wake['next_action']
                     message = ('An automatic wake for this agent has been unresolved for a long time, so no new '
