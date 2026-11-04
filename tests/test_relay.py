@@ -472,7 +472,7 @@ def test_long_held_uncertain_wake_is_reported_without_being_resolved(env):
     assert wake == {'notification_id': notification, 'client_id': alpha, 'thread_id': ALPHA_THREAD,
                     'status': 'uncertain', 'attempt': 1, 'since': held_at,
                     'age_seconds': UNRESOLVED_WAKE_REPORT_SECONDS, 'handoff_phase': None,
-                    'next_action': 'review_uncertain_wake'}
+                    'wake_attempts': None, 'next_action': 'review_uncertain_wake'}
     assert relay.status(alpha)['bindings'][0]['unresolved_wake'] == wake
     status = core.connection_status(alpha)
     assert status['next_action']['code'] == 'review_uncertain_wake'
@@ -480,7 +480,8 @@ def test_long_held_uncertain_wake_is_reported_without_being_resolved(env):
     assert 'local owner' in status['next_action']['message']
     assert 'relay-' not in status['next_action']['message']
     assert status['unresolved_wake'] == {key: wake[key] for key in (
-        'notification_id', 'status', 'since', 'age_seconds', 'attempt', 'handoff_phase', 'next_action')}
+        'notification_id', 'status', 'since', 'age_seconds', 'attempt', 'handoff_phase', 'wake_attempts',
+        'next_action')}
     assert notification in human_status(status)
     assert 'new wakes are blocked' in human_status(status)
     # Other clients are not affected, and reporting never changes the ledger.

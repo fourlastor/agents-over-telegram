@@ -57,6 +57,11 @@ STUCK_WAKE_MESSAGES = {
         'Queued wake has not opened in the desktop yet, so later wakes for this client wait. The '
         'listener retries only its wake URL while the desktop is open and the connection is active. '
         'Do not resolve it by hand: that stops the retries.'),
+    'review_failing_wake': (
+        'Queued wake URL keeps failing while the desktop is open and the connection is active, so later '
+        'wakes for this client wait. Check that the target chat still exists and that its wake URL opens. '
+        'Opening that chat in the desktop app delivers the queued notice; then record accepted with '
+        'relay-resolve, or cancelled to dismiss it. The listener keeps retrying until then.'),
 }
 
 def _uuid(value):

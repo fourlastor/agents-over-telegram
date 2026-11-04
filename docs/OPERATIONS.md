@@ -92,7 +92,8 @@ The listener checks that the desktop is running and validates the exact target a
 
 An unresolved wake blocks every later wake for its client. After 15 minutes, `status` reports it as `unresolved_wake`, `status --human` prints a `Wake:` line, `relay-status` shows the same entry, and a running `relay-desktop` logs a `desktop_wake_stuck` warning at most once an hour per notification. Nothing is resolved automatically. Act on its `next_action`:
 
-- `wait_for_desktop_wake`: the desktop queue already accepted the notice. Open the desktop app or resume the connection, and the listener retries the wake URL by itself. Do not resolve it by hand, because that stops the retries.
+- `wait_for_desktop_wake`: the desktop queue already accepted the notice. Open the desktop app or resume the connection, and a running `relay-desktop` retries the wake URL by itself. If no listener is running, start one; nothing else retries the wake. Do not resolve it by hand, because that stops the retries.
+- `review_failing_wake`: the same queued notice, but its wake URL failed 10 times while the desktop was open and the connection was active. Check that the target chat still exists and that the wake URL opens it. Opening that chat in the desktop app delivers the queued notice. Then record `accepted`, or `cancelled` to dismiss it. `failed` is refused, because the desktop queue already holds the notice.
 - `review_uncertain_wake`: check the target chat, then record one outcome.
 
 ```sh
