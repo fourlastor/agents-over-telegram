@@ -296,3 +296,50 @@ def test_cli_preserves_scoped_validation_and_disables_outgoing_recovery(env, mon
     assert run_cli(options) is None
     assert observed == {'recover_sends': False, 'codex_binary': Path('/fixture/resources/codex'),
                         'codex_home': Path('/fixture/home'), 'duration': 0, 'collect': True}
+
+
+def stuck_events(events):
+    return [event for event in events if event['type'] == 'desktop_wake_stuck']
+
+
+def hold_ambiguous(env, native):
+    _, store, alpha = ready(env)
+    native['enqueue_error'] = desktop.DesktopQueueError('desktop_queue_timeout', ambiguous=True)
+    run(env)
+    native['enqueue_error'] = None
+    [held] = store.status(alpha)['notifications']
+    assert held['status'] == 'uncertain'
+    return store, alpha, held
+
+
+def test_listener_warns_about_long_held_uncertain_wake_without_resolving_it(env, native, monkeypatch):
+    from agents_over_telegram.relay import UNCERTAIN_WAKE_REVIEW_SECONDS
+    store, alpha, held = hold_ambiguous(env, native)
+    monkeypatch.setattr(desktop, 'STUCK_WAKE_CHECK_SECONDS', 0)
+    _, events = run(env)
+    assert stuck_events(events) == []
+    env[2].advance(UNCERTAIN_WAKE_REVIEW_SECONDS)
+    _, events = run(env)
+    # Checked on every loop here, but warned only once per repeat interval.
+    [warning] = stuck_events(events)
+    assert warning['level'] == 'warning'
+    assert warning['notification_id'] == held['notification_id']
+    assert warning['client_id'] == alpha and warning['thread_id'] == ALPHA_THREAD
+    assert warning['next_action'] == 'review_uncertain_wake'
+    assert warning['age_seconds'] >= UNCERTAIN_WAKE_REVIEW_SECONDS
+    assert 'relay-resolve' in warning['message']
+    # Report only: nothing is re-enqueued, retried or resolved.
+    assert len(calls(native, 'enqueue')) == 1 and calls(native, 'wake') == []
+    assert store.status(alpha)['notifications'] == [held]
+
+
+def test_listener_repeats_stuck_warning_after_interval_and_while_desktop_closed(env, native, monkeypatch):
+    from agents_over_telegram.relay import UNCERTAIN_WAKE_REVIEW_SECONDS
+    hold_ambiguous(env, native)
+    env[2].advance(UNCERTAIN_WAKE_REVIEW_SECONDS)
+    monkeypatch.setattr(desktop, 'STUCK_WAKE_CHECK_SECONDS', 0)
+    monkeypatch.setattr(desktop, 'STUCK_WAKE_WARNING_REPEAT_SECONDS', 0)
+    native['running'] = False
+    _, events = run(env)
+    assert len(stuck_events(events)) > 1
+    assert calls(native, 'enqueue')[1:] == []

@@ -43,6 +43,13 @@ def default_codex_binary():
 
 DEFAULT_CODEX_BINARY = default_codex_binary()
 PROC_ROOT = Path('/proc')
+# How often the listener looks for long-held uncertain wakes, and how often it
+# repeats the warning for the same notification while it stays unresolved.
+STUCK_WAKE_CHECK_SECONDS = 60
+STUCK_WAKE_WARNING_REPEAT_SECONDS = 3600
+STUCK_WAKE_MESSAGE = ('Uncertain wake notification blocks every later wake for this client. '
+                      'Reconcile it against the target chat, then record the outcome with relay-resolve. '
+                      'The listener never resolves it automatically.')
 
 
 def _uuid(value):
@@ -382,6 +389,22 @@ def run_desktop_dispatcher(core, store, *, codex_binary=None, codex_home=None,
     handoffs = DesktopHandoffs(store)
     last_errors = {}
     route_backoff = {}
+    stuck_warned = {}
+    stuck_check_at = 0.0
+
+    def warn_stuck_wakes():
+        # Report only. An uncertain handoff may already have reached the target,
+        # so DIRECT_DISPATCH.md requires a human to reconcile it.
+        now = time.monotonic()
+        wakes = store.uncertain_wakes()
+        current = {wake['notification_id'] for wake in wakes}
+        for key in set(stuck_warned) - current:
+            del stuck_warned[key]
+        for wake in wakes:
+            if now < stuck_warned.get(wake['notification_id'], 0):
+                continue
+            stuck_warned[wake['notification_id']] = now + STUCK_WAKE_WARNING_REPEAT_SECONDS
+            emit({'type': 'desktop_wake_stuck', 'level': 'warning', **wake, 'message': STUCK_WAKE_MESSAGE})
 
     def report(key, event):
         if last_errors.get(key) != event.get('error'):
@@ -426,6 +449,9 @@ def run_desktop_dispatcher(core, store, *, codex_binary=None, codex_home=None,
                     pass
                 else:
                     report('collector', {'type': 'desktop_collection_error', 'error': error})
+                if time.monotonic() >= stuck_check_at:
+                    stuck_check_at = time.monotonic() + STUCK_WAKE_CHECK_SECONDS
+                    warn_stuck_wakes()
                 if not transport.desktop_running():
                     report('desktop', {'type': 'desktop_waiting', 'error': 'desktop_not_running'})
                     stop.wait(min(interval, max(0, deadline - time.monotonic())))

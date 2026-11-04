@@ -1,6 +1,7 @@
 """Local operator onboarding and exact-directory, non-secret profile references."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -405,6 +406,11 @@ def human_status(value):
         lines.append('Intake: ' + str(intake['error']))
     if intake.get('possible_offline_gap'):
         lines.append('History coverage: a collection gap is possible.')
+    wake = value.get('uncertain_wake') or {}
+    if wake.get('notification_id'):
+        since = datetime.fromtimestamp(wake['uncertain_since'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        lines.append(f"Wake: {wake['notification_id']} uncertain since {since}; "
+                     'new wakes are blocked until the local owner resolves it.')
     action = value.get('next_action') or {}
     if action.get('message'):
         lines.append('Next: ' + action['message'])

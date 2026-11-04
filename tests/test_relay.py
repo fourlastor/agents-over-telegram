@@ -434,3 +434,74 @@ def test_project_validator_drift_preserves_pending_work_until_restored(env, fail
     assert relay.status(alpha)['notifications'][0]['status'] == 'retry'
     control['valid'] = True
     assert relay.next_event()['attempt'] == 2
+
+
+def _hold_uncertain(env):
+    core, transport, _, relay, alpha, _, project_a, _ = env
+    relay.bind(alpha, ALPHA_THREAD, project_a)
+    append(transport, 'pending')
+    core.collect()
+    event = relay.next_event()
+    relay.resolve(event['notification_id'], 'uncertain')
+    return event['notification_id']
+
+
+def test_long_held_uncertain_wake_is_reported_without_being_resolved(env):
+    from agents_over_telegram.onboarding import human_status
+    from agents_over_telegram.relay import UNCERTAIN_WAKE_REVIEW_SECONDS
+    core, transport, clock, relay, alpha, beta, _, _ = env
+    notification = _hold_uncertain(env)
+    held_at = clock()
+    # A fresh uncertain wake is not reported yet: the handoff may still settle.
+    clock.advance(UNCERTAIN_WAKE_REVIEW_SECONDS - 1)
+    assert relay.uncertain_wakes() == []
+    assert relay.status(alpha)['bindings'][0]['uncertain_wake'] is None
+    assert core.connection_status(alpha)['uncertain_wake'] is None
+    assert core.connection_status(alpha)['next_action']['code'] == 'poll_messages'
+
+    clock.advance(1)
+    with sqlite3.connect(core.database) as db:
+        before = db.execute('SELECT * FROM relay_notifications ORDER BY id').fetchall()
+    [wake] = relay.uncertain_wakes()
+    assert wake == {'notification_id': notification, 'client_id': alpha, 'thread_id': ALPHA_THREAD,
+                    'attempt': 1, 'uncertain_since': held_at, 'age_seconds': UNCERTAIN_WAKE_REVIEW_SECONDS,
+                    'handoff_phase': None, 'next_action': 'review_uncertain_wake'}
+    assert relay.status(alpha)['bindings'][0]['uncertain_wake'] == wake
+    status = core.connection_status(alpha)
+    assert status['next_action']['code'] == 'review_uncertain_wake'
+    assert status['uncertain_wake'] == {'notification_id': notification, 'uncertain_since': held_at,
+                                        'age_seconds': UNCERTAIN_WAKE_REVIEW_SECONDS, 'attempt': 1,
+                                        'handoff_phase': None}
+    assert notification in human_status(status)
+    assert 'new wakes are blocked' in human_status(status)
+    # Other clients are not affected, and reporting never changes the ledger.
+    assert core.connection_status(beta)['uncertain_wake'] is None
+    assert relay.next_event() is None
+    with sqlite3.connect(core.database) as db:
+        assert db.execute('SELECT * FROM relay_notifications ORDER BY id').fetchall() == before
+
+    # Only an explicit operator outcome clears the report.
+    relay.resolve(notification, 'cancelled')
+    assert relay.uncertain_wakes() == []
+    assert core.connection_status(alpha)['next_action']['code'] == 'poll_messages'
+
+
+def test_unknown_outgoing_delivery_still_takes_precedence_over_uncertain_wake(env):
+    from agents_over_telegram.relay import UNCERTAIN_WAKE_REVIEW_SECONDS
+    core, transport, clock, _, alpha, _, _, _ = env
+    _hold_uncertain(env)
+    clock.advance(UNCERTAIN_WAKE_REVIEW_SECONDS)
+    transport.outcomes.append('unknown')
+    core.send(alpha, 'Uncertain publication', 'unknown-before-wake')
+    status = core.connection_status(alpha)
+    assert status['next_action']['code'] == 'review_unknown_delivery'
+    assert status['uncertain_wake'] is not None
+
+
+def test_connection_status_without_relay_tables_reports_no_uncertain_wake(tmp_path):
+    clock = Clock()
+    transport = FakeTransport()
+    core = Core(tmp_path / 'state', transport, clock=clock)
+    core.register_account(transport.bot_id, transport.username)
+    alpha = connect(core, transport)
+    assert core.connection_status(alpha)['uncertain_wake'] is None

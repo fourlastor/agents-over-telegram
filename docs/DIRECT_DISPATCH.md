@@ -81,6 +81,20 @@ The adapter saves its handoff phase before invoking the queue command and saves 
 
 Inspect `relay-status` and the exact target chat when a handoff is uncertain. A notification marked `accepted` means the native queue returned success and the OS opener accepted the wake URL. It does not mean that the model completed or handled Telegram work. Native queue acceptance, a successful OS opener exit, a completed model turn, an acknowledged inbox delivery and a sent Telegram publication are different pieces of evidence. An opener exit alone does not prove the chat handled the notice. Do not resolve an uncertain enqueue as failed simply because there is no Telegram reply. Reconcile against the saved queue receipt and actual chat history before deliberately retrying or cancelling.
 
+### A long-held uncertain wake blocks later wakes
+
+Each client has at most one outstanding notification. While a notification is `uncertain`, the listener sends no new wake for that client, even when new Telegram messages arrive. A wake that nobody reconciles therefore blocks every later wake for that client.
+
+The relay reports this condition, but it does not fix it. When an `uncertain` notification is older than 15 minutes:
+
+- `relay-status` shows it in the binding's `uncertain_wake` field.
+- The client's `connection_status` shows it in `uncertain_wake`, with the notification ID and the time it became uncertain. Its `next_action.code` is `review_uncertain_wake`, unless an unknown outgoing delivery (`review_unknown_delivery`) or a paused or suspended connection needs attention first. `status --human` prints a `Wake:` line.
+- `relay-desktop` writes a `desktop_wake_stuck` record with `"level": "warning"`. It checks once a minute and repeats the warning for the same notification at most once an hour.
+
+`handoff_phase` tells you how far the desktop handoff got. `queued` means the native queue returned a receipt, and the listener keeps retrying only the wake URL. `enqueuing` means the queue outcome is unknown. A missing phase means no desktop handoff was recorded, for example because `relay-watch` or `relay-dispatch` recorded the outcome.
+
+The relay never retries, fails, cancels or expires an uncertain wake by itself. An uncertain handoff can already have reached the target, so only a human can decide what happened. Check the target chat history and the queue receipt, then record one outcome with `relay-resolve`: `accepted` if the notice arrived, `failed` if it definitely did not, or `cancelled` to dismiss it. All three keep the pending inbox work. After that, the next new message can wake the client again.
+
 The target retains its model, project, permissions and native tools. The listener does not answer approvals, tool requests or authentication prompts on the target's behalf. Accepted notices are not repeated merely because inbox messages remain pending. A pause can race with an already queued notice; if that leaves pending work after resume, inspect scoped status and explicitly poll rather than duplicating the notice.
 
 To retire a resolved mapping:

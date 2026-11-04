@@ -90,6 +90,15 @@ Use the [shared binding procedure](RELAY.md#select-the-target), then run:
 
 The listener checks that the desktop is running and validates the exact target and project before submitting. A fixed trusted notice enters the native queue as a user message; Telegram bodies and sender instructions never enter that notice. A known enqueue receipt permits retrying only the wake URL. Ambiguous enqueue results remain held until inspected. Native queueing, OS URL acceptance, model completion, inbox acknowledgment and Telegram publication are distinct outcomes.
 
+An uncertain wake blocks every later wake for its client until a human resolves it. After 15 minutes, `status` reports it as `uncertain_wake` with `next_action.code` `review_uncertain_wake`, and `status --human` prints a `Wake:` line. `relay-status` shows the same entry, and a running `relay-desktop` logs a `desktop_wake_stuck` warning at most once an hour per notification. Nothing is resolved automatically. Check the target chat, then record the outcome:
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" relay-status --client-file "$AOT_CLIENT"
+"$AOT_BIN" --state-dir "$AOT_STATE" relay-resolve --notification-id NOTIFICATION_ID --outcome accepted
+```
+
+Use `accepted` if the notice reached the chat, `failed` if it definitely did not, or `cancelled` to dismiss it. These are alternatives, not a sequence. See [long-held uncertain wakes](DIRECT_DISPATCH.md#a-long-held-uncertain-wake-blocks-later-wakes) for details.
+
 Stop listening when the requested period ends or the user asks. Setup installs no daemon, scheduler or autostart entry. An app-check/OS-opener race can reopen a just-closed app normally, and stopping cannot retract a notice already queued. See [desktop lifecycle and recovery](DIRECT_DISPATCH.md#notice-and-recovery-semantics) for details. An accepted notice that races a pause is not repeated after resume; inspect pending status and explicitly poll.
 
 The normal-launch `relay-desktop` Telegram check passed on 2026-10-19: incoming marker `normal-idle-1` automatically woke the existing local Alpha chat, which polled once, sent one reply, acknowledged after recorded publication and returned to zero pending messages. Native tools and the ledger confirm the round trip; the user also confirmed the reply is visible in Telegram. Earlier `relay-watch` model-mediated listening and `relay-dispatch` shared-backend/bridge routes remain [experimental alternatives](DIRECT_DISPATCH.md#earlier-experimental-adapters), not default setup instructions.
