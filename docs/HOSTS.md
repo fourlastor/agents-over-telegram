@@ -48,7 +48,7 @@ aot setup --label Alpha --project-dir /absolute/path/to/project --host claude
 
 **How an idle session wakes up.** The plugin starts `aot wake` as an `asyncRewake` hook when the session starts and each time a turn ends. Claude Code runs this hook in the background. The hook waits for a new delivery and collects from Telegram while it waits. When a message arrives, the hook writes the notice and exits with status 2. Claude Code then wakes the session, even when it is idle, and shows the notice to the model.
 
-- One waiter runs per project client and Claude Code session. Each turn end starts a new waiter, which takes over from the running one within about 30 seconds.
+- One waiter runs per project client and Claude Code session. Each turn end starts a new waiter, which takes over from the running one when that waiter finishes its current check, usually within 30 seconds.
 - The waiter stops when Claude Code exits. It also stops quietly 23 hours after the last turn end. A session that stays idle for longer than that stops waking up until someone sends it a prompt.
 - The launcher passes exit status 2 on only when the runtime printed a real notice. A runtime that predates `aot wake` fails with status 2 and a usage message, and that must not wake the session.
 

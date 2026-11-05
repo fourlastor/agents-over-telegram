@@ -693,3 +693,27 @@ def test_wake_stops_when_the_host_is_gone(tmp_path):
     process = run_wake('--project-dir', result['project_dir'], '--host-pid', gone.pid, '--duration', '60')
     assert (process.returncode, process.stderr) == (0, '')
     assert time.monotonic() - started < 30
+
+
+def test_waiting_waiter_keeps_waiting_until_replaced(tmp_path):
+    import fcntl
+    import hashlib
+    result = connected(tmp_path)
+    key = hashlib.sha256(f"{result['client_id']}\0abc".encode()).hexdigest()[:24]
+    locks = Path(result['state_dir']) / 'wake-locks'
+    locks.mkdir(mode=0o700, exist_ok=True)
+    # Stand in for an old waiter that is slow to notice the handover.
+    with open(locks / f'{key}.lock', 'a+') as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        waiting = start_wake(result['project_dir'], 'abc')
+        try:
+            time.sleep(2.0)
+            assert waiting.poll() is None
+            # A newer owner replaces the waiting one, which then exits quietly.
+            (locks / f'{key}.owner').write_text('newer')
+            out, err = waiting.communicate(timeout=10)
+            assert (waiting.returncode, out, err) == (0, '', '')
+        finally:
+            if waiting.poll() is None:
+                waiting.kill()
+                waiting.communicate(timeout=10)

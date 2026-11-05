@@ -128,11 +128,6 @@ WAKE_EXIT = 2
 WAKE_DURATION = 82800
 
 
-# A running waiter checks for a newer owner once per cycle: at most one
-# Telegram long poll (10 seconds) plus the inbox interval.
-HANDOFF_SECONDS = 30
-
-
 def _write_owner(path: Path, token: str) -> None:
     tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_CLOEXEC', 0), 0o600)
@@ -205,19 +200,26 @@ def _wake(args) -> int:
     token = f'{os.getpid()}-{time.time_ns()}'
     _write_owner(owner, token)
     fd = os.open(locks / f'{key}.lock', os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600)
-    deadline = time.monotonic() + HANDOFF_SECONDS
+    parent = os.getppid()
+    host = getattr(args, 'host_pid', None)
+
+    def keep_running():
+        # Re-parenting or a missing host process means the host is gone,
+        # so stop instead of polling forever. A newer owner replaces this waiter.
+        return (os.getppid() == parent and (not host or _alive(host))
+                and _read_owner(owner) == token)
+
+    # The running waiter notices the new owner only at the end of its cycle,
+    # which can take longer than a Telegram long poll. Wait without a fixed
+    # limit, so the session is never left without a waiter.
     while True:
-        if _read_owner(owner) != token:
-            # A newer waiter took over before this one started.
+        if not keep_running():
             os.close(fd)
             return 0
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
         except OSError:
-            if time.monotonic() >= deadline:
-                os.close(fd)
-                return 0
             time.sleep(0.2)
     notices = []
 
@@ -225,15 +227,6 @@ def _wake(args) -> int:
         if event.get('type') == 'telegram_messages':
             notices.append(event['notice'])
             raise _Woken()
-
-    parent = os.getppid()
-    host = getattr(args, 'host_pid', None)
-
-    def keep_running():
-        # Re-parenting or a missing host process means the host is gone,
-        # so stop instead of polling forever.
-        return (os.getppid() == parent and (not host or _alive(host))
-                and _read_owner(owner) == token)
 
     try:
         watch(core, client_id, emit, collect=True, duration=args.duration, keep_running=keep_running)
