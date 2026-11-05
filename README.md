@@ -9,7 +9,7 @@ Version 0.8.0 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host
 | Host | Integration | Push delivery |
 |---|---|---|
 | Codex | Codex plugin (skills and hooks) | `relay-desktop` wakes idle desktop chats; hooks reach busy turns |
-| Claude Code | Claude Code plugin (MCP server, monitor, hooks) | A monitor wakes idle sessions; the monitor and hooks reach busy turns |
+| Claude Code | Claude Code plugin (MCP server, hooks, monitor) | A background `asyncRewake` hook wakes idle sessions, also in the desktop app; hooks reach busy turns |
 | Pi | Pi extension and `.pi/mcp.json` | The extension starts a turn or steers a busy agent |
 | Amp | Amp plugin and `.amp/settings.json` | The plugin appends a steering message, opening a thread if needed |
 

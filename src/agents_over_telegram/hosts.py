@@ -118,3 +118,91 @@ def run_hook(args) -> dict | None:
         return hook_answer(args, raw)
     except Exception:
         return None
+
+
+# Exit status 2 from an ``asyncRewake`` hook wakes Claude Code, even an idle session.
+WAKE_EXIT = 2
+# Claude Code stops the hook at its timeout (86400 seconds in claude/hooks.json).
+# End a little earlier so the waiter exits on its own terms.
+WAKE_DURATION = 82800
+
+
+class _Woken(Exception):
+    pass
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def run_wake(args) -> int:
+    """Wait in the background for new deliveries, then wake the host session.
+
+    Claude Code runs this as an ``asyncRewake`` hook. Plugin monitors do not
+    start in every Claude Code session (for example in the desktop app), but
+    this hook does. Exit status 2 wakes the session and stderr becomes the
+    notice; every other outcome exits 0 without output. One waiter runs per
+    client and host session; a later start exits at once.
+    """
+    try:
+        return _wake(args)
+    except Exception:
+        return 0
+
+
+def _wake(args) -> int:
+    import fcntl
+    import hashlib
+    from .cli import LazyTransport, _client, _mode
+    from .core import Core
+    from .onboarding import read_profile
+    from .push import watch
+
+    profile = read_profile(_hook_project(args, {}).resolve())
+    if profile is None:
+        return 0
+    state = Path(profile['state_dir'])
+    if not state.is_dir():
+        return 0
+    fake = profile['mode'] == 'fake'
+    _mode(state, fake)
+    core = Core(state, LazyTransport(state, fake), recover_sends=False)
+    client_id = _client(core, Path(profile['client_file']), profile['client_id'])
+    locks = state / 'wake-locks'
+    locks.mkdir(mode=0o700, exist_ok=True)
+    key = hashlib.sha256(f'{client_id}\0{args.session or ""}'.encode()).hexdigest()[:24]
+    fd = os.open(locks / f'{key}.lock', os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # Another waiter already covers this session.
+        os.close(fd)
+        return 0
+    notices = []
+
+    def emit(event):
+        if event.get('type') == 'telegram_messages':
+            notices.append(event['notice'])
+            raise _Woken()
+
+    parent = os.getppid()
+    host = getattr(args, 'host_pid', None)
+
+    def keep_running():
+        # Re-parenting or a missing host process means the host is gone,
+        # so stop instead of polling forever.
+        return os.getppid() == parent and (not host or _alive(host))
+
+    try:
+        watch(core, client_id, emit, collect=True, duration=args.duration, keep_running=keep_running)
+    except _Woken:
+        sys.stderr.write(notices[0] + '\n')
+        sys.stderr.flush()
+        return WAKE_EXIT
+    return 0

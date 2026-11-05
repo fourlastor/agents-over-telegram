@@ -1,7 +1,10 @@
 {
   "hooks": {
     "SessionStart": [
-      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py\" hook --host claude", "timeout": 10}]}
+      {"hooks": [
+        {"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py\" hook --host claude", "timeout": 10},
+        {"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py\" wake --host claude", "asyncRewake": true, "timeout": 86400}
+      ]}
     ],
     "UserPromptSubmit": [
       {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py\" hook --host claude", "timeout": 10}]}
@@ -10,7 +13,10 @@
       {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py\" hook --host claude", "timeout": 10}]}
     ],
     "Stop": [
-      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py\" hook --host claude", "timeout": 10}]}
+      {"hooks": [
+        {"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py\" hook --host claude", "timeout": 10},
+        {"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py\" wake --host claude", "asyncRewake": true, "timeout": 86400}
+      ]}
     ]
   }
 }

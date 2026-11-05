@@ -32,10 +32,14 @@ def test_hooks_cover_tool_boundaries_prompts_and_turn_end():
     assert manifest['hooks'] == './claude/hooks.json'
     hooks = load('claude/hooks.json')['hooks']
     assert set(hooks) == {'SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'}
-    for entries in hooks.values():
+    hook = {'type': 'command', 'command': f'python3 {LAUNCH} hook --host claude', 'timeout': 10}
+    # asyncRewake wakes an idle session on exit status 2, also where monitors do not start.
+    wake = {'type': 'command', 'command': f'python3 {LAUNCH} wake --host claude', 'asyncRewake': True,
+            'timeout': 86400}
+    for event, entries in hooks.items():
         assert len(entries) == 1 and 'matcher' not in entries[0]
-        (item,) = entries[0]['hooks']
-        assert item == {'type': 'command', 'command': f'python3 {LAUNCH} hook --host claude', 'timeout': 10}
+        expected = [hook, wake] if event in ('SessionStart', 'Stop') else [hook]
+        assert entries[0]['hooks'] == expected
     # Claude hooks live outside hooks/hooks.json so Codex never loads them.
     assert not (ROOT / 'hooks' / 'hooks.json').exists()
 
