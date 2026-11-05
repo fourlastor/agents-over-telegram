@@ -11,14 +11,14 @@ All hosts share the same parts:
 - **The inbox and tools stay the same.** Each project has its own client file and inbox. The agent still reads messages with `messages_poll`, replies with `message_send` and confirms with `messages_ack`.
 - **A notice, never the message.** The push is a fixed notice such as "1 new Telegram message for this agent. From: @alice (human)." It never contains the message text. The agent must poll to read the text, so leases, acknowledgements, pause and sender rules still apply.
 - **One notice per message.** AOT records which deliveries were announced. A watcher and a hook never announce the same message twice.
-- **Collection.** Something must fetch updates from Telegram. In Claude Code, Pi and Amp, a small watcher (`aot watch --collect`) runs while the host is open. It long-polls Telegram and announces new messages. In Codex, the hooks collect at most every 10 seconds, or the `relay-desktop` listener collects.
+- **Collection.** Something must fetch updates from Telegram. In Pi and Amp, a small watcher (`aot watch --collect`) runs while the host is open. In Claude Code, the same work is done by a background hook (`aot wake`) and, in interactive sessions, also by the monitor. It long-polls Telegram and announces new messages. In Codex, the hooks collect at most every 10 seconds, or the `relay-desktop` listener collects.
 - **Per-project runtime.** Setup writes `.aot-runtime.json` next to `.aot-profile.json`. It names the prepared `aot` executable for that project and contains no secret. Host plugins read this file only in the exact project folder. They never search parent folders and never use an `aot` found on `PATH`.
 - **Unrelated projects stay quiet.** In a folder without AOT setup, the plugins do nothing.
 - **No orphan processes.** The watcher stops when the host process that started it exits, even after a forced kill.
 
 | Host | Plugin type | Idle agent | Busy agent | Tools come from |
 |---|---|---|---|---|
-| Claude Code | Claude Code plugin (`.claude-plugin/`) | A plugin **monitor** prints the notice; Claude Code wakes the session | The monitor notice, or a `PostToolUse` hook, arrives after the current tool call; a `Stop` hook catches messages that arrive during the final answer | The plugin's MCP server |
+| Claude Code | Claude Code plugin (`.claude-plugin/`) | A background `asyncRewake` hook (`aot wake`) exits with status 2, and Claude Code wakes the session. In interactive sessions the plugin **monitor** also prints the notice | The monitor notice, or a `PostToolUse` hook, arrives after the current tool call; a `Stop` hook catches messages that arrive during the final answer | The plugin's MCP server |
 | Codex | Codex plugin hooks (`codex/hooks.json`) | The existing `relay-desktop` listener wakes a desktop chat ([details](DIRECT_DISPATCH.md)) | `PostToolUse` and `Stop` hooks add the notice | `.codex/config.toml` written by setup |
 | Pi | Pi extension (`integrations/pi/`) | The extension calls `pi.sendMessage(..., {triggerTurn: true})` and Pi starts a turn | Pi delivers the same message as a steering message after the current tool call | `.pi/mcp.json` written by setup |
 | Amp | Amp plugin (`integrations/amp/`) | The plugin appends the notice to the current thread; it opens a thread if none exists | `appendUserMessage(..., {steer: true})` queues it as a steering message | `.amp/settings.json` written by setup |
@@ -44,13 +44,21 @@ aot setup --label Alpha --project-dir /absolute/path/to/project --host claude
 
    Local scope keeps the plugin out of other projects. In other projects it would stay quiet anyway, but the MCP server would report that the folder is not set up.
 2. Start Claude Code in the project folder and ask "Telegram status".
-3. Keep the session open. The monitor runs only in **interactive** sessions. It also collects Telegram updates for this project, so you do not need a separate listener.
+3. Keep the session open. The plugin collects Telegram updates for this project, so you do not need a separate listener.
+
+**How an idle session wakes up.** The plugin starts `aot wake` as an `asyncRewake` hook when the session starts and each time a turn ends. Claude Code runs this hook in the background. The hook waits for a new delivery and collects from Telegram while it waits. When a message arrives, the hook writes the notice and exits with status 2. Claude Code then wakes the session, even when it is idle, and shows the notice to the model.
+
+- One waiter runs per project client and Claude Code session. Each turn end starts a new waiter, which takes over from the running one when that waiter finishes its current check, usually within 30 seconds.
+- The waiter stops when Claude Code exits. It also stops quietly 23 hours after the last turn end. A session that stays idle for longer than that stops waking up until someone sends it a prompt.
+- The launcher passes exit status 2 on only when the runtime printed a real notice. A runtime that predates `aot wake` fails with status 2 and a usage message, and that must not wake the session.
+
+The plugin also declares a monitor that announces new messages. Claude Code starts plugin monitors only in **interactive** terminal sessions. They do not start in `-p` mode, and they did not start in the Claude Code desktop app. The `asyncRewake` hook does run in the desktop app.
 
 The plugin needs `python3` 3.8 or newer on `PATH` to run the small launcher. The launcher only reads `.aot-runtime.json` and then starts the prepared runtime, which uses its own Python.
 
-Claude Code also offers "channels" for chat bridges. Channels need an allowlisted plugin or the `--dangerously-load-development-channels` flag, and they do not work with `-p`. AOT uses a monitor and hooks instead, which need neither.
+Claude Code also offers "channels" for chat bridges. Channels need an allowlisted plugin or the `--dangerously-load-development-channels` flag, and they do not work with `-p`. AOT uses hooks and a monitor instead, which need neither.
 
-In `-p` (non-interactive) mode, monitors do not start. The hooks still add notices at tool boundaries, but only if something else collects from Telegram, for example `aot watch --collect` or `relay-desktop --collect`.
+In `-p` (non-interactive) mode, Claude Code cancels background hooks when the run ends, so `aot wake` only covers the run itself.
 
 ### Codex
 
@@ -110,8 +118,23 @@ The Claude Code and Amp interactive rows come from a final run of the hosts at t
 - **Codex plugin hooks running in a live session after a marketplace install and a `/hooks` review.** The live check used the same hooks file as a project hook, with trust bypassed (see above). The check in [How the Codex plugin hooks were checked](#how-the-codex-plugin-hooks-were-checked) shows that Codex loads the plugin hooks, but it did not run a session. The Codex desktop app and the interactive Codex CLI were not tested; the check used `codex exec`. The `Stop` continuation was covered only offline, in `tests/test_codex_hooks.py`.
 - **Installation from a marketplace** for Claude Code and Codex, and `pi install` for Pi. The checks loaded the plugin with `--plugin-dir` (Claude Code), `-e` (Pi) and a copy in `.amp/plugins/` (Amp).
 - **The Amp workspace approval flow.** The check passed the same server entry with `--mcp-config` instead of approving `.amp/settings.json`.
-- **The Claude Code desktop app** (Code tab). Its documentation does not say whether plugin monitors run there.
+- **The Claude Code desktop app** installed from the marketplace. The live check (see [below](#claude-code-desktop-app)) copied this branch's hook file and launcher into an installed plugin.
+- **An interactive terminal session with `aot wake`**, where the monitor and the waiter both run. Both use the same claim, so each delivery is still announced once.
 - **Linux** for the new integrations.
+
+### Claude Code desktop app
+
+On 2026-11-05, a live session in the Claude Code desktop app (Code tab, Claude Code 2.1.317) showed:
+
+- **No plugin monitor.** The AOT plugin's MCP server and hooks ran, but `ps` showed no monitor process. The app starts `claude` with `--output-format stream-json --input-format stream-json`.
+- **`asyncRewake` wakes an idle session.** A project hook slept, wrote a line to a log file, printed a message to stderr and exited with status 2. The session was idle at the time. It woke and answered the message without a prompt. This worked with a 90-second wait and with an 11-minute wait under a 20-minute timeout, so a timeout longer than the 600-second default is honored.
+- **A woken turn starts hooks again.** When the test hook ran on `UserPromptSubmit`, each wake started it again and the session woke every 90 seconds. `aot wake` therefore holds a lock per session, and the plugin starts it only on `SessionStart` and `Stop`.
+
+These first checks used a test hook in a scratch project. A later check on the same day used the plugin itself with real Telegram:
+
+- The plugin's `claude/hooks.json` and launcher from this change were copied into the plugin installed in a live desktop session. That session used a runtime built from the same change.
+- The owner tagged the bot in a Telegram group while the session was idle. The waiter exited with the notice within a second, and the session woke.
+- The session polled, replied in the group and acknowledged. When that turn ended, a new waiter started.
 
 ### How the Codex plugin hooks were checked
 

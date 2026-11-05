@@ -532,3 +532,188 @@ def test_rendered_codex_plugin_has_no_dangling_hooks(tmp_path):
     manifest = json.loads((output / '.codex-plugin' / 'plugin.json').read_text())
     assert 'hooks' not in manifest
     assert json.loads((ROOT / '.codex-plugin' / 'plugin.json').read_text())['hooks'] == './codex/hooks.json'
+
+
+# ----------------------------------------------------------------- aot wake
+
+def run_wake(*args, cwd=None, timeout=60):
+    return subprocess.run([str(RUNTIME), 'wake', '--host', 'claude', *map(str, args)], capture_output=True,
+                          text=True, cwd=cwd, env=clean_env(), timeout=timeout, stdin=subprocess.DEVNULL)
+
+
+def test_wake_exits_2_with_a_notice_when_a_message_waits(tmp_path):
+    result = connected(tmp_path)
+    project = result['project_dir']
+    receive(result)
+    woken = run_wake('--project-dir', project, '--duration', '5')
+    assert woken.returncode == 2 and woken.stdout == ''
+    assert woken.stderr.startswith('[Agents over Telegram] 1 new Telegram message for this agent (1 pending in total).')
+    assert 'secret message body' not in woken.stderr
+    # The delivery is announced once; with nothing new the waiter ends quietly.
+    quiet = run_wake('--project-dir', project, '--duration', '0.5')
+    assert (quiet.returncode, quiet.stdout, quiet.stderr) == (0, '', '')
+
+
+def test_wake_collects_from_telegram_while_waiting(tmp_path):
+    result = connected(tmp_path)
+    project = result['project_dir']
+    waiter = subprocess.Popen([str(RUNTIME), 'wake', '--host', 'claude', '--project-dir', project,
+                               '--duration', '30'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              stdin=subprocess.DEVNULL, env=clean_env(), text=True)
+    try:
+        time.sleep(1.0)
+        assert waiter.poll() is None
+        # Only the fake Telegram has the message; nothing else collects it.
+        fake_message(result['state_dir'], 'arrives later')
+        out, err = waiter.communicate(timeout=30)
+    finally:
+        if waiter.poll() is None:
+            waiter.kill()
+    assert waiter.returncode == 2 and out == ''
+    assert '1 new Telegram message' in err and 'arrives later' not in err
+
+
+def start_wake(project, session, duration=60):
+    return subprocess.Popen([str(RUNTIME), 'wake', '--host', 'claude', '--project-dir', project,
+                             '--session', session, '--duration', str(duration)], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=clean_env(), text=True)
+
+
+def test_newest_waiter_takes_over_its_session(tmp_path):
+    result = connected(tmp_path)
+    project = result['project_dir']
+    first = start_wake(project, 'abc')
+    other = start_wake(project, 'other')
+    second = None
+    try:
+        time.sleep(1.0)
+        assert first.poll() is None
+        # A turn end starts a new waiter; the running one hands over and exits quietly.
+        second = start_wake(project, 'abc')
+        out, err = first.communicate(timeout=30)
+        assert (first.returncode, out, err) == (0, '', '')
+        time.sleep(1.0)
+        assert second.poll() is None
+        # Another session keeps its own waiter.
+        assert other.poll() is None
+        # Both sessions share a client; only one waiter may see the next message.
+        other.kill()
+        other.communicate(timeout=10)
+        fake_message(result['state_dir'], 'after handover')
+        out, err = second.communicate(timeout=30)
+        assert second.returncode == 2 and '1 new Telegram message' in err
+    finally:
+        for process in (first, second, other):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
+
+
+def test_wake_is_silent_in_unconfigured_folders_and_on_bad_arguments(tmp_path):
+    plain = tmp_path / 'plain'
+    plain.mkdir()
+    for args in (('--project-dir', plain), ()):
+        process = run_wake(*args, '--duration', '0.5', cwd=plain)
+        assert (process.returncode, process.stdout, process.stderr) == (0, '', '')
+    result = connected(tmp_path)
+    receive(result)
+    invoke('--state-dir', result['state_dir'], '--fake', 'disconnect', '--client-file', result['client_file'])
+    revoked = run_wake('--project-dir', result['project_dir'], '--duration', '0.5')
+    assert (revoked.returncode, revoked.stderr) == (0, '')
+    for argv in (['wake'], ['wake', '--host', 'codex'], ['wake', '--host', 'claude', '--bogus']):
+        process = subprocess.run([sys.executable, '-m', 'agents_over_telegram', *argv], capture_output=True,
+                                 text=True, env=clean_env(), timeout=60, stdin=subprocess.DEVNULL)
+        assert (process.returncode, process.stdout) == (0, '')
+    assert cli._hook_invocation(['--fake', 'wake', '--x'])
+
+
+def wake_stub(tmp_path, body):
+    path = tmp_path / 'bin' / 'aot-wake-stub'
+    path.parent.mkdir(exist_ok=True)
+    path.write_text('#!/bin/sh\n' + body)
+    os.chmod(path, 0o700)
+    return path
+
+
+@needs_system_python
+def test_launcher_wake_passes_project_session_and_host(tmp_path):
+    result = prepare(tmp_path, 'claude')
+    project = Path(result['project_dir'])
+    stub = wake_stub(tmp_path, 'printf "[Agents over Telegram] " >&2\nprintf "%s|" "$PWD" "$@" >&2\nexit 2\n')
+    write_pointer(project, {'version': 1, 'executable': str(stub)})
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    wake = launch(project, 'wake', '--host', 'claude', cwd=elsewhere,
+                  stdin=json.dumps({'hook_event_name': 'Stop', 'session_id': 'ab-12_c'}))
+    assert wake.returncode == 2 and wake.stdout == ''
+    parts = wake.stderr.removeprefix('[Agents over Telegram] ').split('|')
+    assert parts[:6] == [str(project), 'wake', '--host', 'claude', '--project-dir', str(project)]
+    assert parts[6] == '--host-pid' and int(parts[7]) > 1
+    assert parts[8:10] == ['--session', 'ab-12_c']
+    odd = launch(project, 'wake', '--host', 'claude', cwd=elsewhere, stdin=json.dumps({'session_id': '../x y'}))
+    assert '--session' not in odd.stderr
+    plain = tmp_path / 'plain'
+    plain.mkdir()
+    assert launch(plain, 'wake', '--host', 'claude', stdin='{}').returncode == 0
+    broken = subprocess.run([SYSTEM_PYTHON, str(LAUNCHER), 'bogus'], capture_output=True, text=True, timeout=10)
+    assert broken.returncode == 2
+
+
+@needs_system_python
+@pytest.mark.parametrize('body', [
+    # A runtime without `aot wake` fails argument parsing with status 2.
+    'echo "usage: aot [-h] ... invalid choice: wake" >&2\nexit 2\n',
+    'exit 1\n',
+    'echo "[Agents over Telegram] fine" >&2\nexit 0\n',
+])
+def test_launcher_wake_never_wakes_without_a_notice(tmp_path, body):
+    result = prepare(tmp_path, 'claude')
+    project = Path(result['project_dir'])
+    write_pointer(project, {'version': 1, 'executable': str(wake_stub(tmp_path, body))})
+    wake = launch(project, 'wake', '--host', 'claude', stdin='{}')
+    assert (wake.returncode, wake.stdout, wake.stderr) == (0, '', '')
+
+
+@needs_system_python
+def test_launcher_runs_real_wake(tmp_path):
+    result = connected(tmp_path)
+    project = Path(result['project_dir'])
+    receive(result)
+    wake = launch(project, 'wake', '--host', 'claude', '--duration', '5', cwd=tmp_path,
+                  stdin=json.dumps({'hook_event_name': 'SessionStart', 'session_id': 's1'}))
+    assert wake.returncode == 2, wake.stderr
+    assert '1 new Telegram message' in wake.stderr
+
+
+def test_wake_stops_when_the_host_is_gone(tmp_path):
+    result = connected(tmp_path)
+    gone = subprocess.Popen(['true'])
+    gone.wait()
+    started = time.monotonic()
+    process = run_wake('--project-dir', result['project_dir'], '--host-pid', gone.pid, '--duration', '60')
+    assert (process.returncode, process.stderr) == (0, '')
+    assert time.monotonic() - started < 30
+
+
+def test_waiting_waiter_keeps_waiting_until_replaced(tmp_path):
+    import fcntl
+    import hashlib
+    result = connected(tmp_path)
+    key = hashlib.sha256(f"{result['client_id']}\0abc".encode()).hexdigest()[:24]
+    locks = Path(result['state_dir']) / 'wake-locks'
+    locks.mkdir(mode=0o700, exist_ok=True)
+    # Stand in for an old waiter that is slow to notice the handover.
+    with open(locks / f'{key}.lock', 'a+') as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        waiting = start_wake(result['project_dir'], 'abc')
+        try:
+            time.sleep(2.0)
+            assert waiting.poll() is None
+            # A newer owner replaces the waiting one, which then exits quietly.
+            (locks / f'{key}.owner').write_text('newer')
+            out, err = waiting.communicate(timeout=10)
+            assert (waiting.returncode, out, err) == (0, '', '')
+        finally:
+            if waiting.poll() is None:
+                waiting.kill()
+                waiting.communicate(timeout=10)

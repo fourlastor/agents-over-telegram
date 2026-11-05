@@ -6,7 +6,7 @@ client. Setup writes a non-secret ``.aot-runtime.json`` in the exact project
 folder. This launcher reads only that folder. It never searches parent folders,
 reads credentials, or falls back to an ``aot`` found on PATH.
 
-Usage: aot_host_launch.py {mcp,watch,hook} [arguments passed to aot]
+Usage: aot_host_launch.py {mcp,watch,hook,wake} [arguments passed to aot]
 
 It runs with any Python 3.8+ (for example the system python3), because the
 prepared runtime's own interpreter is only known after reading the pointer.
@@ -19,7 +19,9 @@ import time
 
 POINTER = ".aot-runtime.json"
 PROFILE = ".aot-profile.json"
-COMMANDS = ("mcp", "watch", "hook")
+COMMANDS = ("mcp", "watch", "hook", "wake")
+# These run as host hooks: a failure must never block or wake the host.
+HOOK_COMMANDS = ("hook", "wake")
 
 
 MAX_HOOK_INPUT = 1024 * 1024
@@ -39,6 +41,48 @@ def _project(hook_input=None):
         if isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd:
             return cwd
     return os.getcwd()
+
+
+NOTICE = b"[Agents over Telegram] "
+MAX_NOTICE = 4096
+
+
+def _wake(args, project, hook_input):
+    """Run the waiter and pass on exit status 2 only with a real notice.
+
+    Exit status 2 wakes the host session. A runtime that predates ``aot wake``
+    rejects the command with status 2 and a usage message, which would wake the
+    session in a loop. So this launcher stays as the parent and checks the
+    result instead of replacing itself with the runtime.
+    """
+    import subprocess
+    args = args + ["--project-dir", project, "--host-pid", str(os.getppid())]
+    session = _session(hook_input)
+    if session:
+        args += ["--session", session]
+    try:
+        result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE)
+    except OSError:
+        return 0
+    notice = result.stderr[:MAX_NOTICE]
+    if result.returncode != 2 or not notice.startswith(NOTICE):
+        return 0
+    sys.stderr.buffer.write(notice)
+    sys.stderr.flush()
+    return 2
+
+
+def _session(hook_input):
+    """The host session id from hook input, or None if absent or unusual."""
+    try:
+        value = json.loads(hook_input).get("session_id")
+    except (ValueError, AttributeError, UnicodeError, TypeError):
+        return None
+    if isinstance(value, str) and 0 < len(value) <= 128 and all(
+            c.isascii() and (c.isalnum() or c in "-_") for c in value):
+        return value
+    return None
 
 
 def _safe_owned(info):
@@ -98,7 +142,9 @@ def _executable(project):
 
 def main(argv):
     if not argv or argv[0] not in COMMANDS:
-        sys.stderr.write("Usage: aot_host_launch.py {mcp,watch,hook} [arguments]\n")
+        if argv and argv[0] in HOOK_COMMANDS:
+            return 0
+        sys.stderr.write("Usage: aot_host_launch.py {mcp,watch,hook,wake} [arguments]\n")
         return 2
     command = argv[0]
     # Launcher-only option: a host that reports a finished background command as
@@ -106,7 +152,7 @@ def main(argv):
     idle = "--idle-if-unconfigured" in argv[1:]
     rest = [arg for arg in argv[1:] if arg != "--idle-if-unconfigured"]
     hook_input = None
-    if command == "hook":
+    if command in HOOK_COMMANDS:
         hook_input = sys.stdin.buffer.read(MAX_HOOK_INPUT + 1)
         if len(hook_input) > MAX_HOOK_INPUT:
             return 0
@@ -143,16 +189,18 @@ def main(argv):
             sys.stdout.buffer.write(result.stdout)
             sys.stdout.flush()
         return 0
+    if command == "wake":
+        return _wake(args, project, hook_input)
     try:
         os.execv(executable, args)
     except OSError:
         sys.stderr.write("The prepared Agents over Telegram runtime could not be started.\n")
-        return 0 if command == "hook" else 2
+        return 2
 
 
 def _run(argv):
     # A hook must never block the host or print a traceback, whatever goes wrong.
-    hook = bool(argv) and argv[0] == "hook"
+    hook = bool(argv) and argv[0] in HOOK_COMMANDS
     try:
         return main(argv)
     except SystemExit:

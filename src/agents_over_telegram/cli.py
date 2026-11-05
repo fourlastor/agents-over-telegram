@@ -245,6 +245,12 @@ def parser():
     hook.add_argument("--project-dir", type=Path, help="Exact project directory; defaults to the host's project or cwd")
     hook.add_argument("--collect-interval", type=float, default=0,
                       help="Also collect Telegram updates when the last attempt is older than this many seconds (0 = never)")
+    wake = sub.add_parser("wake", help="Claude Code asyncRewake hook: wait for new deliveries, then exit 2 to wake the session")
+    wake.add_argument("--host", choices=["claude"], required=True)
+    wake.add_argument("--project-dir", type=Path, help="Exact project directory; defaults to the host's project or cwd")
+    wake.add_argument("--session", default="", help="Host session id; one waiter runs per client and session")
+    wake.add_argument("--host-pid", type=int, help="Host process; the waiter stops when it is gone")
+    wake.add_argument("--duration", type=float, default=82800, help="Seconds to wait before exiting quietly")
     sub.add_parser("demo", help="Run a standalone temporary two-agent offline demonstration")
     return p
 
@@ -297,6 +303,9 @@ def run(args):
     if args.command == "hook":
         from .hosts import run_hook
         return run_hook(args)
+    if args.command == "wake":
+        from .hosts import run_wake
+        return run_wake(args)
     from .onboarding import resolve_args
     args = resolve_args(args)
     state_dir = private_directory(args.state_dir)
@@ -457,7 +466,7 @@ def _hook_invocation(argv):
         elif arg == "--fake" or arg.startswith("--state-dir="):
             index += 1
         else:
-            return arg == "hook"
+            return arg in ("hook", "wake")
     return False
 
 
@@ -471,6 +480,12 @@ def main():
         if _hook_invocation(sys.argv[1:]):
             return 0
         raise
+    if args.command == "wake":
+        # Only a real wake may exit 2; anything else must stay silent.
+        try:
+            return 2 if run(args) == 2 else 0
+        except BaseException:
+            return 0
     if args.command == "hook":
         # run_hook already turns failures into no output; this also covers a
         # host that closed the pipe before reading the answer.
