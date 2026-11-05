@@ -48,8 +48,8 @@ aot setup --label Alpha --project-dir /absolute/path/to/project --host claude
 
 **How an idle session wakes up.** The plugin starts `aot wake` as an `asyncRewake` hook when the session starts and each time a turn ends. Claude Code runs this hook in the background. The hook waits for a new delivery and collects from Telegram while it waits. When a message arrives, the hook writes the notice and exits with status 2. Claude Code then wakes the session, even when it is idle, and shows the notice to the model.
 
-- One waiter runs per project client and Claude Code session. A second start for the same session exits at once.
-- The waiter stops when Claude Code exits. It also stops quietly after 23 hours; the next turn end starts a new one. A session that stays idle for longer than that stops waking up until someone sends it a prompt.
+- One waiter runs per project client and Claude Code session. Each turn end starts a new waiter, which takes over from the running one within about 30 seconds.
+- The waiter stops when Claude Code exits. It also stops quietly 23 hours after the last turn end. A session that stays idle for longer than that stops waking up until someone sends it a prompt.
 - The launcher passes exit status 2 on only when the runtime printed a real notice. A runtime that predates `aot wake` fails with status 2 and a usage message, and that must not wake the session.
 
 The plugin also declares a monitor that announces new messages. Claude Code starts plugin monitors only in **interactive** terminal sessions. They do not start in `-p` mode, and they did not start in the Claude Code desktop app. The `asyncRewake` hook does run in the desktop app.
@@ -118,7 +118,8 @@ The Claude Code and Amp interactive rows come from a final run of the hosts at t
 - **Codex plugin hooks running in a live session after a marketplace install and a `/hooks` review.** The live check used the same hooks file as a project hook, with trust bypassed (see above). The check in [How the Codex plugin hooks were checked](#how-the-codex-plugin-hooks-were-checked) shows that Codex loads the plugin hooks, but it did not run a session. The Codex desktop app and the interactive Codex CLI were not tested; the check used `codex exec`. The `Stop` continuation was covered only offline, in `tests/test_codex_hooks.py`.
 - **Installation from a marketplace** for Claude Code and Codex, and `pi install` for Pi. The checks loaded the plugin with `--plugin-dir` (Claude Code), `-e` (Pi) and a copy in `.amp/plugins/` (Amp).
 - **The Amp workspace approval flow.** The check passed the same server entry with `--mcp-config` instead of approving `.amp/settings.json`.
-- **The Claude Code desktop app** (Code tab) with the plugin installed. The `asyncRewake` mechanism itself was checked in the desktop app (see [below](#claude-code-desktop-app)), but not with `aot wake` and a real message.
+- **The Claude Code desktop app** installed from the marketplace. The live check (see [below](#claude-code-desktop-app)) copied this branch's hook file and launcher into an installed plugin.
+- **An interactive terminal session with `aot wake`**, where the monitor and the waiter both run. Both use the same claim, so each delivery is still announced once.
 - **Linux** for the new integrations.
 
 ### Claude Code desktop app
@@ -129,7 +130,11 @@ On 2026-11-05, a live session in the Claude Code desktop app (Code tab, Claude C
 - **`asyncRewake` wakes an idle session.** A project hook slept, wrote a line to a log file, printed a message to stderr and exited with status 2. The session was idle at the time. It woke and answered the message without a prompt. This worked with a 90-second wait and with an 11-minute wait under a 20-minute timeout, so a timeout longer than the 600-second default is honored.
 - **A woken turn starts hooks again.** When the test hook ran on `UserPromptSubmit`, each wake started it again and the session woke every 90 seconds. `aot wake` therefore holds a lock per session, and the plugin starts it only on `SessionStart` and `Stop`.
 
-The checks used a test hook in a scratch project, not the plugin's `aot wake` with a Telegram message.
+These first checks used a test hook in a scratch project. A later check on the same day used the plugin itself with real Telegram:
+
+- The plugin's `claude/hooks.json` and launcher from this change were copied into the plugin installed in a live desktop session. That session used a runtime built from the same change.
+- The owner tagged the bot in a Telegram group while the session was idle. The waiter exited with the notice within a second, and the session woke.
+- The session polled, replied in the group and acknowledged. When that turn ended, a new waiter started.
 
 ### How the Codex plugin hooks were checked
 

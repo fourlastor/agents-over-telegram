@@ -573,25 +573,40 @@ def test_wake_collects_from_telegram_while_waiting(tmp_path):
     assert '1 new Telegram message' in err and 'arrives later' not in err
 
 
-def test_wake_runs_once_per_session(tmp_path):
+def start_wake(project, session, duration=60):
+    return subprocess.Popen([str(RUNTIME), 'wake', '--host', 'claude', '--project-dir', project,
+                             '--session', session, '--duration', str(duration)], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=clean_env(), text=True)
+
+
+def test_newest_waiter_takes_over_its_session(tmp_path):
     result = connected(tmp_path)
     project = result['project_dir']
-    first = subprocess.Popen([str(RUNTIME), 'wake', '--host', 'claude', '--project-dir', project,
-                              '--session', 'abc', '--duration', '30'], stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=clean_env(), text=True)
+    first = start_wake(project, 'abc')
+    other = start_wake(project, 'other')
+    second = None
     try:
         time.sleep(1.0)
         assert first.poll() is None
-        started = time.monotonic()
-        duplicate = run_wake('--project-dir', project, '--session', 'abc', '--duration', '30')
-        assert (duplicate.returncode, duplicate.stdout, duplicate.stderr) == (0, '', '')
-        assert time.monotonic() - started < 15
-        # Another session gets its own waiter.
-        other = run_wake('--project-dir', project, '--session', 'other', '--duration', '0.5')
-        assert other.returncode == 0
+        # A turn end starts a new waiter; the running one hands over and exits quietly.
+        second = start_wake(project, 'abc')
+        out, err = first.communicate(timeout=30)
+        assert (first.returncode, out, err) == (0, '', '')
+        time.sleep(1.0)
+        assert second.poll() is None
+        # Another session keeps its own waiter.
+        assert other.poll() is None
+        # Both sessions share a client; only one waiter may see the next message.
+        other.kill()
+        other.communicate(timeout=10)
+        fake_message(result['state_dir'], 'after handover')
+        out, err = second.communicate(timeout=30)
+        assert second.returncode == 2 and '1 new Telegram message' in err
     finally:
-        first.kill()
-        first.communicate(timeout=10)
+        for process in (first, second, other):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
 
 
 def test_wake_is_silent_in_unconfigured_folders_and_on_bad_arguments(tmp_path):

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 from .credentials import CredentialError
 
@@ -127,6 +128,26 @@ WAKE_EXIT = 2
 WAKE_DURATION = 82800
 
 
+# A running waiter checks for a newer owner once per cycle: at most one
+# Telegram long poll (10 seconds) plus the inbox interval.
+HANDOFF_SECONDS = 30
+
+
+def _write_owner(path: Path, token: str) -> None:
+    tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(token)
+    os.replace(tmp, path)
+
+
+def _read_owner(path: Path) -> str | None:
+    try:
+        return path.read_text()[:64]
+    except OSError:
+        return None
+
+
 class _Woken(Exception):
     pass
 
@@ -148,7 +169,7 @@ def run_wake(args) -> int:
     start in every Claude Code session (for example in the desktop app), but
     this hook does. Exit status 2 wakes the session and stderr becomes the
     notice; every other outcome exits 0 without output. One waiter runs per
-    client and host session; a later start exits at once.
+    client and host session; a newer start takes over from the running one.
     """
     try:
         return _wake(args)
@@ -177,13 +198,27 @@ def _wake(args) -> int:
     locks = state / 'wake-locks'
     locks.mkdir(mode=0o700, exist_ok=True)
     key = hashlib.sha256(f'{client_id}\0{args.session or ""}'.encode()).hexdigest()[:24]
+    # The newest waiter for a session takes over, so the time limit counts
+    # from the latest turn end, not from the first waiter. It records itself
+    # as the owner; the running waiter sees that and exits, freeing the lock.
+    owner = locks / f'{key}.owner'
+    token = f'{os.getpid()}-{time.time_ns()}'
+    _write_owner(owner, token)
     fd = os.open(locks / f'{key}.lock', os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        # Another waiter already covers this session.
-        os.close(fd)
-        return 0
+    deadline = time.monotonic() + HANDOFF_SECONDS
+    while True:
+        if _read_owner(owner) != token:
+            # A newer waiter took over before this one started.
+            os.close(fd)
+            return 0
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return 0
+            time.sleep(0.2)
     notices = []
 
     def emit(event):
@@ -197,7 +232,8 @@ def _wake(args) -> int:
     def keep_running():
         # Re-parenting or a missing host process means the host is gone,
         # so stop instead of polling forever.
-        return os.getppid() == parent and (not host or _alive(host))
+        return (os.getppid() == parent and (not host or _alive(host))
+                and _read_owner(owner) == token)
 
     try:
         watch(core, client_id, emit, collect=True, duration=args.duration, keep_running=keep_running)
