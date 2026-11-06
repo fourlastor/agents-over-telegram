@@ -3,7 +3,9 @@
 Socket framing/auth/protocol behavior is covered by test_appserver_client; these
 tests focus on routing, durable handoff semantics and preserved Telegram state.
 """
+import contextlib
 import copy
+import itertools
 import json
 import os
 from pathlib import Path
@@ -11,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -63,6 +66,7 @@ def server(env, monkeypatch):
             return copy.deepcopy(state['start_result'])
 
         def drain(self, timeout=0):
+            time.sleep(.05)
             if state['on_drain']:
                 state['on_drain']()
             events, state['events'] = state['events'], []
@@ -82,11 +86,30 @@ def ready(env):
     return core, store, alpha
 
 
+# Each dispatcher clock reading advances this much virtual time, so a run
+# lasts a fixed number of loop iterations however slow the machine is. With
+# the real clock, a loaded CI runner could spend the whole short budget in
+# one iteration.
+LOOP_CLOCK_STEP = .002
+
+
+@contextlib.contextmanager
+def loop_clock():
+    ticks = itertools.count()
+    real_time = dispatcher.time
+    dispatcher.time = types.SimpleNamespace(monotonic=lambda: next(ticks) * LOOP_CLOCK_STEP)
+    try:
+        yield
+    finally:
+        dispatcher.time = real_time
+
+
 def run(env, **kwargs):
     core, _, _, store, *_ = env
     events = []
-    result = dispatcher.run_dispatcher(core, store, 'unix:///explicit-test.sock',
-                                       duration=.04, interval=.01, emit=events.append, **kwargs)
+    with loop_clock():
+        result = dispatcher.run_dispatcher(core, store, 'unix:///explicit-test.sock',
+                                           duration=.04, interval=.01, emit=events.append, **kwargs)
     return result, events
 
 
@@ -210,8 +233,9 @@ def test_busy_thread_can_accept_second_signal_in_same_turn(env, server):
         if event['type'] == 'dispatcher_receipt' and len(starts(server)) == 1:
             append(transport, 'second arrival while target busy')
             core.collect()
-    result = dispatcher.run_dispatcher(core, store, 'unix:///explicit-test.sock',
-                                       duration=.05, interval=.01, emit=emit)
+    with loop_clock():
+        result = dispatcher.run_dispatcher(core, store, 'unix:///explicit-test.sock',
+                                           duration=.05, interval=.01, emit=emit)
     assert result['accepted'] == 2
     receipts = [event for event in events if event['type'] == 'dispatcher_receipt']
     assert [event['turn_id'] for event in receipts] == [TURN_ID, TURN_ID]
@@ -245,8 +269,9 @@ def test_initial_endpoint_readiness_retry_before_any_claim(env, server):
     _, store, alpha = ready(env)
     server['connect_failures'] = [AppServerError('appserver_socket_unavailable')]
     events = []
-    result = dispatcher.run_dispatcher(env[0], store, 'unix:///explicit-test.sock',
-                                       duration=.2, interval=.01, emit=events.append)
+    with loop_clock():
+        result = dispatcher.run_dispatcher(env[0], store, 'unix:///explicit-test.sock',
+                                           duration=.2, interval=.01, emit=events.append)
     assert result['accepted'] == 1
     assert len(server['connections']) == 2
     assert all(connection.closed for connection in server['connections'])
