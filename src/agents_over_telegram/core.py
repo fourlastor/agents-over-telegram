@@ -55,6 +55,24 @@ def _bounded(value: Any, maximum: int = 128) -> str:
 
 _MEDIA_KINDS = ('document', 'photo', 'video', 'audio', 'voice', 'animation')
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # The Bot API getFile limit.
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # The Bot API sendPhoto size limit.
+MAX_IMAGE_CAPTION = 1024  # The Bot API caption length limit, label header included.
+
+def _image_type(data):
+    """Classify image bytes as (send_as, extension, mime), or (None, None, None).
+
+    PNG, JPEG and WebP are publishable as photos. Telegram does not take a GIF
+    as a photo, so a GIF is published as a document.
+    """
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'photo', 'png', 'image/png'
+    if data.startswith(b'\xff\xd8\xff'):
+        return 'photo', 'jpg', 'image/jpeg'
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'photo', 'webp', 'image/webp'
+    if data[:6] in (b'GIF87a', b'GIF89a'):
+        return 'document', 'gif', 'image/gif'
+    return None, None, None
 
 
 def _attachment(kind, media):
@@ -203,7 +221,7 @@ class Core:
                     recipient TEXT, chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
                     idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL,
                     text TEXT NOT NULL, reply_to INTEGER, conversation_id TEXT NOT NULL,
-                    status TEXT NOT NULL, error TEXT, message_id INTEGER,
+                    status TEXT NOT NULL, error TEXT, message_id INTEGER, image TEXT,
                     created REAL NOT NULL, updated REAL NOT NULL, due REAL NOT NULL,
                     UNIQUE(client_id,idempotency_key)
                 );
@@ -279,6 +297,9 @@ class Core:
                 if column not in limit_columns:
                     # NULL means the built-in default.
                     db.execute(f'ALTER TABLE exchange_limits ADD COLUMN {column} INTEGER')
+            # An image send stores a copy of the bytes for retries; NULL is text-only.
+            if 'image' not in {row['name'] for row in db.execute('PRAGMA table_info(outbox)')}:
+                db.execute('ALTER TABLE outbox ADD COLUMN image TEXT')
             db.execute('INSERT OR IGNORE INTO history_keys(singleton,secret) VALUES(1,?)', (secrets.token_bytes(32),))
             db.execute('CREATE INDEX IF NOT EXISTS inbox_history ON inbox(client_id,COALESCE(event_at,created) DESC)')
             db.execute('CREATE INDEX IF NOT EXISTS outbox_history ON outbox(client_id,created DESC)')
@@ -1183,10 +1204,14 @@ class Core:
     def disconnect(self, client_id):
         with self._tx() as db:
             self._client(db, client_id)
+            images = [row['image'] for row in db.execute(
+                'SELECT image FROM outbox WHERE status=\'queued\' AND (client_id=? OR recipient=?) AND image IS NOT NULL', (client_id, client_id))]
+            db.execute('UPDATE outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND (client_id=? OR recipient=?)', (self.clock(), client_id, client_id))
             db.execute('UPDATE bindings SET connected=0 WHERE client_id=?', (client_id,))
             db.execute('UPDATE clients SET active=0 WHERE id=?', (client_id,))
             db.execute('UPDATE pairings SET consumed=1 WHERE client_id=?', (client_id,))
-            db.execute('UPDATE outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND (client_id=? OR recipient=?)', (self.clock(), client_id, client_id))
+        for image in images:
+            self._delete_outbox_image(image)
         return {'client_id': client_id, 'connected': False, 'revoked': True, 'queued_work_preserved': True}
 
     def _conversation_send_limit(self, db, conversation_id, now, limits):
@@ -1324,7 +1349,70 @@ class Core:
             return row['conversation_id']
         return 'local:' + client_id
 
-    def send(self, client_id, text, idempotency_key, recipient=None, reply_to=None, conversation_id=None):
+    def _read_image(self, image_path):
+        """Validate one agent-provided local image and load its bytes.
+
+        The check runs before any state is written, so a rejected image never
+        reaches the outbox or Telegram. The file is opened once with
+        O_NONBLOCK and classified through fstat on that descriptor: a path
+        swapped for a FIFO or device between lookup and open cannot block the
+        call, and only a regular file is ever read.
+        """
+        if (not isinstance(image_path, str) or not image_path or len(image_path) > 4096
+                or '\x00' in image_path or not os.path.isabs(image_path)):
+            raise CoreError('invalid_image')
+        try:
+            # O_NONBLOCK never affects regular-file reads; it only stops a
+            # swapped-in FIFO or device from blocking this open forever.
+            fd = os.open(image_path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            raise CoreError('invalid_image') from None
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise CoreError('invalid_image')
+            if info.st_size > MAX_IMAGE_BYTES:
+                raise CoreError('image_too_large')
+            with os.fdopen(fd, 'rb', closefd=False) as handle:
+                data = handle.read(MAX_IMAGE_BYTES + 1)
+        except OSError:
+            raise CoreError('invalid_image') from None
+        finally:
+            os.close(fd)
+        if len(data) > MAX_IMAGE_BYTES:
+            raise CoreError('image_too_large')
+        send_as, extension, mime = _image_type(data)
+        if send_as is None:
+            raise CoreError('unsupported_image_type')
+        return {'data': data, 'sha256': hashlib.sha256(data).hexdigest(),
+                'send_as': send_as, 'extension': extension, 'mime': mime}
+
+    def _store_outbox_image(self, name, data):
+        """Persist the retry copy of an image under the private state directory."""
+        try:
+            directory = private_directory(self.state_dir / 'outbox-images')
+        except CredentialError:
+            raise CoreError('insecure_state_directory') from None
+        partial = directory / f'.{name}.{secrets.token_hex(8)}.partial'
+        fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, 'wb') as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(partial, directory / name)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                partial.unlink()
+            raise
+
+    def _delete_outbox_image(self, name):
+        # Terminal records can never be sent again; drop their retry copy.
+        if isinstance(name, str) and re.fullmatch(r'out_[0-9a-f]{24}\.(png|jpg|webp|gif)', name):
+            with contextlib.suppress(OSError):
+                (self.state_dir / 'outbox-images' / name).unlink()
+
+    def send(self, client_id, text, idempotency_key, recipient=None, reply_to=None, conversation_id=None, image_path=None):
         if not isinstance(text, str) or not 1 <= len(text) <= 3500:
             raise CoreError('invalid_text')
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128:
@@ -1333,7 +1421,15 @@ class Core:
             raise CoreError('invalid_reply')
         if recipient is not None and (not isinstance(recipient, str) or len(recipient) > 100):
             raise CoreError('invalid_peer')
-        request_hash = _digest(json.dumps([text, recipient, reply_to, conversation_id]))
+        image = self._read_image(image_path) if image_path is not None else None
+        if image is not None and len(text) > MAX_IMAGE_CAPTION:
+            # The label header consumes more; the exact check runs before queuing.
+            raise CoreError('caption_too_long')
+        # Text-only requests keep their historical hash, so old keys still match.
+        parts = [text, recipient, reply_to, conversation_id]
+        if image is not None:
+            parts.append(image['sha256'])
+        request_hash = _digest(json.dumps(parts))
         now = self.clock()
         with self._tx() as db:
             client = self._client(db, client_id)
@@ -1393,11 +1489,23 @@ class Core:
                 peer = db.execute('SELECT * FROM peer_commands WHERE client_id=?', (client_id,)).fetchone() if recipient is None else None
                 if peer:
                     publication = f'/{peer["command"]}@{peer["bot_username"]}\n' + publication
-                db.execute('INSERT INTO outbox(id,client_id,recipient,chat_id,thread_id,idempotency_key,request_hash,text,reply_to,conversation_id,status,created,updated,due) VALUES(?,?,?,?,?,?,?,?,?,?,\'queued\',?,?,?)', (outbox_id, client_id, recipient, binding['chat_id'], binding['thread_id'], idempotency_key, request_hash, publication, reply_to, conversation, now, now, now))
-                db.execute('UPDATE conversations SET send_count=send_count+1 WHERE id=?', (conversation,))
-                if recipient:
-                    payload = {'origin': 'broker', 'kind': 'message', 'text': text, 'logical_sender': {'client_id': client_id, 'label': client['label']}, 'actual_bot': {'id': account['bot_id'], 'username': account['username']}, 'chat_id': binding['chat_id'], 'thread_id': binding['thread_id'] or None}
-                    self._enqueue(db, recipient, 'broker:' + outbox_id, payload, conversation, now, outbox_id)
+                if image is not None and len(publication) > MAX_IMAGE_CAPTION:
+                    raise CoreError('caption_too_long')
+                stored_image = outbox_id + '.' + image['extension'] if image is not None else None
+                if stored_image is not None:
+                    # The retry copy is written before the row exists, so a queued
+                    # or unknown record never depends on the agent's source file.
+                    self._store_outbox_image(stored_image, image['data'])
+                try:
+                    db.execute('INSERT INTO outbox(id,client_id,recipient,chat_id,thread_id,idempotency_key,request_hash,text,reply_to,conversation_id,status,image,created,updated,due) VALUES(?,?,?,?,?,?,?,?,?,?,\'queued\',?,?,?,?)', (outbox_id, client_id, recipient, binding['chat_id'], binding['thread_id'], idempotency_key, request_hash, publication, reply_to, conversation, stored_image, now, now, now))
+                    db.execute('UPDATE conversations SET send_count=send_count+1 WHERE id=?', (conversation,))
+                    if recipient:
+                        payload = {'origin': 'broker', 'kind': 'message', 'text': text, 'logical_sender': {'client_id': client_id, 'label': client['label']}, 'actual_bot': {'id': account['bot_id'], 'username': account['username']}, 'chat_id': binding['chat_id'], 'thread_id': binding['thread_id'] or None}
+                        self._enqueue(db, recipient, 'broker:' + outbox_id, payload, conversation, now, outbox_id)
+                except BaseException:
+                    if stored_image is not None:
+                        self._delete_outbox_image(stored_image)
+                    raise
         self.flush(client_id=client_id, limit=20)
         return self.delivery_status(client_id, outbox_id)
 
@@ -1454,31 +1562,55 @@ class Core:
                         db.execute('INSERT INTO rate_limits(scope,next_at) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET next_at=excluded.next_at', (scope, now + interval))
                     db.execute('UPDATE outbox SET status=\'sending\',updated=? WHERE id=?', (now, row['id']))
                 attempted += 1
-                try:
-                    response = self.transport.send_message(chat_id=row['chat_id'], text=row['text'], thread_id=row['thread_id'] or None, reply_to=row['reply_to'])
-                    if not isinstance(response, dict) or not _integer(response.get('message_id')) or response['message_id'] <= 0:
-                        raise UnknownSend()
-                except UnknownSend:
-                    status, error, message_id, due = 'unknown', 'uncertain_send', None, self.clock()
-                except TransportError as exc:
-                    if str(exc.code) in ('429', 'rate_limited', 'telegram_429'):
-                        wait = exc.retry_after if isinstance(exc.retry_after, (int, float)) and not isinstance(exc.retry_after, bool) and math.isfinite(exc.retry_after) and exc.retry_after > 0 else 60
-                        due = self.clock() + min(wait, 86400)
-                        status, error, message_id = 'queued', 'rate_limited', None
-                    elif isinstance(exc.code, int) and 400 <= exc.code < 500:
-                        status, error, message_id, due = 'rejected', 'telegram_rejected', None, self.clock()
+                media = None
+                local_reject = None
+                if row['image']:
+                    try:
+                        data = (self.state_dir / 'outbox-images' / row['image']).read_bytes()
+                        send_as, _extension, mime = _image_type(data)
+                        if send_as is None:
+                            raise ValueError('corrupt copy')
+                    except (OSError, ValueError):
+                        # Our own durable copy is gone or unreadable, so this
+                        # attempt certainly never reached Telegram.
+                        local_reject = 'outbox_image_unavailable'
                     else:
-                        status, error, message_id, due = 'unknown', 'transport_failure', None, self.clock()
-                except Exception:
-                    # An unexpected adapter failure after entering send may follow
-                    # remote acceptance. Never make a speculative automatic retry.
-                    status, error, message_id, due = 'unknown', 'transport_failure', None, self.clock()
+                        media = (data, send_as, mime)
+                if local_reject is not None:
+                    status, error, message_id, due = 'rejected', local_reject, None, self.clock()
                 else:
-                    status, error, message_id, due = 'sent', None, response['message_id'], self.clock()
+                    try:
+                        if media is None:
+                            response = self.transport.send_message(chat_id=row['chat_id'], text=row['text'], thread_id=row['thread_id'] or None, reply_to=row['reply_to'])
+                        else:
+                            sender = self.transport.send_photo if media[1] == 'photo' else self.transport.send_document
+                            response = sender(chat_id=row['chat_id'], data=media[0], caption=row['text'], filename=row['image'], mime=media[2], thread_id=row['thread_id'] or None, reply_to=row['reply_to'])
+                        if not isinstance(response, dict) or not _integer(response.get('message_id')) or response['message_id'] <= 0:
+                            raise UnknownSend()
+                    except UnknownSend:
+                        status, error, message_id, due = 'unknown', 'uncertain_send', None, self.clock()
+                    except TransportError as exc:
+                        if str(exc.code) in ('429', 'rate_limited', 'telegram_429'):
+                            wait = exc.retry_after if isinstance(exc.retry_after, (int, float)) and not isinstance(exc.retry_after, bool) and math.isfinite(exc.retry_after) and exc.retry_after > 0 else 60
+                            due = self.clock() + min(wait, 86400)
+                            status, error, message_id = 'queued', 'rate_limited', None
+                        elif isinstance(exc.code, int) and 400 <= exc.code < 500:
+                            status, error, message_id, due = 'rejected', 'telegram_rejected', None, self.clock()
+                        else:
+                            status, error, message_id, due = 'unknown', 'transport_failure', None, self.clock()
+                    except Exception:
+                        # An unexpected adapter failure after entering send may follow
+                        # remote acceptance. Never make a speculative automatic retry.
+                        status, error, message_id, due = 'unknown', 'transport_failure', None, self.clock()
+                    else:
+                        status, error, message_id, due = 'sent', None, response['message_id'], self.clock()
                 with self._tx() as db:
                     db.execute('UPDATE outbox SET status=?,error=?,message_id=?,due=?,updated=? WHERE id=?', (status, error, message_id, due, self.clock(), row['id']))
                     if error == 'rate_limited':
                         db.execute('INSERT INTO rate_limits(scope,next_at) VALUES(\'bot\',?) ON CONFLICT(scope) DO UPDATE SET next_at=max(next_at,excluded.next_at)', (due,))
+                if status in ('sent', 'rejected') and row['image']:
+                    # An unknown record keeps its copy: an operator retry sends it again.
+                    self._delete_outbox_image(row['image'])
             return {'status': 'ok', 'attempted': attempted}
 
     def resolve_unknown(self, outbox_id, resolution, message_id=None):
@@ -1501,4 +1633,8 @@ class Core:
                 status = {'accepted': 'sent', 'cancel': 'rejected', 'retry': 'queued'}[resolution]
                 db.execute('UPDATE outbox SET status=?,error=?,message_id=?,due=?,updated=? WHERE id=?', (status, None if resolution == 'accepted' else 'operator_' + resolution, message_id if resolution == 'accepted' else None, self.clock(), self.clock(), outbox_id))
                 result = db.execute('SELECT * FROM outbox WHERE id=?', (outbox_id,)).fetchone()
-                return self._outbox_status(result)
+                resolved = self._outbox_status(result)
+            if resolution in ('accepted', 'cancel') and row['image']:
+                # Terminal: no later attempt can need the copy again. A retry keeps it.
+                self._delete_outbox_image(row['image'])
+            return resolved

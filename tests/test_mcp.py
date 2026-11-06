@@ -131,7 +131,10 @@ async def test_sdk_dispatches_tools_and_marks_incoming_text_untrusted():
         assert payload(ack)["result"]["acknowledged"] == ["delivery-1"]
         send = await session.call_tool("message_send", {"text": "Hello", "idempotency_key": "intent-1", "recipient": "client-b", "reply_to": 42, "conversation_id": "conversation-1"})
         assert payload(send)["result"]["state"] == "sent"
-        assert core.calls[-1] == ("send", "client-a", "Hello", "intent-1", {"recipient": "client-b", "reply_to": 42, "conversation_id": "conversation-1"})
+        assert core.calls[-1] == ("send", "client-a", "Hello", "intent-1", {"recipient": "client-b", "reply_to": 42, "conversation_id": "conversation-1", "image_path": None})
+        send_image = await session.call_tool("message_send", {"text": "Shot", "idempotency_key": "intent-2", "image_path": "/tmp/shot.png"})
+        assert payload(send_image)["result"]["outbox_id"] == "outbox-1"
+        assert core.calls[-1] == ("send", "client-a", "Shot", "intent-2", {"recipient": None, "reply_to": None, "conversation_id": None, "image_path": "/tmp/shot.png"})
         status = await session.call_tool("delivery_status", {"outbox_id": "outbox-1"})
         assert payload(status)["result"]["outbox_id"] == "outbox-1"
         pause = await session.call_tool("connection_pause", {})
@@ -156,6 +159,8 @@ async def test_sdk_dispatches_tools_and_marks_incoming_text_untrusted():
     ("message_send", {"text": "", "idempotency_key": "key"}),
     ("message_send", {"text": "a" * 3501, "idempotency_key": "key"}),
     ("message_send", {"text": "hello", "idempotency_key": "key", "recipient": None}),
+    ("message_send", {"text": "hello", "idempotency_key": "key", "image_path": "relative/shot.png"}),
+    ("message_send", {"text": "hello", "idempotency_key": "key", "image_path": "/" + "x" * 4097}),
     ("messages_ack", {"delivery_ids": ["same", "same"], "lease_token": "lease"}),
     ("messages_ack", {"delivery_ids": [], "lease_token": "lease"}),
     ("connection_pause", {"paused": "fake-secret-MUST-NOT-LEAK"}),

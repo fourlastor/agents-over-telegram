@@ -1,5 +1,6 @@
 import io
 import json
+import hashlib
 import os
 import urllib.error
 
@@ -92,6 +93,48 @@ def test_send_shape_plain_text_no_paid_features():
     assert result == {"message_id": 7}
     assert json.loads(opener.requests[0].data) == {"chat_id": -100, "text": "[Alpha] hello", "message_thread_id": 42,
         "reply_parameters": {"message_id": 9}, "link_preview_options": {"is_disabled": True}}
+
+
+@pytest.mark.parametrize("method,field,filename,mime", [
+    ("send_photo", "photo", "shot.png", "image/png"),
+    ("send_document", "document", "shot.gif", "image/gif"),
+])
+def test_send_media_uploads_multipart(method, field, filename, mime):
+    opener = Opener(b'{"ok":true,"result":{"message_id":9}}')
+    transport = TelegramTransport(SECRET, opener=opener)
+    data = b"\x89PNG\r\n\x1a\nbody-bytes"
+    result = getattr(transport, method)(-100, data, caption="cap", filename=filename,
+                                        mime=mime, thread_id=4, reply_to=2)
+    assert result == {"message_id": 9}
+    request = opener.requests[0]
+    assert request.headers["Content-type"].startswith("multipart/form-data; boundary=----aot")
+    body = request.data
+    assert b'name="chat_id"\r\n\r\n-100\r\n' in body
+    assert b'name="caption"\r\n\r\ncap\r\n' in body
+    assert b'name="message_thread_id"\r\n\r\n4\r\n' in body
+    assert b'name="reply_parameters"\r\n\r\n{"message_id": 2}\r\n' in body
+    assert f'Content-Disposition: form-data; name="{field}"; filename="{filename}"'.encode() in body
+    assert f"Content-Type: {mime}\r\n\r\n".encode() in body
+    assert data in body
+    assert SECRET not in body.decode("latin-1")
+
+
+def test_send_media_malformed_response_is_unknown():
+    with pytest.raises(UnknownSend):
+        TelegramTransport(SECRET, opener=Opener(b'{"ok":true,"result":{}}')).send_photo(-100, b"\x89PNG\r\n\x1a\n")
+
+
+def test_fakes_record_media_and_outcomes():
+    fake = FakeTransport(outcomes=["unknown"])
+    with pytest.raises(UnknownSend):
+        fake.send_photo(-100, b"\x89PNG\r\n\x1a\n", caption="cap", filename="shot.png",
+                        mime="image/png", thread_id=3, reply_to=5)
+    assert len(fake.sent) == 1
+    media = fake.sent[0]["media"]
+    assert media["kind"] == "photo" and media["data"] == b"\x89PNG\r\n\x1a\n"
+    assert hashlib.sha256(b"\x89PNG\r\n\x1a\n").hexdigest() == media["sha256"]
+    fake.send_document(-100, b"GIF89a", filename="loop.gif", mime="image/gif")
+    assert fake.sent[1]["media"]["kind"] == "document"
 
 
 def test_fake_no_echo_and_unknown_acceptance():
