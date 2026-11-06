@@ -15,13 +15,19 @@ from .credentials import CredentialError, private_directory, read_private_json, 
 from .transport import FakeTransport, TelegramTransport, TransportError, make_transport
 
 
+# Every Telegram call Core makes. A method missing here fails as AttributeError,
+# which Core records as an unknown send without ever reaching Telegram.
+LAZY_METHODS = frozenset({"get_me", "get_webhook_info", "get_updates", "send_message", "send_photo",
+                          "send_document", "get_chat_member", "download_file"})
+
+
 class LazyTransport:
     def __init__(self, state_dir, fake):
         self.state_dir, self.fake = state_dir, fake
         self.transport = None
 
     def __getattr__(self, name):
-        if name not in {"get_me", "get_webhook_info", "get_updates", "send_message", "get_chat_member", "download_file"}:
+        if name not in LAZY_METHODS:
             raise AttributeError(name)
         if self.transport is None:
             self.transport = make_transport(self.state_dir, fake=self.fake)
