@@ -1353,24 +1353,32 @@ class Core:
         """Validate one agent-provided local image and load its bytes.
 
         The check runs before any state is written, so a rejected image never
-        reaches the outbox or Telegram.
+        reaches the outbox or Telegram. The file is opened once with
+        O_NONBLOCK and classified through fstat on that descriptor: a path
+        swapped for a FIFO or device between lookup and open cannot block the
+        call, and only a regular file is ever read.
         """
         if (not isinstance(image_path, str) or not image_path or len(image_path) > 4096
                 or '\x00' in image_path or not os.path.isabs(image_path)):
             raise CoreError('invalid_image')
         try:
-            info = os.stat(image_path)
+            # O_NONBLOCK never affects regular-file reads; it only stops a
+            # swapped-in FIFO or device from blocking this open forever.
+            fd = os.open(image_path, os.O_RDONLY | os.O_NONBLOCK)
         except OSError:
             raise CoreError('invalid_image') from None
-        if not stat.S_ISREG(info.st_mode):
-            raise CoreError('invalid_image')
-        if info.st_size > MAX_IMAGE_BYTES:
-            raise CoreError('image_too_large')
         try:
-            with open(image_path, 'rb') as handle:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise CoreError('invalid_image')
+            if info.st_size > MAX_IMAGE_BYTES:
+                raise CoreError('image_too_large')
+            with os.fdopen(fd, 'rb', closefd=False) as handle:
                 data = handle.read(MAX_IMAGE_BYTES + 1)
         except OSError:
             raise CoreError('invalid_image') from None
+        finally:
+            os.close(fd)
         if len(data) > MAX_IMAGE_BYTES:
             raise CoreError('image_too_large')
         send_as, extension, mime = _image_type(data)

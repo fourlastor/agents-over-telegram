@@ -2,6 +2,7 @@
 import json
 import os
 import sqlite3
+import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -575,6 +576,76 @@ def test_image_missing_retry_copy_is_rejected_without_a_network_call(env, tmp_pa
     assert status['status'] == 'rejected'
     assert status['error'] == 'outbox_image_unavailable'
     assert transport.sent == []
+
+
+def test_image_send_to_authorized_peer_publishes_photo_with_caption_only_delivery(env, tmp_path):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    b, _ = bind(core, transport, 'Beta', -200)
+    core.grant_peer(a, b)
+    result = core.send(a, 'peer screenshot', 'peer-shot-1', recipient=b, image_path=image_file(tmp_path, PNG))
+    assert result['status'] == 'sent'
+    message = transport.sent[0]
+    assert message['chat']['id'] == -200
+    assert message['media']['kind'] == 'photo'
+    assert message['media']['data'] == PNG
+    assert message['caption'].startswith('[Agent: Alpha | shared bot @aot_test_bot]')
+    # The peer agent's broker delivery carries the caption text only: no image
+    # reference it can fetch. Pinned until peer image forwarding is designed.
+    delivery = core.poll(b)['deliveries'][0]
+    assert delivery['origin'] == 'broker'
+    assert delivery['text'] == 'peer screenshot'
+    assert 'attachments' not in delivery
+    assert delivery['publication']['status'] == 'sent'
+
+
+def test_image_read_survives_a_fifo_swapped_in_after_stat(env, tmp_path, monkeypatch):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    target = tmp_path / 'race.png'
+    target.write_bytes(PNG)
+    real_open, real_stat = os.open, os.stat
+    swapped = False
+
+    def swap_for_fifo():
+        # Swap the regular file for a FIFO once, the worst case at open time:
+        # the lookup already saw a regular image, and the path changed under
+        # it. One-shot so existence checks cannot re-enter the patched calls.
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            target.unlink()
+            os.mkfifo(target)
+
+    def racing_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if os.fspath(path) == str(target):
+            swap_for_fifo()
+        return result
+
+    def racing_open(path, flags, *args, **kwargs):
+        if os.fspath(path) == str(target):
+            swap_for_fifo()
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'stat', racing_stat)
+    monkeypatch.setattr(os, 'open', racing_open)
+    errors = []
+
+    def attempt():
+        try:
+            core.send(a, 'racy', 'race-1', image_path=str(target))
+        except CoreError as error:
+            errors.append(error.code)
+
+    worker = threading.Thread(target=attempt)
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive(), 'a FIFO swapped in before the read must not block the send'
+    assert errors == ['invalid_image']
+    assert transport.sent == []
+    assert stored_images(core) == []
+    assert stat.S_ISFIFO(real_stat(target).st_mode)  # the swap really happened
 
 
 @pytest.mark.parametrize('outcome,status,error', [('reject', 'rejected', 'telegram_rejected'), ('unknown', 'unknown', 'uncertain_send'), (TransportError('FAKE_SECRET'), 'unknown', 'transport_failure'), (RuntimeError('FAKE_SECRET'), 'unknown', 'transport_failure')])
