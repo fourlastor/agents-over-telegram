@@ -131,9 +131,9 @@ def _entry(state, client, fake):
 # The tools that handle pushed Telegram work: read the inbox, reply in the bound
 # topic, and acknowledge. Codex's automatic approval reviewer rejects these calls
 # when a hook notice (not the user's typed prompt) asks for them, so setup
-# approves exactly these three for this project's scoped server. Pause,
+# approves exactly these four for this project's scoped server. Pause,
 # disconnect and connection changes still follow the normal approval policy.
-CODEX_APPROVED_TOOLS = ('messages_poll', 'message_send', 'messages_ack')
+CODEX_APPROVED_TOOLS = ('messages_poll', 'message_send', 'message_react', 'messages_ack')
 
 
 def _approvals_toml():
@@ -399,6 +399,13 @@ def human_status(value):
     senders = value.get('allowed_senders', [])
     lines.append('Allowed senders: ' + (', '.join(str(row['sender_id']) + (' (bot)' if row.get('is_bot') else '') for row in senders) or 'none'))
     lines.append(f"Pending: {value.get('pending_messages', 0)} | outgoing: " + json.dumps(value.get('outbox', {}), sort_keys=True))
+    reactions = value.get('reactions') or {}
+    receive = reactions.get('receive') or {}
+    if receive.get('bot_admin') is False:
+        lines.append('Reactions: not received (the bot is not an administrator here); ask the owner to promote it.')
+    else:
+        lines.append(f"Reactions: wake {reactions.get('wake', 'own_messages')}"
+                     + ('' if receive.get('bot_admin') else '; admin status checked on next collection'))
     lines.append('Delivery: on demand, or automatically through a running listener.')
     lines.append('Listener: not checked by connection status.')
     lines.append('History: captured context from the last 24 hours.')

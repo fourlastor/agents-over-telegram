@@ -127,6 +127,51 @@ def _addressed(msg, text, account):
     return replied.get('id') == account['bot_id']
 
 
+def reaction_emoji(value):
+    """Normalize one agent-provided emoji to Telegram's documented form.
+
+    Telegram's bot reaction list uses bare emoji without variation selectors,
+    so they are stripped before the exact allowlist comparison. None or '' means
+    "remove the bot's reaction". Anything else that is not allowlisted raises.
+    """
+    if value is None:
+        return ''
+    if not isinstance(value, str) or len(value) > 32:
+        raise CoreError('invalid_reaction_emoji')
+    normalized = value.replace('\ufe0f', '')
+    if value and not normalized:
+        # Input that was only variation selectors is not a removal request.
+        raise CoreError('invalid_reaction_emoji')
+    if normalized and normalized not in Core.REACTION_EMOJI:
+        raise CoreError('invalid_reaction_emoji')
+    return normalized
+
+
+def reaction_types(value):
+    """Map a Telegram reaction list to bounded markers, or None when malformed.
+
+    Emoji reactions keep their emoji. Custom-emoji and paid reactions, which a
+    bot cannot send, are summarized as fixed markers without opaque ids.
+    """
+    if not isinstance(value, list) or len(value) > 64:
+        return None
+    mapped = []
+    for item in value:
+        kind = _mapping(item).get('type')
+        if kind == 'emoji':
+            emoji = _mapping(item).get('emoji')
+            if not isinstance(emoji, str) or not 1 <= len(emoji) <= 32:
+                return None
+            mapped.append(emoji)
+        elif kind == 'custom_emoji':
+            mapped.append('custom_emoji')
+        elif kind == 'paid':
+            mapped.append('paid')
+        else:
+            return None
+    return mapped[:Core.REACTION_LIST_MAX], len(mapped) > Core.REACTION_LIST_MAX
+
+
 class Core:
     PAIR_TTL = 600
     # Defaults for the rolling send limits. The operator can change them for
@@ -147,6 +192,25 @@ class Core:
     CONVERSATION_INTERVAL = 1.0
     HISTORY_WINDOW = 86400
     HISTORY_CURSOR_TTL = 900
+    # Reactions never post a message, so they carry their own rolling limit,
+    # separate from every message send limit. One reaction per message is the
+    # Bot API's bot limit; only standard emoji reactions are sent.
+    REACTION_SEND_LIMIT = 30
+    REACTION_WINDOW = 3600
+    REACTION_INTERVAL = 1.0
+    REACTION_LIST_MAX = 16
+    REACTION_WAKE_MODES = ('own_messages', 'all', 'none')
+
+    # The exact standard reaction emoji Telegram documents for bots
+    # (core.telegram.org/bots/api#reactiontypeemoji). Telegram compares the bare
+    # forms without variation selectors, so input is normalized the same way.
+    REACTION_EMOJI = (
+        '❤', '👍', '👎', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱', '🤬', '😢', '🎉', '🤩', '🤮',
+        '💩', '🙏', '👌', '🕊', '🤡', '🥱', '🥴', '😍', '🐳', '❤‍🔥', '🌚', '🌭', '💯', '🤣', '⚡',
+        '🍌', '🏆', '💔', '🤨', '😐', '🍓', '🍾', '💋', '🖕', '😈', '😴', '😭', '🤓', '👻', '👨‍💻',
+        '👀', '🎃', '🙈', '😇', '😨', '🤝', '✍', '🤗', '🫡', '🎅', '🎄', '☃', '💅', '🤪', '🗿',
+        '🆒', '💘', '🙉', '🦄', '😘', '💊', '🙊', '😎', '👾', '🤷‍♂', '🤷', '🤷‍♀', '😡',
+    )
 
     def __init__(self, state_dir, transport, clock=time.time, queue_limit=1000, *, recover_sends=True):
         if not _integer(queue_limit) or not 1 <= queue_limit <= 100000:
@@ -225,6 +289,15 @@ class Core:
                     created REAL NOT NULL, updated REAL NOT NULL, due REAL NOT NULL,
                     UNIQUE(client_id,idempotency_key)
                 );
+                CREATE TABLE IF NOT EXISTS reaction_outbox (
+                    id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id),
+                    chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL, emoji TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+                    status TEXT NOT NULL, error TEXT,
+                    created REAL NOT NULL, updated REAL NOT NULL, due REAL NOT NULL,
+                    UNIQUE(client_id,idempotency_key)
+                );
                 CREATE TABLE IF NOT EXISTS rate_limits (
                     scope TEXT PRIMARY KEY, next_at REAL NOT NULL
                 );
@@ -300,6 +373,14 @@ class Core:
             # An image send stores a copy of the bytes for retries; NULL is text-only.
             if 'image' not in {row['name'] for row in db.execute('PRAGMA table_info(outbox)')}:
                 db.execute('ALTER TABLE outbox ADD COLUMN image TEXT')
+            # Reaction receive capability: NULL until first observed or probed.
+            if 'bot_admin' not in binding_columns:
+                db.execute('ALTER TABLE bindings ADD COLUMN bot_admin INTEGER')
+            # Which reactions are delivered (and can wake): the default wakes only
+            # for reactions on the agent's own published messages.
+            if 'reaction_wake' not in binding_columns:
+                db.execute("ALTER TABLE bindings ADD COLUMN reaction_wake TEXT NOT NULL DEFAULT 'own_messages'")
+            db.execute('CREATE INDEX IF NOT EXISTS reaction_outbox_history ON reaction_outbox(client_id,created DESC)')
             db.execute('INSERT OR IGNORE INTO history_keys(singleton,secret) VALUES(1,?)', (secrets.token_bytes(32),))
             db.execute('CREATE INDEX IF NOT EXISTS inbox_history ON inbox(client_id,COALESCE(event_at,created) DESC)')
             db.execute('CREATE INDEX IF NOT EXISTS outbox_history ON outbox(client_id,created DESC)')
@@ -518,7 +599,8 @@ class Core:
 
     DELIVERY_FILTERS = ('all', 'addressed')
 
-    def delivery_settings(self, client_id, delivery_filter=None, capture_context=None, accept_media=None):
+    def delivery_settings(self, client_id, delivery_filter=None, capture_context=None, accept_media=None,
+                          reaction_wake=None):
         """Local operator control; never exposed as an agent MCP mutation.
 
         ``delivery_filter`` 'all' (the default) delivers every message from an
@@ -528,11 +610,18 @@ class Core:
         allowed, as context only. Context is never delivered, leased or announced.
         ``accept_media`` accepts documents, photos, video, audio, voice notes and
         animations, with their caption as text; otherwise they stay unsupported.
-        Every setting defaults to off, which is the original behavior.
+        ``reaction_wake`` decides which incoming reactions from allowed senders
+        are delivered and can wake this agent: 'own_messages' (the default) only
+        reactions on messages this agent published, 'all' every reaction, 'none'
+        none; the rest are kept as context. The delivery filter does not apply to
+        reactions, which target one message already. Every setting defaults to
+        off, which is the original behavior.
         """
         if delivery_filter is not None and delivery_filter not in self.DELIVERY_FILTERS:
             raise CoreError('invalid_delivery_settings')
         if any(value is not None and type(value) is not bool for value in (capture_context, accept_media)):
+            raise CoreError('invalid_delivery_settings')
+        if reaction_wake is not None and reaction_wake not in self.REACTION_WAKE_MODES:
             raise CoreError('invalid_delivery_settings')
         with self._tx() as db:
             self._binding(db, client_id)
@@ -542,9 +631,12 @@ class Core:
                 db.execute('UPDATE bindings SET capture_context=? WHERE client_id=? AND connected=1', (int(capture_context), client_id))
             if accept_media is not None:
                 db.execute('UPDATE bindings SET accept_media=? WHERE client_id=? AND connected=1', (int(accept_media), client_id))
+            if reaction_wake is not None:
+                db.execute('UPDATE bindings SET reaction_wake=? WHERE client_id=? AND connected=1', (reaction_wake, client_id))
             row = self._binding(db, client_id)
         return {'delivery_filter': row['delivery_filter'], 'capture_context': bool(row['capture_context']),
-                'accept_media': bool(row['accept_media']), 'context_window_seconds': self.HISTORY_WINDOW}
+                'accept_media': bool(row['accept_media']), 'reaction_wake': row['reaction_wake'],
+                'context_window_seconds': self.HISTORY_WINDOW}
 
     def _limits(self, db):
         row = db.execute('SELECT * FROM exchange_limits WHERE singleton=1').fetchone()
@@ -763,8 +855,26 @@ class Core:
                 'routing': {'delivery_filter': row['delivery_filter'],
                             'capture_context': bool(row['capture_context']),
                             'accept_media': bool(row['accept_media'])} if row else None,
+                'reactions': self._reaction_capability(row) if row else None,
                 'state': state, 'next_action': {'code': action, 'message': message},
             }
+
+    @staticmethod
+    def _reaction_capability(row):
+        """Read-only reaction facts: only local, already-recorded state."""
+        if row['bot_admin'] is None:
+            receive = {'available': None, 'bot_admin': None, 'requires_bot_admin': True,
+                       'note': "The bot's administrator status in this destination is not known yet; the next collection checks it."}
+        elif row['bot_admin']:
+            receive = {'available': True, 'bot_admin': True, 'requires_bot_admin': True,
+                       'note': 'Reaction updates arrive while the shared bot stays an administrator in this destination.'}
+        else:
+            receive = {'available': False, 'bot_admin': False, 'requires_bot_admin': True,
+                       'note': 'The shared bot is not an administrator in this destination, so reactions from people never arrive. Ask the local owner to promote it to administrator.'}
+        return {'send': {'per_message': 1,
+                         'emoji': "one standard reaction emoji Telegram allows for bots, or an empty emoji to remove the bot's reaction",
+                         'note': 'Bots cannot use paid reactions, and this tool never sends custom emoji reactions.'},
+                'receive': receive, 'wake': row['reaction_wake']}
 
     def _unmatched(self, db, update_id, chat_id, reason, now):
         db.execute('INSERT OR IGNORE INTO unmatched(update_id,chat_id,reason,created) VALUES(?,?,?,?)', (update_id, chat_id, reason, now))
@@ -805,8 +915,17 @@ class Core:
         if isinstance(membership, dict):
             chat_id = _mapping(membership.get('chat')).get('id')
             new = _mapping(membership.get('new_chat_member'))
-            if _integer(chat_id) and _mapping(new.get('user')).get('id') == account['bot_id'] and (new.get('status') in ('left', 'kicked') or (new.get('status') == 'restricted' and (not new.get('is_member', True) or not new.get('can_send_messages', True)))):
-                self._suspend(db, 'bot_removed_or_restricted', chat_id)
+            if _integer(chat_id) and _mapping(new.get('user')).get('id') == account['bot_id']:
+                # Receiving reactions requires administrator status, so every
+                # membership event refreshes what status can tell the owner.
+                db.execute('UPDATE bindings SET bot_admin=? WHERE chat_id=? AND connected=1',
+                           (1 if new.get('status') == 'administrator' else 0, chat_id))
+                if (new.get('status') in ('left', 'kicked') or (new.get('status') == 'restricted' and (not new.get('is_member', True) or not new.get('can_send_messages', True)))):
+                    self._suspend(db, 'bot_removed_or_restricted', chat_id)
+            return
+        reaction = update.get('message_reaction')
+        if isinstance(reaction, dict):
+            self._route_reaction(db, update_id, reaction, account, now)
             return
         kind = 'edited_message' if 'edited_message' in update else 'message'
         msg = update.get(kind)
@@ -920,6 +1039,113 @@ class Core:
         self._keep_context(db, binding['client_id'], f'tg:{update_id}', {**payload, 'context_reason': reason},
                            conversation, now, event_at)
 
+    def _route_reaction(self, db, update_id, reaction, account, now):
+        """Deliver one message_reaction update under the same rules as messages.
+
+        Telegram does not send reactions set by bots, and sends them only while
+        the bot is an administrator. The reaction update carries no thread id, so
+        the reacted message is resolved to a destination through the published
+        outbox row or a captured inbox row; an unknown message reaches the single
+        binding of a plain group, and stays unassigned everywhere else. Sender
+        rules match messages. The owner's reaction_wake setting decides which
+        reactions are delivered and can wake this agent: by default only
+        reactions on messages this agent published; the rest are kept as context.
+        """
+        chat = _mapping(reaction.get('chat'))
+        chat_id = chat.get('id')
+        if not _integer(chat_id) or chat.get('type') not in ('group', 'supergroup'):
+            self._unmatched(db, update_id, chat_id if _integer(chat_id) else None, 'unsupported_destination', now)
+            return
+        message_id = reaction.get('message_id')
+        if not _integer(message_id) or message_id <= 0:
+            self._unmatched(db, update_id, chat_id, 'unsupported_update', now)
+            return
+        sender = _mapping(reaction.get('user'))
+        sender_id = sender.get('id')
+        # Anonymous reactions arrive with actor_chat instead of a user, so no
+        # allowed-sender rule can apply; they stay unassigned like anonymous
+        # channel posts.
+        if not _integer(sender_id) or sender_id <= 0 or not isinstance(sender.get('is_bot'), bool) or reaction.get('actor_chat'):
+            self._unmatched(db, update_id, chat_id, 'unverified_sender', now)
+            return
+        if sender_id == account['bot_id']:
+            self._unmatched(db, update_id, chat_id, 'shared_bot_echo', now)
+            return
+        old = reaction_types(reaction.get('old_reaction'))
+        new = reaction_types(reaction.get('new_reaction'))
+        if old is None or new is None:
+            self._unmatched(db, update_id, chat_id, 'unsupported_update', now)
+            return
+        conversation = None
+        binding = None
+        own_message = False
+        known_message = False
+        published = db.execute('SELECT client_id,thread_id,conversation_id FROM outbox '
+                               'WHERE chat_id=? AND message_id=? ORDER BY created DESC LIMIT 1',
+                               (chat_id, message_id)).fetchone()
+        if published is not None:
+            known_message = True
+            binding = db.execute('SELECT b.* FROM bindings b JOIN clients c ON c.id=b.client_id '
+                                 'WHERE b.chat_id=? AND b.thread_id=? AND b.connected=1 AND c.active=1',
+                                 (chat_id, published['thread_id'])).fetchone()
+            conversation = published['conversation_id']
+            own_message = binding is not None and published['client_id'] == binding['client_id']
+        else:
+            captured = None
+            for row in db.execute('SELECT client_id,payload,conversation_id FROM inbox ORDER BY created,rowid'):
+                payload = json.loads(row['payload'])
+                if (payload.get('origin') == 'telegram' and payload.get('message_id') == message_id
+                        and payload.get('chat_id') == chat_id):
+                    captured = (row['client_id'], payload.get('thread_id') or 0, row['conversation_id'])
+            if captured is not None:
+                known_message = True
+                binding = db.execute('SELECT b.* FROM bindings b JOIN clients c ON c.id=b.client_id '
+                                     'WHERE b.chat_id=? AND b.thread_id=? AND b.connected=1 AND c.active=1',
+                                     (chat_id, captured[1])).fetchone()
+                conversation = captured[2]
+        if binding is None and not known_message:
+            # Unknown message: only a plain group with exactly one binding can be
+            # attributed safely; topic destinations stay unassigned.
+            candidates = db.execute('SELECT b.* FROM bindings b JOIN clients c ON c.id=b.client_id '
+                                    'WHERE b.chat_id=? AND b.connected=1 AND c.active=1', (chat_id,)).fetchall()
+            if len(candidates) == 1 and candidates[0]['thread_id'] == 0:
+                binding = candidates[0]
+        if binding is None:
+            reason = 'unbound_destination' if known_message or not db.execute(
+                'SELECT 1 FROM bindings b JOIN clients c ON c.id=b.client_id WHERE b.chat_id=? AND b.connected=1 AND c.active=1',
+                (chat_id,)).fetchone() else 'unresolved_reaction'
+            self._unmatched(db, update_id, chat_id, reason, now)
+            return
+        allowed = db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?',
+                             (binding['client_id'], sender_id, int(sender['is_bot']))).fetchone()
+        if not allowed and not binding['capture_context']:
+            self._unmatched(db, update_id, chat_id, 'sender_not_allowed', now)
+            return
+        payload = {'origin': 'telegram', 'kind': 'reaction', 'update_id': update_id,
+                   'message_id': message_id, 'chat_id': chat_id, 'thread_id': binding['thread_id'] or None,
+                   'sender': {'id': sender_id, 'is_bot': sender['is_bot'], 'username': _bounded(sender.get('username', ''), 64)},
+                   'old_reaction': old[0], 'new_reaction': new[0], 'own_message': own_message}
+        if old[1]:
+            payload['old_reaction_truncated'] = True
+        if new[1]:
+            payload['new_reaction_truncated'] = True
+        stamp = reaction.get('date')
+        event_at = stamp if _integer(stamp) and 0 < stamp <= now else now
+        if conversation is None:
+            conversation = 'reactions:' + binding['client_id']
+        db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
+        if not allowed:
+            reason = 'sender_not_allowed'
+        elif binding['reaction_wake'] == 'none':
+            reason = 'reaction_wake_none'
+        elif binding['reaction_wake'] == 'own_messages' and not own_message:
+            reason = 'not_own_message'
+        else:
+            self._enqueue(db, binding['client_id'], 'react:' + str(update_id), payload, conversation, now, event_at=event_at)
+            return
+        self._keep_context(db, binding['client_id'], 'react:' + str(update_id),
+                           {**payload, 'context_reason': reason}, conversation, now, event_at)
+
     def _keep_context(self, db, client_id, event_key, payload, conversation_id, now, event_at):
         # Stored acknowledged and outside the queue bound: history reads it, no
         # poll, watch, relay or push path ever claims or announces it.
@@ -977,12 +1203,40 @@ class Core:
                         accepted += 1
                     self._prune_context(db, self.clock())
                     db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL WHERE singleton=1', (cursor, self.clock(), self.clock(), self.clock(), self.clock()))
+                self._probe_bot_admin(account)
                 return {'status': 'ok', 'updates': accepted, 'cursor': cursor}
             except (TransportError, CoreError) as error:
                 code = error.code if isinstance(error, CoreError) else 'telegram_intake_failed'
                 with self._tx() as db:
                     db.execute('UPDATE account SET last_attempt=?,intake_error=? WHERE singleton=1', (self.clock(), code))
                 raise CoreError(code) from None
+
+    def _probe_bot_admin(self, account):
+        """Fill unknown bot_admin flags once per binding; never fails collection.
+
+        Reaction updates arrive only while the bot is an administrator, so a
+        binding with an unknown flag is checked with getChatMember once. A
+        definite client error means the bot cannot even see the chat, which is
+        recorded as not-admin; other failures leave the flag unknown for a later
+        collection. Later my_chat_member events keep the flag current.
+        """
+        with self._db() as db:
+            pending = db.execute('SELECT b.client_id,b.chat_id FROM bindings b JOIN clients c ON c.id=b.client_id '
+                                 'WHERE b.connected=1 AND c.active=1 AND b.bot_admin IS NULL').fetchall()
+        for row in pending:
+            admin = None
+            try:
+                member = self.transport.get_chat_member(row['chat_id'], account['bot_id'])
+                admin = 1 if isinstance(member, dict) and member.get('status') == 'administrator' else 0
+            except TransportError as error:
+                if isinstance(error.code, int) and 400 <= error.code < 500 and error.code != 429:
+                    admin = 0
+            except Exception:
+                admin = None
+            if admin is not None:
+                with self._tx() as db:
+                    db.execute('UPDATE bindings SET bot_admin=? WHERE client_id=? AND connected=1',
+                               (admin, row['client_id']))
 
     def poll(self, client_id, limit=20, lease_seconds=60):
         if not _integer(limit) or not 1 <= limit <= 100 or not _integer(lease_seconds) or not 1 <= lease_seconds <= 3600:
@@ -1190,6 +1444,9 @@ class Core:
                     and member.get('can_send_messages') is True)):
             raise CoreError('bot_cannot_post')
         with self._tx() as db:
+            # The suspension check also refreshes what reactions can arrive here.
+            db.execute('UPDATE bindings SET bot_admin=? WHERE client_id=? AND connected=1',
+                       (1 if status == 'administrator' else 0, client_id))
             cleared = db.execute('UPDATE bindings SET suspended=NULL WHERE client_id=? AND connected=1 AND suspended=? AND suspension_seq=?',
                                  (client_id, reason, seq)).rowcount
             if not cleared:
@@ -1207,6 +1464,7 @@ class Core:
             images = [row['image'] for row in db.execute(
                 'SELECT image FROM outbox WHERE status=\'queued\' AND (client_id=? OR recipient=?) AND image IS NOT NULL', (client_id, client_id))]
             db.execute('UPDATE outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND (client_id=? OR recipient=?)', (self.clock(), client_id, client_id))
+            db.execute('UPDATE reaction_outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND client_id=?', (self.clock(), client_id))
             db.execute('UPDATE bindings SET connected=0 WHERE client_id=?', (client_id,))
             db.execute('UPDATE clients SET active=0 WHERE id=?', (client_id,))
             db.execute('UPDATE pairings SET consumed=1 WHERE client_id=?', (client_id,))
@@ -1509,20 +1767,97 @@ class Core:
         self.flush(client_id=client_id, limit=20)
         return self.delivery_status(client_id, outbox_id)
 
+    def _known_reaction_target(self, db, binding, message_id):
+        """True when the message id was captured or published in this destination.
+
+        A reaction can only target the agent's own bound group or topic: either a
+        message this destination captured, or any message the shared bot
+        published there, including one published for a peer agent.
+        """
+        if db.execute('SELECT 1 FROM outbox WHERE chat_id=? AND thread_id=? AND message_id=? LIMIT 1',
+                      (binding['chat_id'], binding['thread_id'], message_id)).fetchone():
+            return True
+        for row in db.execute('SELECT payload FROM inbox WHERE client_id=?', (binding['client_id'],)):
+            payload = json.loads(row['payload'])
+            if (payload.get('message_id') == message_id and payload.get('chat_id') == binding['chat_id']
+                    and (payload.get('thread_id') or 0) == binding['thread_id']):
+                return True
+        return False
+
+    def _reaction_usage(self, db, client_id, now):
+        stamps = [r[0] for r in db.execute(
+            'SELECT created FROM reaction_outbox WHERE client_id=? AND created>? ORDER BY created DESC',
+            (client_id, now - self.REACTION_WINDOW))]
+        return self._window_usage(stamps, self.REACTION_SEND_LIMIT, self.REACTION_WINDOW)
+
+    def react(self, client_id, message_id, emoji, idempotency_key):
+        """Queue one reaction on a known message in this agent's own destination.
+
+        Reactions post no message, so they never touch any message send limit;
+        they carry their own per-agent rolling limit. Like message_send, the
+        intent is durable before any network activity, a repeated idempotency key
+        with the same content returns the existing outcome, and an uncertain
+        delivery needs private operator resolution.
+        """
+        if not _integer(message_id) or message_id <= 0:
+            raise CoreError('invalid_reaction')
+        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128:
+            raise CoreError('invalid_idempotency_key')
+        emoji = reaction_emoji(emoji)
+        request_hash = _digest(json.dumps([message_id, emoji]))
+        now = self.clock()
+        with self._tx() as db:
+            self._client(db, client_id)
+            existing = db.execute('SELECT * FROM reaction_outbox WHERE client_id=? AND idempotency_key=?',
+                                  (client_id, idempotency_key)).fetchone()
+            if existing:
+                if existing['request_hash'] != request_hash:
+                    raise CoreError('idempotency_conflict')
+                reaction_id = existing['id']
+            else:
+                binding = self._binding(db, client_id, usable=True)
+                if not self._known_reaction_target(db, binding, message_id):
+                    raise CoreError('unknown_reaction_target')
+                used, retry_at = self._reaction_usage(db, client_id, now)
+                if used >= self.REACTION_SEND_LIMIT:
+                    raise self._limit_error('reaction_limit', used, self.REACTION_SEND_LIMIT,
+                                            self.REACTION_WINDOW, retry_at, now)
+                reaction_id = 'react_' + secrets.token_hex(12)
+                db.execute("INSERT INTO reaction_outbox(id,client_id,chat_id,thread_id,message_id,emoji,"
+                           'idempotency_key,request_hash,status,created,updated,due) '
+                           "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                           (reaction_id, client_id, binding['chat_id'], binding['thread_id'], message_id,
+                            emoji, idempotency_key, request_hash, now, now, now))
+        self.flush(client_id=client_id, limit=20)
+        return self.delivery_status(client_id, reaction_id)
+
+    @staticmethod
+    def _reaction_status(row):
+        return {'reaction_id': row['id'], 'kind': 'reaction', 'status': row['status'],
+                'error': row['error'], 'emoji': row['emoji'], 'message_id': row['message_id'],
+                'chat_id': row['chat_id'], 'thread_id': row['thread_id'] or None,
+                'created_at': row['created'], 'updated_at': row['updated'],
+                'retry_at': row['due'] if row['status'] == 'queued' else None}
+
     def _outbox_status(self, row):
         return {'outbox_id': row['id'], 'status': row['status'], 'error': row['error'], 'message_id': row['message_id'], 'recipient': row['recipient'], 'conversation_id': row['conversation_id'], 'created_at': row['created'], 'updated_at': row['updated'], 'retry_at': row['due'] if row['status'] == 'queued' else None}
 
     def delivery_status(self, client_id, outbox_id):
+        """Inspect an outgoing message or reaction delivery; never resends it."""
         with self._db() as db:
             self._client(db, client_id)
             row = db.execute('SELECT * FROM outbox WHERE client_id=? AND id=?', (client_id, outbox_id)).fetchone()
+            if row is not None:
+                return self._outbox_status(row)
+            row = db.execute('SELECT * FROM reaction_outbox WHERE client_id=? AND id=?', (client_id, outbox_id)).fetchone()
             if row is None:
                 raise CoreError('unknown_delivery')
-            return self._outbox_status(row)
+            return self._reaction_status(row)
 
     def _recover_sends(self, db):
         # Only call while holding sender.lock: no live local sender can own a row.
         db.execute('UPDATE outbox SET status=\'unknown\',error=\'interrupted_send\',updated=? WHERE status=\'sending\'', (self.clock(),))
+        db.execute('UPDATE reaction_outbox SET status=\'unknown\',error=\'interrupted_send\',updated=? WHERE status=\'sending\'', (self.clock(),))
 
     def flush(self, client_id=None, limit=20):
         if not _integer(limit) or not 1 <= limit <= 100:
@@ -1532,10 +1867,11 @@ class Core:
                 self._client(db, client_id)
         with self._lock('sender') as acquired:
             if not acquired:
-                return {'status': 'busy', 'attempted': 0}
+                return {'status': 'busy', 'attempted': 0, 'reactions': 0}
             with self._tx() as db:
                 self._recover_sends(db)
                 rows = db.execute('SELECT id FROM outbox WHERE status=\'queued\' AND due<=? AND (? IS NULL OR client_id=?) ORDER BY created,rowid LIMIT ?', (self.clock(), client_id, client_id, limit)).fetchall()
+                reactions = db.execute('SELECT id FROM reaction_outbox WHERE status=\'queued\' AND due<=? AND (? IS NULL OR client_id=?) ORDER BY created,rowid LIMIT ?', (self.clock(), client_id, client_id, limit)).fetchall()
             attempted = 0
             for candidate in rows:
                 with self._tx() as db:
@@ -1611,30 +1947,90 @@ class Core:
                 if status in ('sent', 'rejected') and row['image']:
                     # An unknown record keeps its copy: an operator retry sends it again.
                     self._delete_outbox_image(row['image'])
-            return {'status': 'ok', 'attempted': attempted}
+            reacted = self._flush_reactions(reactions)
+            return {'status': 'ok', 'attempted': attempted, 'reactions': reacted}
+
+    def _flush_reactions(self, candidates):
+        """Attempt due queued reactions under the sender lock; returns attempts.
+
+        Reactions pace on their own 'react' scope, never on a message scope. An
+        uncertain outcome stays unknown: like a message send, an attempt may have
+        reached Telegram after the failure, and re-setting a reaction is left to
+        an explicit operator resolution.
+        """
+        attempted = 0
+        for candidate in candidates:
+            with self._tx() as db:
+                row = db.execute('SELECT * FROM reaction_outbox WHERE id=?', (candidate['id'],)).fetchone()
+                if row['status'] != 'queued':
+                    continue
+                try:
+                    self._binding(db, row['client_id'], usable=True)
+                except CoreError:
+                    continue
+                now = self.clock()
+                due = now
+                rate = db.execute('SELECT next_at FROM rate_limits WHERE scope=\'react\'').fetchone()
+                if rate:
+                    due = max(due, rate['next_at'])
+                if due > now:
+                    db.execute('UPDATE reaction_outbox SET due=? WHERE id=?', (due, row['id']))
+                    continue
+                db.execute('INSERT INTO rate_limits(scope,next_at) VALUES(\'react\',?) ON CONFLICT(scope) DO UPDATE SET next_at=excluded.next_at', (now + self.REACTION_INTERVAL,))
+                db.execute('UPDATE reaction_outbox SET status=\'sending\',updated=? WHERE id=?', (now, row['id']))
+            attempted += 1
+            try:
+                self.transport.set_message_reaction(row['chat_id'], row['message_id'], row['emoji'])
+                status, error, due = 'sent', None, self.clock()
+            except UnknownSend:
+                status, error, due = 'unknown', 'uncertain_send', self.clock()
+            except TransportError as exc:
+                if str(exc.code) in ('429', 'rate_limited', 'telegram_429'):
+                    wait = exc.retry_after if isinstance(exc.retry_after, (int, float)) and not isinstance(exc.retry_after, bool) and math.isfinite(exc.retry_after) and exc.retry_after > 0 else 60
+                    due = self.clock() + min(wait, 86400)
+                    status, error = 'queued', 'rate_limited'
+                elif isinstance(exc.code, int) and 400 <= exc.code < 500:
+                    status, error, due = 'rejected', 'telegram_rejected', self.clock()
+                else:
+                    status, error, due = 'unknown', 'transport_failure', self.clock()
+            except Exception:
+                status, error, due = 'unknown', 'transport_failure', self.clock()
+            with self._tx() as db:
+                db.execute('UPDATE reaction_outbox SET status=?,error=?,due=?,updated=? WHERE id=?', (status, error, due, self.clock(), row['id']))
+                if error == 'rate_limited':
+                    db.execute('INSERT INTO rate_limits(scope,next_at) VALUES(\'react\',?) ON CONFLICT(scope) DO UPDATE SET next_at=max(next_at,excluded.next_at)', (due,))
+        return attempted
 
     def resolve_unknown(self, outbox_id, resolution, message_id=None):
         if resolution not in ('accepted', 'cancel', 'retry'):
             raise CoreError('invalid_resolution')
-        if resolution == 'accepted' and (not _integer(message_id) or message_id <= 0):
-            raise CoreError('message_id_required')
         with self._lock('sender') as acquired:
             if not acquired:
                 raise CoreError('sender_busy')
             with self._tx() as db:
                 self._recover_sends(db)
                 row = db.execute('SELECT * FROM outbox WHERE id=?', (outbox_id,)).fetchone()
+                table = 'outbox'
+                if row is None:
+                    row = db.execute('SELECT * FROM reaction_outbox WHERE id=?', (outbox_id,)).fetchone()
+                    table = 'reaction_outbox'
                 if row is None or row['status'] != 'unknown':
                     raise CoreError('not_unknown')
+                if resolution == 'accepted' and table == 'outbox' and (not _integer(message_id) or message_id <= 0):
+                    raise CoreError('message_id_required')
                 if resolution == 'retry':
                     self._binding(db, row['client_id'], usable=True)
-                    if row['recipient']:
+                    if table == 'outbox' and row['recipient']:
                         self._binding(db, row['recipient'], usable=True)
                 status = {'accepted': 'sent', 'cancel': 'rejected', 'retry': 'queued'}[resolution]
-                db.execute('UPDATE outbox SET status=?,error=?,message_id=?,due=?,updated=? WHERE id=?', (status, None if resolution == 'accepted' else 'operator_' + resolution, message_id if resolution == 'accepted' else None, self.clock(), self.clock(), outbox_id))
-                result = db.execute('SELECT * FROM outbox WHERE id=?', (outbox_id,)).fetchone()
-                resolved = self._outbox_status(result)
-            if resolution in ('accepted', 'cancel') and row['image']:
+                error = None if resolution == 'accepted' else 'operator_' + resolution
+                if table == 'outbox':
+                    db.execute('UPDATE outbox SET status=?,error=?,message_id=?,due=?,updated=? WHERE id=?', (status, error, message_id if resolution == 'accepted' else None, self.clock(), self.clock(), outbox_id))
+                else:
+                    db.execute('UPDATE reaction_outbox SET status=?,error=?,due=?,updated=? WHERE id=?', (status, error, self.clock(), self.clock(), outbox_id))
+                result = db.execute(f'SELECT * FROM {table} WHERE id=?', (outbox_id,)).fetchone()
+                resolved = self._outbox_status(result) if table == 'outbox' else self._reaction_status(result)
+            if table == 'outbox' and resolution in ('accepted', 'cancel') and row['image']:
                 # Terminal: no later attempt can need the copy again. A retry keeps it.
                 self._delete_outbox_image(row['image'])
             return resolved
