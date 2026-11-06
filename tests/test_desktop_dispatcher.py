@@ -2,10 +2,12 @@
 
 No real desktop, Codex home, subprocess or Telegram account is used here.
 """
+import itertools
 import json
 from pathlib import Path
 import sqlite3
 import threading
+import types
 
 import pytest
 
@@ -78,12 +80,29 @@ def ready(env):
     return core, store, alpha
 
 
+# Each dispatcher clock reading advances this much virtual time. A run then
+# lasts a fixed number of loop iterations, however slow the machine is: on a
+# loaded CI runner a real 80 ms budget could end between the enqueue in one
+# iteration and the wake in the next.
+LOOP_CLOCK_STEP = .002
+
+
 def run(env, **kwargs):
     core, _, _, store, *_ = env
     events = []
     options = dict(duration=.08, interval=.01, emit=events.append)
     options.update(kwargs)
-    result = desktop.run_desktop_dispatcher(core, store, **options)
+    if options.get('collect'):
+        # The background collector works in real time, so keep the real clock.
+        return desktop.run_desktop_dispatcher(core, store, **options), events
+    ticks = itertools.count()
+    clock = types.SimpleNamespace(monotonic=lambda: next(ticks) * LOOP_CLOCK_STEP)
+    real_time = desktop.time
+    desktop.time = clock
+    try:
+        result = desktop.run_desktop_dispatcher(core, store, **options)
+    finally:
+        desktop.time = real_time
     return result, events
 
 
