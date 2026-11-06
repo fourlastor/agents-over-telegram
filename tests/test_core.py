@@ -58,6 +58,23 @@ def append(transport, text, **kwargs):
     return result
 
 
+PNG = b'\x89PNG\r\n\x1a\n' + b'fake png body'
+JPEG = b'\xff\xd8\xff\xe0' + b'fake jpeg body'
+WEBP = b'RIFF\x10\x00\x00\x00WEBP' + b'fake webp body'
+GIF = b'GIF89a' + b'fake gif body'
+
+
+def image_file(directory, data, name='image.bin'):
+    path = directory / name
+    path.write_bytes(data)
+    return str(path)
+
+
+def stored_images(core):
+    directory = core.state_dir / 'outbox-images'
+    return list(directory.iterdir()) if directory.exists() else []
+
+
 def rows(core, sql, args=()):
     with sqlite3.connect(core.database) as db:
         return db.execute(sql, args).fetchall()
@@ -393,6 +410,171 @@ def test_sends_label_shared_identity_idempotency_and_destination(env):
     b, _ = bind(core, transport, 'Beta', -200)
     with pytest.raises(CoreError, match='unknown_delivery'):
         core.delivery_status(b, sent['outbox_id'])
+
+
+@pytest.mark.parametrize('data,send_as,extension', [(PNG, 'photo', 'png'), (JPEG, 'photo', 'jpg'), (WEBP, 'photo', 'webp')])
+def test_image_send_publishes_photo_with_label_caption(env, tmp_path, data, send_as, extension):
+    core, transport, clock = env
+    a, _ = bind(core, transport, topic=7)
+    result = core.send(a, 'the landed change', 'shot-1', image_path=image_file(tmp_path, data, f'image.{extension}'))
+    assert result['status'] == 'sent'
+    assert core.delivery_status(a, result['outbox_id'])['status'] == 'sent'
+    message = transport.sent[0]
+    assert message['chat']['id'] == -100
+    assert message['message_thread_id'] == 7
+    assert message['caption'] == '[Agent: Alpha | shared bot @aot_test_bot]\nthe landed change'
+    assert message['media']['kind'] == send_as
+    assert message['media']['data'] == data
+    assert message['media']['filename'].endswith('.' + extension)
+    assert message['media']['mime'] in ('image/png', 'image/jpeg', 'image/webp')
+    assert stored_images(core) == []
+
+
+def test_image_send_gif_as_document_and_content_hashed_idempotency(env, tmp_path):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    result = core.send(a, 'animation', 'gif-1', image_path=image_file(tmp_path, GIF, 'loop.bin'))
+    assert result['status'] == 'sent'
+    assert transport.sent[0]['media']['kind'] == 'document'
+    assert transport.sent[0]['media']['filename'].endswith('.gif')
+    assert transport.sent[0]['media']['mime'] == 'image/gif'
+    repeated = core.send(a, 'animation', 'gif-1', image_path=image_file(tmp_path, GIF, 'same-bytes.bin'))
+    assert repeated['outbox_id'] == result['outbox_id']
+    assert len(transport.sent) == 1
+    with pytest.raises(CoreError, match='idempotency_conflict'):
+        core.send(a, 'animation', 'gif-1', image_path=image_file(tmp_path, GIF + b'x', 'changed.bin'))
+    with pytest.raises(CoreError, match='idempotency_conflict'):
+        core.send(a, 'animation', 'gif-1')
+    with pytest.raises(CoreError, match='idempotency_conflict'):
+        core.send(a, 'animation', 'gif-1', image_path=image_file(tmp_path, PNG, 'png.bin'))
+
+
+@pytest.mark.parametrize('data', [b'', b'plain text, not an image', b'BM\x36\x00\x00\x00' + b'bmp body', b'\xff\xd8' + b'truncated magic'])
+def test_image_rejects_disallowed_types_before_any_send(env, tmp_path, data):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    with pytest.raises(CoreError, match='unsupported_image_type'):
+        core.send(a, 'bad type', 'bad-1', image_path=image_file(tmp_path, data))
+    assert transport.sent == []
+    assert stored_images(core) == []
+
+
+def test_image_rejects_unusable_paths_and_directories(env, tmp_path):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    for bad in [str(tmp_path / 'missing.png'), 'relative.png', str(tmp_path), '']:
+        with pytest.raises(CoreError, match='invalid_image'):
+            core.send(a, 'bad path', 'path-' + bad[:8], image_path=bad)
+    assert transport.sent == []
+    assert stored_images(core) == []
+
+
+def test_image_rejects_over_ten_megabytes(env, tmp_path):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    path = tmp_path / 'big.png'
+    path.write_bytes(PNG + b'\x00' * (10 * 1024 * 1024 - len(PNG) + 1))
+    with pytest.raises(CoreError, match='image_too_large'):
+        core.send(a, 'too big', 'big-1', image_path=str(path))
+    assert transport.sent == []
+    assert stored_images(core) == []
+
+
+def test_image_caption_limit_covers_the_whole_publication(env, tmp_path):
+    core, transport, clock = env
+    a, _ = bind(core, transport, label='A' * 64)
+    header = f'[Agent: {"A" * 64} | shared bot @{transport.username}]\n'
+    fits = core.send(a, 'x' * (1024 - len(header)), 'fit-1', image_path=image_file(tmp_path, PNG))
+    assert fits['status'] == 'sent'
+    with pytest.raises(CoreError, match='caption_too_long'):
+        core.send(a, 'x' * (1025 - len(header)), 'over-1', image_path=image_file(tmp_path, PNG))
+    with pytest.raises(CoreError, match='caption_too_long'):
+        core.send(a, 'x' * 1025, 'over-2', image_path=image_file(tmp_path, PNG))
+    assert len(transport.sent) == 1
+    assert len(transport.sent[0]['caption']) == 1024
+
+
+def test_image_retry_uses_stored_copy_and_deletes_it_when_sent(env, tmp_path):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    source = tmp_path / 'shot.png'
+    source.write_bytes(PNG)
+    transport.outcomes = ['rate_limit']
+    result = core.send(a, 'later', 'later-1', image_path=str(source))
+    assert result['status'] == 'queued'
+    stored = stored_images(core)
+    assert len(stored) == 1
+    assert stored[0].name.startswith(result['outbox_id'])
+    assert stored[0].stat().st_mode & 0o777 == 0o600
+    assert stored[0].parent.stat().st_mode & 0o777 == 0o700
+    source.unlink()  # The agent's file is gone; the durable copy must carry the retry.
+    clock.advance(31)
+    core.flush()
+    assert core.delivery_status(a, result['outbox_id'])['status'] == 'sent'
+    assert transport.sent[0]['media']['data'] == PNG
+    assert stored_images(core) == []
+
+
+def test_image_unknown_outcome_keeps_copy_for_operator_retry(env, tmp_path):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    transport.outcomes = ['unknown']
+    result = core.send(a, 'uncertain', 'unk-1', image_path=image_file(tmp_path, PNG))
+    assert result['status'] == 'unknown'
+    assert len(stored_images(core)) == 1
+    resolved = core.resolve_unknown(result['outbox_id'], 'retry')
+    assert resolved['status'] == 'queued'
+    clock.advance(2)
+    core.flush()
+    assert core.delivery_status(a, result['outbox_id'])['status'] == 'sent'
+    assert transport.sent[0]['media']['data'] == PNG
+    assert stored_images(core) == []
+
+
+def test_image_cancel_resolution_drops_copy_and_rejected_sends_do_too(env, tmp_path):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    transport.outcomes = ['unknown']
+    result = core.send(a, 'uncertain cancel', 'cancel-1', image_path=image_file(tmp_path, PNG))
+    assert core.resolve_unknown(result['outbox_id'], 'cancel')['status'] == 'rejected'
+    assert stored_images(core) == []
+    clock.advance(2)
+    transport.outcomes = ['reject']
+    rejected = core.send(a, 'refused image', 'refuse-1', image_path=image_file(tmp_path, GIF))
+    assert rejected['status'] == 'rejected'
+    assert rejected['error'] == 'telegram_rejected'
+    assert stored_images(core) == []
+
+
+def test_image_send_respects_allowed_recipients_and_limits(env, tmp_path):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    b, _ = bind(core, transport, 'Beta', -200)
+    with pytest.raises(CoreError, match='peer_not_authorized'):
+        core.send(a, 'to peer', 'peer-1', recipient=b, image_path=image_file(tmp_path, PNG))
+    assert stored_images(core) == []
+    core.exchange_limits(conversation_send_limit=1, conversation_window_seconds=120, reason='tight test limit')
+    assert core.send(a, 'first', 'first-1')['status'] == 'sent'
+    with pytest.raises(CoreError, match='conversation_limit'):
+        core.send(a, 'second', 'second-1', image_path=image_file(tmp_path, PNG))
+    assert len(transport.sent) == 1
+    assert stored_images(core) == []
+
+
+def test_image_missing_retry_copy_is_rejected_without_a_network_call(env, tmp_path):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    transport.outcomes = ['rate_limit']
+    result = core.send(a, 'queued image', 'lost-1', image_path=image_file(tmp_path, PNG))
+    assert result['status'] == 'queued'
+    for path in stored_images(core):
+        path.unlink()  # Simulate a lost local copy while the record is queued.
+    clock.advance(31)
+    core.flush()
+    status = core.delivery_status(a, result['outbox_id'])
+    assert status['status'] == 'rejected'
+    assert status['error'] == 'outbox_image_unavailable'
+    assert transport.sent == []
 
 
 @pytest.mark.parametrize('outcome,status,error', [('reject', 'rejected', 'telegram_rejected'), ('unknown', 'unknown', 'uncertain_send'), (TransportError('FAKE_SECRET'), 'unknown', 'transport_failure'), (RuntimeError('FAKE_SECRET'), 'unknown', 'transport_failure')])
