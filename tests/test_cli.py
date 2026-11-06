@@ -133,3 +133,25 @@ def test_demo_is_offline_and_temporary():
     result = run_demo()
     assert result["result"] == "PASS"
     assert result["agents"] == 2 and result["bot_accounts"] == 1
+
+
+def test_lazy_transport_passes_every_telegram_method_through():
+    from agents_over_telegram.cli import LazyTransport
+    from agents_over_telegram.transport import TelegramTransport
+
+    public = {name for name in vars(TelegramTransport) if not name.startswith("_")}
+    lazy = LazyTransport("unused", fake=True)
+    lazy.transport = FakeTransport()
+    for name in public:
+        assert callable(getattr(lazy, name)), name
+
+
+def test_lazy_transport_sends_photos_and_documents():
+    from agents_over_telegram.cli import LazyTransport
+
+    lazy = LazyTransport("unused", fake=True)
+    lazy.transport = FakeTransport()
+    photo = lazy.send_photo(chat_id=-5, data=b"png", caption="hi", filename="a.png", mime="image/png")
+    document = lazy.send_document(chat_id=-5, data=b"pdf", filename="a.pdf", mime="application/pdf")
+    assert photo["media"]["kind"] == "photo"
+    assert document["media"]["kind"] == "document"
