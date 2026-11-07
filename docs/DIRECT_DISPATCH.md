@@ -107,11 +107,24 @@ The `next_action` code says who must act:
 | --- | --- | --- |
 | `wait_for_desktop_wake` | The native queue returned a receipt (`handoff_phase` is `queued`), but the wake URL has not succeeded yet. This happens when the desktop stays closed or the connection is paused. | Nobody resolves it. A running `relay-desktop` retries only the wake URL while the desktop is open and the connection is active. Nothing else retries it, so if no listener runs, start one. A manual `accepted` or `cancelled` would stop those retries and leave the queued notice unopened. |
 | `review_failing_wake` | The same queued handoff, but its wake URL has failed 10 times (`wake_attempts`) while the desktop was open and the connection was active. The target chat may be gone, or the OS opener may always fail. The listener keeps retrying. | A human checks the target chat and the wake URL. Opening the chat in the desktop app delivers the queued notice. Then record `accepted`, or `cancelled` to dismiss it. `relay-resolve` refuses `failed`, because the desktop queue already accepted the notice. |
-| `review_uncertain_wake` | Any other `uncertain` notification, or an `inflight` one. `relay-watch --once` leaves a notification `inflight` until the relay chat records a receipt, and a listener that was killed leaves it `inflight` until the next listener starts. | A human checks the target chat history and any queue receipt, then records one outcome with `relay-resolve`. |
+| `review_uncertain_wake` | Any other `uncertain` notification, or an `inflight` one. `relay-watch --once` leaves a notification `inflight` until the relay chat records a receipt, and a listener that was killed leaves it `inflight` until the next listener starts. | A human checks the target chat history and any queue receipt, then records one outcome with `relay-resolve`. A running `relay-desktop` settles an unknown desktop enqueue by itself; see below. |
 
 In `connection_status`, these codes come after `review_unknown_delivery` and `review_intake`, and after a paused or suspended state. The `unresolved_wake` field is present in every state. The agent-facing message only asks the agent to tell the local owner; it does not name relay commands.
 
-The relay never retries, fails, cancels or expires an unresolved wake by itself. An unresolved handoff can already have reached the target, so only a human can decide what happened. For `review_uncertain_wake`, record `accepted` if the notice arrived, `failed` if it definitely did not, or `cancelled` to dismiss it. All three keep the pending inbox work. After that, the next new message can wake the client again.
+The relay never expires an unresolved wake by itself. It settles one case on its own: a desktop enqueue whose `codex queue` child ended without a receipt (`handoff_phase` is `enqueuing`). Two minutes after the enqueue started, a running `relay-desktop` reads the desktop's own records, read-only:
+
+| What the records show | Outcome |
+| --- | --- |
+| The wake notice still waits in `queue_1.sqlite` for that chat. | The listener keeps that queue ID and retries the wake URL, as for `wait_for_desktop_wake`. |
+| The chat in `thread_history_1.sqlite` holds the notice as a user message. | `accepted`. |
+| Neither database has it. | `failed`. The notice never landed, so the next pass enqueues it again. |
+| Either database cannot be read. | Nothing changes. The listener writes `desktop_unknown_enqueue_unsettled`, and the warning above stays. |
+
+Only a notice created after this wake's notification counts. The Telegram message that caused the wake was collected before that time, so a turn started by such a notice reads it. A notice from an earlier wake could have been read before the message arrived, so it never counts. If the desktop moves the notice from the queue into the chat between the two reads, the listener finds neither and enqueues the notice again. The agent then gets the same fixed notice twice, which does no harm. The check assumes that only `relay-desktop` writes this notice text into a desktop chat.
+
+Each settled case writes a `desktop_unknown_enqueue_settled` record. A Codex app restart during an enqueue is the usual cause of this case.
+
+Any other unresolved handoff can already have reached the target, so only a human can decide what happened. For `review_uncertain_wake`, record `accepted` if the notice arrived, `failed` if it definitely did not, or `cancelled` to dismiss it. All three keep the pending inbox work. After that, the next new message can wake the client again.
 
 ## Live acceptance check
 

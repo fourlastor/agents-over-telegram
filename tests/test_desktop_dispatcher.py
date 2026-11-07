@@ -23,7 +23,9 @@ QUEUE_ID = '01a154d9-6676-7dd1-b4b2-d1accff1d4df'
 def native(env, monkeypatch):
     core = env[0]
     state = {'calls': [], 'running': True, 'validate_error': None,
-             'enqueue_error': None, 'wake_error': None, 'callback': None}
+             'enqueue_error': None, 'wake_error': None, 'callback': None,
+             # Unreadable by default, so tests that predate the check see no change.
+             'notice_outcome': desktop.DesktopQueueError('desktop_records_unreadable')}
 
     class Queue:
         def __init__(self, *args, **kwargs):
@@ -57,6 +59,12 @@ def native(env, monkeypatch):
             if state['enqueue_error']:
                 raise state['enqueue_error']
             return QUEUE_ID
+
+        def notice_outcome(self, thread_id, since):
+            state['calls'].append(('notice_outcome', (thread_id, since)))
+            if isinstance(state['notice_outcome'], Exception):
+                raise state['notice_outcome']
+            return state['notice_outcome']
 
         def wake(self, binding):
             with sqlite3.connect(core.database) as db:
@@ -354,6 +362,72 @@ def test_listener_warns_about_long_held_uncertain_wake_without_resolving_it(env,
     assert store.status(alpha)['notifications'] == [held]
 
 
+def wake_statuses(env):
+    with sqlite3.connect(env[0].database) as db:
+        return [row[0] for row in db.execute('SELECT status FROM relay_notifications ORDER BY created,rowid')]
+
+
+def settled_events(events):
+    return [event for event in events if event['type'] == 'desktop_unknown_enqueue_settled']
+
+
+def test_unknown_enqueue_absent_from_desktop_records_is_retried(env, native, monkeypatch):
+    store, alpha, held = hold_ambiguous(env, native)
+    monkeypatch.setattr(desktop, 'STUCK_WAKE_CHECK_SECONDS', 0)
+    native['notice_outcome'] = ('absent', None)
+    _, events = run(env)
+    # Too recent: the enqueue child may still be committing.
+    assert calls(native, 'notice_outcome') == [] and settled_events(events) == []
+    env[2].advance(desktop.UNKNOWN_ENQUEUE_CHECK_AFTER_SECONDS)
+    _, events = run(env)
+    [settled] = settled_events(events)
+    assert settled['outcome'] == 'failed' and settled['notification_id'] == held['notification_id']
+    thread, since = calls(native, 'notice_outcome')[0]
+    assert thread == ALPHA_THREAD and since <= env[2]() - desktop.UNKNOWN_ENQUEUE_CHECK_AFTER_SECONDS
+    # The failed handoff is retried with a fresh notification.
+    env[2].advance(60)
+    run(env)
+    assert len(calls(native, 'enqueue')) == 2
+    assert store.status(alpha)['notifications'] == []
+    assert wake_statuses(env) == ['failed', 'accepted']
+
+
+def test_unknown_enqueue_still_in_the_native_queue_is_woken_not_requeued(env, native, monkeypatch):
+    store, alpha, held = hold_ambiguous(env, native)
+    monkeypatch.setattr(desktop, 'STUCK_WAKE_CHECK_SECONDS', 0)
+    native['notice_outcome'] = ('queued', QUEUE_ID)
+    env[2].advance(desktop.UNKNOWN_ENQUEUE_CHECK_AFTER_SECONDS)
+    _, events = run(env)
+    [settled] = settled_events(events)
+    assert settled['outcome'] == 'queued' and settled['queue_id'] == QUEUE_ID
+    assert len(calls(native, 'enqueue')) == 1 and len(calls(native, 'wake')) == 1
+    assert store.status(alpha)['notifications'] == []
+    assert wake_statuses(env) == ['accepted']
+
+
+def test_unknown_enqueue_already_in_the_chat_is_accepted(env, native, monkeypatch):
+    store, alpha, held = hold_ambiguous(env, native)
+    monkeypatch.setattr(desktop, 'STUCK_WAKE_CHECK_SECONDS', 0)
+    native['notice_outcome'] = ('delivered', None)
+    env[2].advance(desktop.UNKNOWN_ENQUEUE_CHECK_AFTER_SECONDS)
+    _, events = run(env)
+    [settled] = settled_events(events)
+    assert settled['outcome'] == 'accepted'
+    assert len(calls(native, 'enqueue')) == 1 and calls(native, 'wake') == []
+    assert store.status(alpha)['notifications'] == []
+    assert wake_statuses(env) == ['accepted']
+
+
+def test_unknown_enqueue_with_unreadable_records_stays_held(env, native, monkeypatch):
+    store, alpha, held = hold_ambiguous(env, native)
+    monkeypatch.setattr(desktop, 'STUCK_WAKE_CHECK_SECONDS', 0)
+    env[2].advance(desktop.UNKNOWN_ENQUEUE_CHECK_AFTER_SECONDS)
+    _, events = run(env)
+    assert settled_events(events) == []
+    assert any(e['type'] == 'desktop_unknown_enqueue_unsettled' for e in events)
+    assert store.status(alpha)['notifications'] == [held]
+
+
 def test_listener_repeats_stuck_warning_after_interval_and_while_desktop_closed(env, native, monkeypatch):
     from agents_over_telegram.relay import UNRESOLVED_WAKE_REPORT_SECONDS
     hold_ambiguous(env, native)
@@ -467,3 +541,67 @@ def test_wake_attempts_while_desktop_closed_or_paused_do_not_count(env, native):
     assert len(calls(native, 'wake')) == 1
     [wake] = store.unresolved_wakes()
     assert (wake['next_action'], wake['wake_attempts']) == ('wait_for_desktop_wake', 1)
+
+
+def codex_records(home, queued=(), chat=()):
+    # Minimal copies of the two desktop tables the check reads.
+    with sqlite3.connect(home / 'queue_1.sqlite') as db:
+        db.execute('CREATE TABLE queued_items (id TEXT PRIMARY KEY, thread_id TEXT, payload_json TEXT,'
+                   ' queue_order INTEGER, created_at_ms INTEGER, updated_at_ms INTEGER)')
+        for order, (item_id, thread, text, at) in enumerate(queued):
+            db.execute('INSERT INTO queued_items VALUES(?,?,?,?,?,?)',
+                       (item_id, thread, json.dumps({'text': text}), order, at, at))
+    with sqlite3.connect(home / 'thread_history_1.sqlite') as db:
+        db.execute('CREATE TABLE thread_items (thread_id TEXT, turn_id TEXT, item_id TEXT, rollout_ordinal INTEGER,'
+                   ' created_at_ms INTEGER, item_json TEXT, item_type TEXT)')
+        for ordinal, (thread, kind, text, at) in enumerate(chat):
+            db.execute('INSERT INTO thread_items VALUES(?,?,?,?,?,?,?)',
+                       (thread, 't', f'i{ordinal}', ordinal, at,
+                        json.dumps({'type': kind, 'content': [{'type': 'text', 'text': text}]}), kind))
+
+
+def records_reader(home):
+    reader = object.__new__(desktop.NativeDesktopQueue)
+    reader.home = home
+    return reader
+
+
+@pytest.mark.parametrize('case,expected', [
+    ('nothing', ('absent', None)),
+    ('queued', ('queued', QUEUE_ID)),
+    ('delivered', ('delivered', None)),
+    ('older_notice', ('absent', None)),
+    ('previous_wake_just_before', ('absent', None)),
+    ('same_millisecond', ('delivered', None)),
+    ('other_thread', ('absent', None)),
+    ('agent_echo', ('absent', None)),
+])
+def test_notice_outcome_reads_the_desktop_records(tmp_path, case, expected):
+    other = '01a1b597-0000-7000-8000-000000000000'
+    since, now = 1_000_000.0, 1_000_100_000
+    queued, chat = [], []
+    if case == 'queued':
+        queued.append((QUEUE_ID, ALPHA_THREAD, desktop.WAKE_NOTICE, now))
+    elif case == 'delivered':
+        chat.append((ALPHA_THREAD, 'userMessage', desktop.WAKE_NOTICE, now))
+    elif case == 'older_notice':
+        chat.append((ALPHA_THREAD, 'userMessage', desktop.WAKE_NOTICE, int(since * 1000) - 60_000))
+    elif case == 'previous_wake_just_before':
+        # The previous wake's notice, 3 s earlier: its turn may have polled
+        # before this wake's message arrived, so it must not count.
+        chat.append((ALPHA_THREAD, 'userMessage', desktop.WAKE_NOTICE, int(since * 1000) - 3_000))
+        queued.append((QUEUE_ID, ALPHA_THREAD, desktop.WAKE_NOTICE, int(since * 1000) - 3_000))
+    elif case == 'same_millisecond':
+        chat.append((ALPHA_THREAD, 'userMessage', desktop.WAKE_NOTICE, int(since * 1000)))
+    elif case == 'other_thread':
+        queued.append((QUEUE_ID, other, desktop.WAKE_NOTICE, now))
+        chat.append((other, 'userMessage', desktop.WAKE_NOTICE, now))
+    elif case == 'agent_echo':
+        chat.append((ALPHA_THREAD, 'agentMessage', desktop.WAKE_NOTICE, now))
+    codex_records(tmp_path, queued, chat)
+    assert records_reader(tmp_path).notice_outcome(ALPHA_THREAD, since) == expected
+
+
+def test_notice_outcome_never_reads_missing_records_as_absent(tmp_path):
+    with pytest.raises(desktop.DesktopQueueError, match='desktop_records_unreadable'):
+        records_reader(tmp_path).notice_outcome(ALPHA_THREAD, 1_000_000.0)

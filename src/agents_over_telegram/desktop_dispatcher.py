@@ -47,12 +47,15 @@ PROC_ROOT = Path('/proc')
 # repeats the warning for the same notification while it stays unresolved. The
 # repeat state lives in memory, so a restarted listener warns again once.
 STUCK_WAKE_CHECK_SECONDS = 60
+# An enqueue whose outcome is unknown is checked against the desktop's own
+# records once its child process has surely ended (it is killed after 30 s).
+UNKNOWN_ENQUEUE_CHECK_AFTER_SECONDS = 120
 STUCK_WAKE_WARNING_REPEAT_SECONDS = 3600
 STUCK_WAKE_MESSAGES = {
     'review_uncertain_wake': (
         'Unresolved wake notification blocks every later wake for this client. Reconcile it against '
-        'the target chat, then record the outcome with relay-resolve. The listener never resolves it '
-        'automatically.'),
+        'the target chat, then record the outcome with relay-resolve. A running desktop listener '
+        'settles an unknown enqueue by itself when the desktop records show its outcome.'),
     'wait_for_desktop_wake': (
         'Queued wake has not opened in the desktop yet, so later wakes for this client wait. The '
         'listener retries only its wake URL while the desktop is open and the connection is active. '
@@ -305,6 +308,47 @@ class NativeDesktopQueue:
             raise DesktopQueueError('desktop_queue_outcome_unknown', ambiguous=True)
         return match.group(1)
 
+    def notice_outcome(self, thread_id, since):
+        """Look for one wake notice in the desktop's own records. Read-only.
+
+        Returns ('queued', queue_id) while the notice waits in the native queue,
+        ('delivered', None) once the chat holds it as a user message, or
+        ('absent', None) when neither database has it since ``since``. Raises
+        DesktopQueueError when either database cannot be read, so an unreadable
+        record never counts as absent.
+
+        ``since`` is the creation time of the notification being settled. Its
+        Telegram message was already collected then, so any turn that a notice
+        from after that time started will see it. A notice from an earlier
+        notification may have polled before the message arrived, so it must not
+        match. Both clocks are this machine's, so no slack is added.
+
+        The two databases are read one after the other. If the desktop moves the
+        item from the queue to the chat between the reads, both miss it and the
+        wake is enqueued again: the agent gets a second, identical notice, which
+        is the accepted cost. The check assumes only ``relay-desktop`` writes
+        WAKE_NOTICE into a desktop chat.
+        """
+        if not _uuid(thread_id):
+            raise DesktopQueueError('desktop_queue_target_mismatch')
+        since_ms = math.floor(since * 1000)
+        try:
+            with sqlite3.connect((self.home / 'queue_1.sqlite').as_uri() + '?mode=ro', uri=True) as db:
+                row = db.execute('SELECT id FROM queued_items WHERE thread_id=? AND created_at_ms>=? '
+                                 'AND instr(payload_json,?)>0 ORDER BY created_at_ms LIMIT 1',
+                                 (thread_id, since_ms, WAKE_NOTICE)).fetchone()
+            if row is not None:
+                if not _uuid(row[0]):
+                    raise ValueError
+                return 'queued', row[0]
+            with sqlite3.connect((self.home / 'thread_history_1.sqlite').as_uri() + '?mode=ro', uri=True) as db:
+                row = db.execute("SELECT 1 FROM thread_items WHERE thread_id=? AND created_at_ms>=? "
+                                 "AND item_type='userMessage' AND instr(item_json,?)>0 LIMIT 1",
+                                 (thread_id, since_ms, WAKE_NOTICE)).fetchone()
+        except (OSError, sqlite3.Error, ValueError):
+            raise DesktopQueueError('desktop_records_unreadable') from None
+        return ('delivered', None) if row is not None else ('absent', None)
+
     def wake(self, binding):
         self._guard(binding)
         try:
@@ -346,6 +390,23 @@ class DesktopHandoffs:
             # This state blocks every other relay mode from enqueuing a duplicate.
             db.execute("UPDATE relay_notifications SET status='uncertain',updated=?,next_attempt_at=NULL WHERE id=?",
                        (now, event['notification_id']))
+
+    def unknown_enqueues(self, older_than):
+        """Handoffs whose enqueue outcome was unknown and that still have no receipt."""
+        with self.core._db() as db:
+            return [dict(row) for row in db.execute('''SELECT n.id AS notification_id,
+                n.client_id,n.thread_id,n.project_dir,n.created AS since
+                FROM relay_desktop_handoffs h JOIN relay_notifications n ON n.id=h.notification_id
+                WHERE h.phase='enqueuing' AND h.queue_id IS NULL AND n.status='uncertain'
+                AND h.updated<=? ORDER BY n.created,n.id''', (older_than,))]
+
+    def delivered(self, event):
+        """The desktop chat already holds the notice: record it as handed off."""
+        receipt = self.store.resolve(event['notification_id'], 'accepted')
+        with self.core._tx() as db:
+            db.execute("UPDATE relay_desktop_handoffs SET phase='done',next_wake_at=NULL,updated=? WHERE notification_id=?",
+                       (self.core.clock(), event['notification_id']))
+        return receipt
 
     def pending(self):
         with self.core._db() as db:
@@ -403,6 +464,30 @@ def run_desktop_dispatcher(core, store, *, codex_binary=None, codex_home=None,
     route_backoff = {}
     stuck_warned = {}
     stuck_check_at = 0.0
+
+    def settle_unknown_enqueues():
+        # An enqueue whose child died without a receipt may or may not have
+        # queued the notice. The desktop's own records answer that: still queued
+        # (keep its id and wake it), already in the chat (accepted), or in
+        # neither (it never landed, so retry). Unreadable records settle nothing.
+        older_than = core.clock() - UNKNOWN_ENQUEUE_CHECK_AFTER_SECONDS
+        for event in handoffs.unknown_enqueues(older_than):
+            try:
+                found, queue_id = transport.notice_outcome(event['thread_id'], event['since'])
+                if found == 'queued':
+                    handoffs.queued(event, queue_id)
+                    outcome, receipt = 'queued', {'queue_id': queue_id}
+                elif found == 'delivered':
+                    outcome, receipt = 'accepted', handoffs.delivered(event)
+                else:
+                    outcome, receipt = 'failed', store.resolve(event['notification_id'], 'failed')
+            except CoreError as error:
+                report(event['notification_id'], {'type': 'desktop_unknown_enqueue_unsettled',
+                       'notification_id': event['notification_id'], 'error': _code(error)})
+                continue
+            emit({'type': 'desktop_unknown_enqueue_settled', 'client_id': event['client_id'],
+                  'thread_id': event['thread_id'], 'outcome': outcome,
+                  'notification_id': event['notification_id'], **receipt})
 
     def warn_stuck_wakes():
         # Report only. An unresolved handoff may already have reached the target,
@@ -464,6 +549,7 @@ def run_desktop_dispatcher(core, store, *, codex_binary=None, codex_home=None,
                     report('collector', {'type': 'desktop_collection_error', 'error': error})
                 if time.monotonic() >= stuck_check_at:
                     stuck_check_at = time.monotonic() + STUCK_WAKE_CHECK_SECONDS
+                    settle_unknown_enqueues()
                     warn_stuck_wakes()
                 if not transport.desktop_running():
                     report('desktop', {'type': 'desktop_waiting', 'error': 'desktop_not_running'})
