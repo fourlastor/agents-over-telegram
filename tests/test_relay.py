@@ -561,3 +561,47 @@ def test_unresolved_wake_query_reads_only_outstanding_rows(env):
         query = next(sql for sql in statements if 'FROM relay_notifications n' in sql)
         plan = ' '.join(row[3] for row in db.execute('EXPLAIN QUERY PLAN ' + query))
     assert 'relay_one_outstanding' in plan
+
+
+def append_from(transport, text, sender, chat=-100):
+    number = len(transport.updates) + 1
+    transport.updates.append({'update_id': number, 'message': {
+        'message_id': number, 'chat': {'id': chat, 'type': 'supergroup', 'title': 'Test'},
+        'from': {'id': sender, 'is_bot': False}, 'text': text}})
+
+
+def test_wake_interval_holds_desktop_wakes_like_push_notices(env):
+    from agents_over_telegram import push
+    core, transport, clock, relay, alpha, _, project_a, _ = env
+    relay.bind(alpha, ALPHA_THREAD, project_a)
+    core.allow_sender(alpha, 202)
+    core.delivery_settings(alpha, wake_interval=600)
+    append_from(transport, 'first', 202)
+    core.collect()
+    first = relay.next_event()
+    relay.resolve(first['notification_id'], 'accepted')
+    append_from(transport, 'chatter', 202)
+    core.collect()
+    assert relay.next_event() is None
+    # The owner is exempt by default and takes the held message along.
+    append(transport, 'from the owner')
+    core.collect()
+    owner = relay.next_event()
+    assert owner['pending_count'] == 2  # the held message and the owner's
+    relay.resolve(owner['notification_id'], 'accepted')
+    handle_all(core, alpha)
+    append_from(transport, 'later chatter', 202)
+    core.collect()
+    assert relay.next_event() is None
+    clock.advance(600)
+    later = relay.next_event()
+    assert later['pending_count'] == 1
+    relay.resolve(later['notification_id'], 'accepted')
+    handle_all(core, alpha)
+    # A push notice counts as a notice for the desktop wake too.
+    clock.advance(600)
+    append_from(transport, 'seen by a hook', 202)
+    core.collect()
+    push.ensure_tables(core)
+    assert push.claim_new(core, alpha, 'hook')['new'] == 1
+    assert relay.next_event() is None
