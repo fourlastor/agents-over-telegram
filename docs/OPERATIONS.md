@@ -321,15 +321,20 @@ AOT enforces the volume, not the agent. Each agent can send at most 3 notices in
 
 The owner must also do one thing once: open a private chat with the bot and send `/start`. Telegram does not let a bot start a private chat by itself. A paused or suspended connection refuses `owner_notify`, as for `message_send`.
 
-Several agents can share one bot, so AOT cannot give a text reply in the private chat to one agent. Each notice therefore ends with "Reply in the group, not here." The owner can still react to a notice, or to its forward, to acknowledge it. A reaction targets one message, and AOT knows which agent sent it. The reaction reaches that agent as a normal reaction delivery on its own message, with the private chat as `chat_id`. It wakes the agent under the same `reaction_wake` rules as other reactions on its own messages. Only the owner's own reactions are routed this way.
+Several agents can share one bot, so a plain message in the private chat cannot go to one agent. A Telegram reply can: it names one notice, and AOT knows which agent sent it. Each notice therefore ends with "Reply to this message to answer the agent."
 
-AOT keeps every other private chat update as unassigned metadata with the reason `private_chat`. This includes `/start`, text replies, reactions on other messages, reactions from other people, and the owner blocking or unblocking the bot. AOT stores no text and no private chat id, and it delivers these updates to no agent. `aot unassigned` shows these entries; they are expected, not a fault.
+- When the owner replies to a notice, or to its forward, AOT delivers the reply to the agent that sent the notice. It is a normal message delivery from the owner, with the private chat as `chat_id`, `owner_notice: true` and `addressed: true`. So it wakes the agent at once, also while wake batching holds other notices. Text and media follow the same rules as group messages, including the connection's media setting.
+- The agent can answer in the group, or with another `owner_notify` that passes `reply_to`: the `message_id` of its own notice, of its forward, or of an owner reply it received. The answer then appears as a Telegram reply in the private chat. The same limits apply. Any other `reply_to` fails with `unknown_owner_reply`.
+- The owner can also react to a notice, or to its forward, to acknowledge it. The reaction reaches the agent that sent the notice as a normal reaction delivery on its own message, with the private chat as `chat_id`. It wakes the agent under the same `reaction_wake` rules as other reactions on its own messages.
+
+Only the owner's own replies and reactions are routed this way. AOT keeps every other private chat update as unassigned metadata with the reason `private_chat`. This includes `/start`, messages that do not reply to a notice, replies and reactions on other messages, anything from other people, and the owner blocking or unblocking the bot. AOT stores no text and no private chat id for these, and it delivers them to no agent. `aot unassigned` shows these entries; they are expected, not a fault.
 
 `owner_notify` uses the same idempotency rules as `message_send`. The same key with the same request returns the same outcome. The same key with a different request is refused. `delivery_status` shows the outcome. An `unknown` outcome follows [uncertain-send recovery](#uncertain-sends) with the `owner_…` id. A `retry` repeats only the step that has no recorded message: the notice text or the forward.
 
 | Error code | Meaning |
 | --- | --- |
 | `owner_notify_disabled` | The owner has not turned on `owner_notify` for this connection. Nothing was sent, and it does not count toward the limit. The agent asks the owner; only the owner runs `delivery-settings --owner-notify on`. |
+| `unknown_owner_reply` | `reply_to` is not a notice, forward or routed owner reply of this agent in the owner's private chat. Nothing was sent. |
 | `owner_notify_limit` | The agent reached the hourly or daily limit. Nothing was sent. The error gives `retry_at`, the time when the next notice is allowed. |
 | `owner_chat_not_started` | Telegram refused the private chat (403): the owner never sent `/start` to the bot, or blocked it. Nothing was sent, and it does not count toward the limit. Ask the owner to send `/start` to the bot, then use a new idempotency key. |
 | `unknown_forward_target` | `forward_message_id` is not a message in the agent's own group or topic. Nothing was sent. |

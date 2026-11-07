@@ -73,7 +73,7 @@ def test_sends_labelled_text_to_owner_private_chat(env):
     [sent] = owner_messages(transport)
     # The private chat id is the owner's user id, recorded at pairing.
     assert sent['text'] == ('[Agent: Alpha | Test group]\nNeed your approval to merge.\n'
-                            'Reply in the group, not here.')
+                            'Reply to this message to answer the agent.')
     assert sent['message_thread_id'] is None and sent['reply_to_message_id'] is None
     assert core.delivery_status(client, result['notify_id']) == result
 
@@ -244,7 +244,7 @@ def test_tool_is_listed_with_schema_and_dispatches(env):
     tool = {t.name: t for t in TOOLS}['owner_notify']
     schema = tool.inputSchema
     assert schema['required'] == ['text', 'idempotency_key']
-    assert set(schema['properties']) == {'text', 'idempotency_key', 'forward_message_id'}
+    assert set(schema['properties']) == {'text', 'idempotency_key', 'forward_message_id', 'reply_to'}
     assert 'decision' in tool.description and 'routine' in tool.description
     body = call_tool(core, client, 'owner_notify', {'text': 'Approve?', 'idempotency_key': 't1'})
     assert body['ok'] and body['result']['status'] == 'sent'
@@ -445,3 +445,139 @@ def test_group_reactions_do_not_carry_the_owner_notice_mark(env):
     core.collect()
     [reaction] = [d for d in core.poll(sender, lease_seconds=10)['deliveries'] if d['kind'] == 'reaction']
     assert 'owner_notice' not in reaction
+
+
+def private_reply(transport, text, reply_to, sender=OWNER, chat=OWNER, **fields):
+    """The owner's private message; reply_to=None sends it without quoting anything."""
+    number = max((u['update_id'] for u in transport.updates), default=0) + 1
+    message = {'message_id': 500 + number, 'date': 1000, 'chat': {'id': chat, 'type': 'private', 'first_name': 'Owner'},
+               'from': {'id': sender, 'is_bot': False, 'username': 'owner'}, **fields}
+    if text is not None:
+        message['text'] = text
+    if reply_to is not None:
+        message['reply_to_message'] = {'message_id': reply_to, 'chat': {'id': chat, 'type': 'private'},
+                                       'from': {'id': transport.bot_id, 'is_bot': True, 'username': transport.username},
+                                       'text': '[Agent: Alpha | Test group]\nApprove?'}
+    transport.updates.append({'update_id': number, 'message': message})
+    return message['message_id']
+
+
+def test_owner_reply_to_a_notice_reaches_the_sending_agent(env):
+    core, transport, clock = env
+    sender = bind(core, transport)
+    other = bind(core, transport, 'Beta', chat=-200)
+    notice = core.owner_notify(sender, 'Approve the release?', 'n1')
+    clock.advance()
+    core.owner_notify(other, 'Unrelated question', 'n2')
+    reply_id = private_reply(transport, 'Yes, ship it.', notice['message_id'])
+    assert core.collect()['status'] == 'ok'
+    [delivery] = core.poll(sender)['deliveries']
+    assert delivery['kind'] == 'message' and delivery['text'] == 'Yes, ship it.'
+    assert delivery['message_id'] == reply_id and delivery['reply_to'] == notice['message_id']
+    assert delivery['chat_id'] == OWNER and delivery['thread_id'] is None
+    assert delivery['sender']['id'] == OWNER
+    assert delivery['owner_notice'] is True and delivery['addressed'] is True
+    assert delivery['conversation_id'] == f'owner:{sender}:{notice["notify_id"]}'
+    assert delivery['reply_to_message']['sender']['allowed'] is True
+    assert core.poll(other)['deliveries'] == []
+    assert 'private_chat' not in private_reasons(core)
+
+
+def test_owner_reply_to_a_forward_reaches_the_sending_agent(env):
+    core, transport, _ = env
+    sender = bind(core, transport)
+    number = append(transport, 'Seb, which option?')
+    core.collect()
+    core.poll(sender)
+    notice = core.owner_notify(sender, 'Look at this.', 'n1', forward_message_id=number)
+    private_reply(transport, 'Option B.', notice['forwarded_message_id'])
+    core.collect()
+    replies = [d for d in core.poll(sender, lease_seconds=10)['deliveries'] if d.get('owner_notice')]
+    assert [d['text'] for d in replies] == ['Option B.']
+
+
+def test_owner_reply_media_follows_the_media_setting(env):
+    core, transport, _ = env
+    sender = bind(core, transport)
+    core.delivery_settings(sender, accept_media=False)
+    notice = core.owner_notify(sender, 'Send me the log?', 'n1')
+    private_reply(transport, None, notice['message_id'], caption='here',
+                  document={'file_id': 'DOC1', 'file_unique_id': 'uDoc1', 'file_name': 'log.txt', 'file_size': 5})
+    core.collect()
+    [delivery] = core.poll(sender)['deliveries']
+    assert delivery['text'] == 'here' and delivery['media_refused'] == ['document'] and 'attachments' not in delivery
+
+
+def test_other_private_messages_stay_private_chat(env):
+    core, transport, _ = env
+    sender = bind(core, transport)
+    notice = core.owner_notify(sender, 'Approve?', 'n1')
+    # Not quoting anything.
+    private_reply(transport, 'Yes', None)
+    # Quoting a message that is not a notice.
+    private_reply(transport, 'Yes', notice['message_id'] + 50)
+    # Someone else replying in their own private chat, on the same message id.
+    private_reply(transport, 'Yes', notice['message_id'], sender=202, chat=202)
+    core.collect()
+    assert core.poll(sender)['deliveries'] == []
+    assert private_reasons(core)[:3] == ['private_chat'] * 3
+
+
+def test_owner_notify_reply_to_answers_in_the_private_chat(env):
+    core, transport, clock = env
+    sender = bind(core, transport)
+    other = bind(core, transport, 'Beta', chat=-200)
+    notice = core.owner_notify(sender, 'Approve?', 'n1')
+    reply_id = private_reply(transport, 'Which version?', notice['message_id'])
+    core.collect()
+    clock.advance()
+    # Answer the owner's routed reply, and reply to the own notice.
+    answer = core.owner_notify(sender, 'Version 2.', 'n2', reply_to=reply_id)
+    assert answer['status'] == 'sent' and answer['reply_to'] == reply_id
+    assert owner_messages(transport)[-1]['reply_to_message_id'] == reply_id
+    clock.advance()
+    assert core.owner_notify(sender, 'Also this.', 'n3', reply_to=notice['message_id'])['status'] == 'sent'
+    # reply_to is part of the request.
+    with pytest.raises(CoreError, match='idempotency_conflict'):
+        core.owner_notify(sender, 'Version 2.', 'n2')
+    # Another agent cannot reply to this agent's messages, and unknown ids fail.
+    core.delivery_settings(other, owner_notify=True)
+    for target in (reply_id, notice['message_id'], 9999):
+        with pytest.raises(CoreError) as error:
+            core.owner_notify(other, 'x', f'o{target}', reply_to=target)
+        assert error.value.code == 'unknown_owner_reply'
+    # The same 3-per-hour limit applies to replies.
+    clock.advance()
+    with pytest.raises(CoreError, match='owner_notify_limit'):
+        core.owner_notify(sender, 'One more.', 'n4', reply_to=reply_id)
+    assert _error_body('unknown_owner_reply')['error']['message'].startswith('reply_to is not')
+    assert call_tool(core, sender, 'owner_notify', {'text': 'x', 'idempotency_key': 'k',
+                                                    'reply_to': 0})['error']['code'] == 'invalid_arguments'
+
+
+def test_message_send_does_not_reply_in_the_group_to_a_private_owner_reply(env):
+    core, transport, _ = env
+    sender = bind(core, transport)
+    notice = core.owner_notify(sender, 'Approve?', 'n1')
+    reply_id = private_reply(transport, 'Yes', notice['message_id'])
+    core.collect()
+    with pytest.raises(CoreError, match='unknown_reply'):
+        core.send(sender, 'Thanks', 's1', reply_to=reply_id)
+
+
+@pytest.mark.parametrize('exempt,announced', [('addressed,owner', True), ('addressed', True),
+                                              ('owner', True), ('none', False)])
+def test_owner_reply_wakes_at_once_while_batching(env, exempt, announced):
+    from agents_over_telegram import push
+    core, transport, _ = env
+    sender = bind(core, transport)
+    core.delivery_settings(sender, wake_interval=600, wake_exempt=exempt)
+    push.ensure_tables(core)
+    core.allow_sender(sender, 202)
+    append(transport, 'first', sender=202)
+    core.collect()
+    assert push.claim_new(core, sender, 'watch')['new'] == 1  # starts the interval
+    notice = core.owner_notify(sender, 'Approve?', 'n1')
+    private_reply(transport, 'Yes', notice['message_id'])
+    core.collect()
+    assert (push.claim_new(core, sender, 'watch') is not None) == announced
