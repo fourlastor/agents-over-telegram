@@ -554,3 +554,17 @@ def test_reaction_target_is_found_through_the_message_index(env):
     assert migrated.poll(alpha)['deliveries'][0]['kind'] == 'reaction'
     plan = rows(migrated, 'EXPLAIN QUERY PLAN SELECT client_id FROM inbox WHERE tg_chat_id=? AND tg_message_id=?', (-100, target))
     assert any('inbox_telegram_message' in str(step) for step in plan)
+
+
+def test_reaction_on_a_context_message_in_a_topic_is_routed(env):
+    core, transport, clock = env
+    alpha = bind(core, transport, 'Alpha', chat=-100, topic=7)
+    bind(core, transport, 'Beta', chat=-100, topic=8)
+    core.delivery_settings(alpha, delivery_filter='addressed', capture_context=True, reaction_wake='all')
+    number = next_number(transport)
+    collect_one(core, transport, message(number, 'not for the bot', topic=7))
+    assert core.poll(alpha)['deliveries'] == []
+    assert rows(core, 'SELECT context FROM inbox WHERE tg_message_id=?', (number,)) == [(1,)]
+    collect_one(core, transport, reaction(next_number(transport), number, new=emoji(['👍'])))
+    assert 'unresolved_reaction' not in unassigned(core)
+    assert core.poll(alpha)['deliveries'][0]['kind'] == 'reaction'

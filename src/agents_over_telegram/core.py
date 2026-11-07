@@ -1178,9 +1178,10 @@ class Core:
     def _keep_context(self, db, client_id, event_key, payload, conversation_id, now, event_at):
         # Stored acknowledged and outside the queue bound: history reads it, no
         # poll, watch, relay or push path ever claims or announces it.
-        db.execute('''INSERT OR IGNORE INTO inbox(id,client_id,event_key,payload,created,conversation_id,event_at,acknowledged,context)
-            VALUES(?,?,?,?,?,?,?,1,1)''', ('msg_' + secrets.token_hex(12), client_id, event_key,
-                                         json.dumps(payload, ensure_ascii=False), now, conversation_id, event_at))
+        keys = _telegram_message_keys(payload) or (None, None)
+        db.execute('''INSERT OR IGNORE INTO inbox(id,client_id,event_key,payload,created,conversation_id,event_at,acknowledged,context,tg_chat_id,tg_message_id)
+            VALUES(?,?,?,?,?,?,?,1,1,?,?)''', ('msg_' + secrets.token_hex(12), client_id, event_key,
+                                             json.dumps(payload, ensure_ascii=False), now, conversation_id, event_at, *keys))
 
     def _prune_context(self, db, now):
         """Drop context older than the history window, with its bookkeeping rows and fetched files.
