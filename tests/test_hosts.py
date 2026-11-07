@@ -722,8 +722,10 @@ def test_waiting_waiter_keeps_waiting_until_replaced(tmp_path):
 # ------------------------------------------------------------ the MCP relay
 
 FAKE_MCP = '''#!{python}
-import json, sys, time
+import json, os, sys, time
 log = open({log!r}, "a")
+with open({pids!r}, "a") as pids:
+    pids.write(str(os.getpid()) + "\\n")
 for line in sys.stdin:
     message = json.loads(line)
     log.write(json.dumps({{"version": {version!r}, "message": message}}) + "\\n")
@@ -735,6 +737,8 @@ for line in sys.stdin:
         continue
     if method == "slow":
         time.sleep(1.5)
+    if method == "hang":
+        time.sleep(60)
     if method == "initialize":
         result = {{"protocolVersion": "2025-06-18", "capabilities": {{"tools": {{}}}},
                    "serverInfo": {{"name": "fake", "version": {version!r}}}}}
@@ -748,7 +752,8 @@ for line in sys.stdin:
 def fake_mcp_runtime(tmp_path, version):
     path = tmp_path / 'bin' / ('aot-' + version)
     path.parent.mkdir(exist_ok=True)
-    path.write_text(FAKE_MCP.format(python=sys.executable, log=str(tmp_path / 'mcp.log'), version=version))
+    path.write_text(FAKE_MCP.format(python=sys.executable, log=str(tmp_path / 'mcp.log'),
+                                    pids=str(tmp_path / 'pids'), version=version))
     os.chmod(path, 0o700)
     return path
 
@@ -854,6 +859,47 @@ def test_relay_waits_for_requests_in_flight_before_swapping(tmp_path):
         assert session.receive()['result']['version'] == 'v2'
     finally:
         assert session.close() == 0
+
+
+@needs_system_python
+def test_relay_swaps_past_a_call_the_host_cancelled(tmp_path):
+    project, session, _ = relay_project(tmp_path)
+    try:
+        session.send(2, 'hang')
+        time.sleep(0.3)
+        session.send(None, 'notifications/cancelled', requestId=2, reason='timeout')
+        write_pointer(project, {'version': 1, 'executable': str(fake_mcp_runtime(tmp_path, 'v2'))})
+        assert session.call(3, 'tools/list')['method'] == 'notifications/tools/list_changed'
+        assert session.receive() == {'jsonrpc': '2.0', 'id': 3, 'result': {'version': 'v2', 'method': 'tools/list'}}
+    finally:
+        assert session.close() == 0
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # A zombie still answers kill(0); it is gone once its parent reaped it.
+    try:
+        return Path(f'/proc/{pid}/stat').read_text().split()[2] != 'Z'
+    except OSError:
+        return False
+
+
+@needs_system_python
+@pytest.mark.parametrize('signum', [signal.SIGTERM, signal.SIGHUP])
+def test_relay_stops_the_runtime_when_the_host_stops_it(tmp_path, signum):
+    project, session, _ = relay_project(tmp_path)
+    session.send(2, 'hang')
+    time.sleep(0.3)
+    [pid] = [int(line) for line in (tmp_path / 'pids').read_text().split()]
+    session.process.send_signal(signum)
+    assert session.process.wait(timeout=10) == 128 + signum
+    deadline = time.monotonic() + 10
+    while alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not alive(pid)
 
 
 @needs_system_python

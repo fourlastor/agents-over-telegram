@@ -181,6 +181,7 @@ class _Relay:
         self.child = None
         self.executable = None
         self.pending = set()
+        self.signalled = False
         self.init_line = None
         self.init_key = None
         self.initialized_line = None
@@ -209,7 +210,7 @@ class _Relay:
             self.child, self.executable = child, executable
         threading.Thread(target=self._read_child, args=(child,), daemon=True).start()
 
-    def _stop(self):
+    def _stop(self, terminate=False):
         with self.lock:
             child, self.child = self.child, None
         if child is None:
@@ -218,6 +219,15 @@ class _Relay:
             child.stdin.close()
         except OSError:
             pass
+        if terminate:
+            # The host is stopping us: do not wait for a tool call to finish.
+            try:
+                child.terminate()
+            except OSError:
+                pass
+        self._reap(child)
+
+    def _reap(self, child):
         try:
             child.wait(timeout=RELAY_STOP_TIMEOUT)
         except self._subprocess.TimeoutExpired:
@@ -225,7 +235,11 @@ class _Relay:
             child.wait()
 
     def _read_child(self, child):
-        for line in iter(child.stdout.readline, b""):
+        import io
+        # stdin stays unbuffered for prompt writes; reads go through a buffer,
+        # so a large answer is not read one byte at a time.
+        reader = io.BufferedReader(child.stdout, 65536)
+        for line in iter(reader.readline, b""):
             forward = True
             with self.lock:
                 if child is not self.child:
@@ -256,6 +270,7 @@ class _Relay:
             self.replay_done.set()
         for key in sorted(lost):
             self._error(key)
+        self._reap(child)
 
     def _restart(self):
         """Start a fresh child and bring it to the host's session state."""
@@ -298,7 +313,21 @@ class _Relay:
         executable, _problem = _executable(self.project)
         return executable is not None and executable != current
 
+    def _quit(self, signum, _frame):
+        self.signalled = True
+        raise SystemExit(128 + signum)
+
     def run(self):
+        import signal
+        for name in ("SIGTERM", "SIGHUP"):
+            if hasattr(signal, name):
+                signal.signal(getattr(signal, name), self._quit)
+        try:
+            return self._serve()
+        finally:
+            self._stop(terminate=self.signalled)
+
+    def _serve(self):
         try:
             self._start()
         except OSError:
@@ -312,6 +341,7 @@ class _Relay:
             initialize = any(m.get("method") == "initialize" for m in requests)
             if any(m.get("method") == "notifications/initialized" for m in messages):
                 self.initialized_line = line
+            self._cancelled(messages)
             if requests and self._needs_restart():
                 try:
                     if initialize:
@@ -346,8 +376,16 @@ class _Relay:
                     self.pending.difference_update(lost)
                 for key in lost:
                     self._error(key)
-        self._stop()
         return 0
+
+    def _cancelled(self, messages):
+        # A call the host gave up on gets no answer, so it must not hold off a swap.
+        with self.lock:
+            for message in messages:
+                params = message.get("params")
+                if message.get("method") == "notifications/cancelled" and isinstance(params, dict) \
+                        and "requestId" in params:
+                    self.pending.discard(_key(params["requestId"]))
 
 
 def main(argv):
