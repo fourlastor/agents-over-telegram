@@ -399,6 +399,21 @@ while True:
     }
 
 
+def wait_for_stderr(process, needle, timeout=5):
+    # Read the raw descriptor so communicate() later returns only the rest.
+    seen = b""
+    deadline = time.monotonic() + timeout
+    while needle not in seen:
+        remaining = deadline - time.monotonic()
+        ready, _, _ = select.select([process.stderr], [], [], max(remaining, 0))
+        if not ready:
+            pytest.fail(f"bridge never wrote {needle!r} to stderr: {seen!r}")
+        chunk = os.read(process.stderr.fileno(), 65536)
+        assert chunk, f"bridge closed stderr before writing {needle!r}: {seen!r}"
+        seen += chunk
+    return seen
+
+
 def wait_for_file(path):
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -553,10 +568,12 @@ def test_dispatcher_log_is_bounded_and_symlink_is_never_followed(bridge):
     send(process, {"id": 1, "method": "initialize"})
     receive(process)
     send(process, {"method": "initialized"})
-    time.sleep(0.15)
+    # The bridge tries to start the dispatcher on its next poll after
+    # `initialized`; wait for the refusal instead of guessing how long that takes.
+    early_error = wait_for_stderr(process, b"dispatcher could not start")
     send(process, {"id": 2, "method": "still-working"})
     assert receive(process)["id"] == 2
     output, error = finish(process)
     assert process.returncode == 0
-    assert b"dispatcher could not start" in error
+    assert b"dispatcher could not start" in early_error + error
     assert target.read_text() == "unchanged"
