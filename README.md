@@ -44,6 +44,7 @@ Ask Codex:
 - **“Pause Telegram” / “Resume Telegram”** — control this project's connection.
 - **“Show recent Telegram context”** — read captured messages from the last 24 hours, including handled messages.
 - **“Send Beta this testing result…”** — send within the recipient and purpose you authorize.
+- **“React 👍 to that message”** — put one standard emoji reaction on a known message in the bound group or topic, or remove it; see [message reactions](docs/REACTIONS.md).
 - **“Listen for Telegram”** — start a bounded listener for a chosen local chat while ChatGPT is open normally.
 - **“Leave Telegram listening”** — keep the listener running until stopped. Automatic restart after login requires an explicit service request; see the [macOS service procedure](docs/MACOS_SERVICE.md).
 
@@ -67,6 +68,7 @@ Version 0.7.2 passed a fresh install from the public GitHub repository with **no
 
 - [Agent hosts: Claude Code, Codex, Pi and Amp](docs/HOSTS.md)
 - [Guided setup, local controls and advanced CLI](docs/OPERATIONS.md)
+- [Message reactions](docs/REACTIONS.md)
 - [Listen with the normally opened desktop](docs/DIRECT_DISPATCH.md)
 - [Shared binding procedure and older model-mediated relay](docs/RELAY.md)
 - [Compatibility and scope boundaries](docs/COMPATIBILITY.md)

@@ -41,11 +41,11 @@ class TelegramTransport:
         self._token = validate_token(token)
         self._opener = opener or urllib.request.build_opener(_NoRedirect(), urllib.request.ProxyHandler({}))
 
-    def _call(self, method, params, *, sending=False, timeout=15):
+    def _call(self, method, params, *, sending=False, timeout=15, expects="message"):
         return self._post(method, json.dumps(params).encode(), "application/json",
-                          sending=sending, timeout=timeout)
+                          sending=sending, timeout=timeout, expects=expects)
 
-    def _post(self, method, body, content_type, *, sending=False, timeout=15):
+    def _post(self, method, body, content_type, *, sending=False, timeout=15, expects="message"):
         request = urllib.request.Request(
             "https://api.telegram.org/bot" + self._token + "/" + method,
             data=body, headers={"Content-Type": content_type}, method="POST")
@@ -82,7 +82,10 @@ class TelegramTransport:
                     raise TransportError(code, retry)
                 raise UnknownSend() if sending else TransportError("invalid_response")
             result = payload["result"]
-            if sending and (not isinstance(result, dict) or type(result.get("message_id")) is not int):
+            if sending and expects == "message" and (not isinstance(result, dict) or type(result.get("message_id")) is not int):
+                raise ValueError()
+            # setMessageReaction answers with the bare boolean True.
+            if sending and expects == "bool" and result is not True:
                 raise ValueError()
             return result
         except TransportError:
@@ -105,7 +108,9 @@ class TelegramTransport:
     def get_updates(self, offset, timeout=0):
         timeout = max(0, min(20, int(timeout)))
         result = self._call("getUpdates", {"offset": offset, "timeout": timeout, "limit": 100,
-            "allowed_updates": ["message", "edited_message", "my_chat_member"]}, timeout=timeout + 15)
+            # message_reaction must be named explicitly; Telegram never sends it by
+            # default, and only while the bot is an administrator in the chat.
+            "allowed_updates": ["message", "edited_message", "my_chat_member", "message_reaction"]}, timeout=timeout + 15)
         if not isinstance(result, list):
             raise TransportError("invalid_updates")
         return result
@@ -140,6 +145,16 @@ class TelegramTransport:
             fields["reply_parameters"] = json.dumps({"message_id": reply_to})
         body, content_type = _multipart(fields, [(field, filename, mime, bytes(data))])
         return self._post(method, body, content_type, sending=True)
+
+    def set_message_reaction(self, chat_id, message_id, emoji):
+        """Set the bot's one standard-emoji reaction, or remove it when emoji is empty.
+
+        The Bot API answers True; an empty reaction list clears the bot's
+        reaction. Anything but a definite True is an uncertain outcome.
+        """
+        params = {"chat_id": chat_id, "message_id": message_id,
+                  "reaction": [{"type": "emoji", "emoji": emoji}] if emoji else []}
+        return self._call("setMessageReaction", params, sending=True, expects="bool")
 
     def get_chat_member(self, chat_id, user_id):
         result = self._call("getChatMember", {"chat_id": chat_id, "user_id": user_id})
@@ -227,6 +242,7 @@ class FakeTransport:
         self.webhook = webhook
         self.outcomes = list(outcomes or [])
         self.sent = []
+        self.reactions = []
         self.poll_offsets = []
         self.chat_members = {}  # {str(chat_id): {str(user_id): ChatMember dict}}
         self.files = {}  # {file_id: {"content": bytes}}
@@ -289,6 +305,22 @@ class FakeTransport:
                 raise SystemExit("fake crash after acceptance")
             return copy.deepcopy(message)
 
+    def set_message_reaction(self, chat_id, message_id, emoji):
+        with self._lock:
+            outcome = self.outcomes.pop(0) if self.outcomes else "sent"
+            if isinstance(outcome, BaseException):
+                raise outcome
+            if outcome == "reject":
+                raise TransportError(403)
+            if outcome == "rate_limit":
+                raise TransportError(429, 30)
+            self.reactions.append({"chat_id": chat_id, "message_id": message_id, "emoji": emoji})
+            if outcome == "unknown":
+                raise UnknownSend()
+            if outcome == "crash":
+                raise SystemExit("fake crash after acceptance")
+            return True
+
     def get_chat_member(self, chat_id, user_id):
         with self._lock:
             return _fake_chat_member(self.chat_members, chat_id, user_id)
@@ -310,7 +342,8 @@ class FileFakeTransport:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             data = read_private_json(self.path) if self.path.exists() else {
-                "bot_id": 900001, "username": "aot_test_bot", "updates": [], "sent": [], "outcomes": [], "poll_offsets": []}
+                "bot_id": 900001, "username": "aot_test_bot", "updates": [], "sent": [], "reactions": [], "outcomes": [], "poll_offsets": []}
+            data.setdefault("reactions", [])
             yield data
             write_private_json(self.path, data, overwrite=self.path.exists())
         finally:
@@ -373,6 +406,21 @@ class FileFakeTransport:
         if outcome == "crash":
             raise SystemExit("fake crash after acceptance")
         return result
+
+    def set_message_reaction(self, chat_id, message_id, emoji):
+        with self._data() as data:
+            outcome = data["outcomes"].pop(0) if data["outcomes"] else "sent"
+            if outcome not in ("reject", "rate_limit"):
+                data["reactions"].append({"chat_id": chat_id, "message_id": message_id, "emoji": emoji})
+        if outcome == "reject":
+            raise TransportError(403)
+        if outcome == "rate_limit":
+            raise TransportError(429, 30)
+        if outcome == "unknown":
+            raise UnknownSend()
+        if outcome == "crash":
+            raise SystemExit("fake crash after acceptance")
+        return True
 
     def get_chat_member(self, chat_id, user_id):
         with self._data() as data:

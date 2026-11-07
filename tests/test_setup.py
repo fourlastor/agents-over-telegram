@@ -465,7 +465,7 @@ def test_codex_config_approves_only_push_tools(tmp_path):
     result = prepare(tmp_path)
     entry = tomllib.loads(Path(result['config_file']).read_text())['mcp_servers']['telegram']
     assert entry['tools'] == {name: {'approval_mode': 'approve'} for name in CODEX_APPROVED_TOOLS}
-    assert set(CODEX_APPROVED_TOOLS) == {'messages_poll', 'message_send', 'messages_ack'}
+    assert set(CODEX_APPROVED_TOOLS) == {'messages_poll', 'message_send', 'message_react', 'messages_ack'}
 
 
 def test_older_codex_config_gains_approvals_and_custom_tools_stay(tmp_path):

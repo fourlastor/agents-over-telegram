@@ -190,6 +190,7 @@ In a busy shared group, the owner can deliver only messages addressed to this ag
 
 - `--filter addressed` delivers an allowed sender's message only when it mentions the shared bot (`@YourBotUsername`), replies to one of the bot's messages, or carries a command addressed to it (`/review@YourBotUsername`). An edit of a delivered message is still delivered. Other messages from allowed senders are kept as context. `--filter all` restores the default.
 - `--context on` also keeps messages from senders that are **not** allowed, as context only. It never allows those senders: their messages are not delivered, cannot pause the connection and cannot pair. `--context off` stops capturing; context already captured stays until it expires.
+- `--reaction-wake own_messages|all|none` decides which incoming reactions from allowed senders are delivered and can wake this agent. The default `own_messages` delivers only reactions on messages this agent published; the others are kept as context. See [message reactions](REACTIONS.md#wake-policy).
 
 Context is untrusted and is never delivered, leased, announced by a push notice or counted against the pending inbox limit. It appears in `messages_history` with `status: "context"` and a `context_reason` of `not_addressed` or `sender_not_allowed`, and it is deleted after the 24-hour history window. An agent may reply to a context message with `reply_to`. The reply uses that message's normal conversation, so the conversation and bot-exchange budgets still apply. Running the command without `--filter`, `--context` or `--media` prints the current settings, and `aot status` shows them under `routing`.
 
@@ -259,6 +260,8 @@ A send can attach one local image with `image_path`: an absolute path to a regul
 
 For a retry, the outbox stores a copy of the image bytes, not the original path. The bytes are written under the private state directory as `outbox-images/<outbox_id>.<ext>` (mode 0600) before the outbox row is committed, so the original file may change or disappear without affecting a queued record. Allowed recipients, pacing, conversation budgets, `delivery_status` and uncertain-send recovery apply to image sends unchanged. The copy is deleted when the record reaches `sent` or `rejected`; an `unknown` record keeps it until the operator resolves it, because `retry` may send it again. Repeating an idempotency key re-reads and re-checks `image_path`, so a retry whose source file is gone fails with `invalid_image`; once the intent is stored, `delivery_status` reports its outcome without needing the file.
 
+Agents can also set or remove the bot's reaction on a known message in their own destination with `message_react`, and receive people's reactions as deliveries or context. Reactions carry their own rolling limit (30 per agent per hour), never count toward any message send limit, and require the bot to be an administrator in the chat for the receiving side. See [message reactions](REACTIONS.md).
+
 Collection preserves the whole batch transaction: a full pending inbox rolls back that batch and holds the shared cursor. This prevents loss but can temporarily stall intake for other destinations. Resume and handle the affected inbox to free capacity before further collection. Acknowledgments release pending capacity but retain the records.
 
 The owner can inspect bounded unassigned metadata:
@@ -287,7 +290,7 @@ For `unknown`, the operator checks the intended Telegram destination and correla
 "$AOT_BIN" --state-dir "$AOT_STATE" resolve --outbox-id OUTBOX_ID --resolution retry
 ```
 
-These are alternatives, not a sequence. `accepted` records a verified publication. `cancel` stops further attempts while preserving the record. `retry` is an explicit decision to permit another attempt when the operator accepts duplication risk; it changes the original record to `queued` and does not send immediately. Continue the original intent/key. A later `messages_poll`, repeated `message_send` with that same intent/key, or explicit scoped flush can attempt the now-due record:
+These are alternatives, not a sequence. `accepted` records a verified publication. `cancel` stops further attempts while preserving the record. `retry` is an explicit decision to permit another attempt when the operator accepts duplication risk; it changes the original record to `queued` and does not send immediately. Continue the original intent/key. A later `messages_poll`, repeated `message_send` with that same intent/key, or explicit scoped flush can attempt the now-due record. The same command and resolutions apply to uncertain reactions (`--outbox-id react_…`); `accepted` needs no `--message-id` there because re-setting a reaction is the observable effect:
 
 ```sh
 "$AOT_BIN" --state-dir "$AOT_STATE" flush --client-file "$AOT_STATE/clients/alpha.json"

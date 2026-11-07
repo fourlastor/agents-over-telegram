@@ -18,7 +18,7 @@ from .transport import FakeTransport, TelegramTransport, TransportError, make_tr
 # Every Telegram call Core makes. A method missing here fails as AttributeError,
 # which Core records as an unknown send without ever reaching Telegram.
 LAZY_METHODS = frozenset({"get_me", "get_webhook_info", "get_updates", "send_message", "send_photo",
-                          "send_document", "get_chat_member", "download_file"})
+                          "send_document", "set_message_reaction", "get_chat_member", "download_file"})
 
 
 class LazyTransport:
@@ -172,6 +172,11 @@ def parser():
                                  help="all (default): deliver every allowed message; addressed: deliver only "
                                       "messages that mention the bot, reply to it or address a command to it, "
                                       "and keep the rest as context")
+            command.add_argument("--reaction-wake", dest="reaction_wake",
+                                 choices=["own_messages", "all", "none"],
+                                 help="own_messages (default): deliver and wake only reactions on messages this "
+                                      "agent published; all: every allowed reaction; none: keep all reactions "
+                                      "as context without waking")
             command.add_argument("--context", dest="capture_context", choices=["on", "off"],
                                  help="on: also keep messages from senders that are not allowed, as context only")
             command.add_argument("--media", dest="accept_media", choices=["on", "off"],
@@ -421,7 +426,8 @@ def run(args):
     if args.command == "delivery-settings":
         return core.delivery_settings(client_id, delivery_filter=args.delivery_filter,
                                       capture_context=None if args.capture_context is None else args.capture_context == "on",
-                                      accept_media=None if args.accept_media is None else args.accept_media == "on")
+                                      accept_media=None if args.accept_media is None else args.accept_media == "on",
+                                      reaction_wake=args.reaction_wake)
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command == "conversation-budget":
