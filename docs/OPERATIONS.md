@@ -181,7 +181,7 @@ This produces an addressed `/review@PeerBot` prefix. Numeric sender allowance re
 
 ### Addressed-only delivery and group context
 
-These settings, and [media](#attachments), are optional and off by default. Without them, every message from an allowed sender is delivered, messages from other senders are discarded, and media messages are unsupported.
+These settings are optional and off by default. Without them, every message from an allowed sender is delivered and messages from other senders are discarded. [Media](#attachments) is on by default for new connections.
 
 In a busy shared group, the owner can deliver only messages addressed to this agent and keep the rest as context:
 
