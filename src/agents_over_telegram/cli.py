@@ -18,7 +18,8 @@ from .transport import FakeTransport, TelegramTransport, TransportError, make_tr
 # Every Telegram call Core makes. A method missing here fails as AttributeError,
 # which Core records as an unknown send without ever reaching Telegram.
 LAZY_METHODS = frozenset({"get_me", "get_webhook_info", "get_updates", "send_message", "send_photo",
-                          "send_document", "set_message_reaction", "get_chat_member", "download_file"})
+                          "send_document", "forward_message", "set_message_reaction", "get_chat_member",
+                          "download_file"})
 
 
 class LazyTransport:

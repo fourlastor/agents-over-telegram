@@ -293,6 +293,34 @@ The owner can inspect bounded unassigned metadata:
 
 Only the latest 100 update IDs, chat IDs, reason codes and timestamps are retained, with 20 shown per call. Message bodies from unconfigured destinations or unapproved senders are not stored in this queue. It is diagnostic evidence, not a replayable message archive; after fixing setup, ask the intended sender to resend if needed.
 
+## Notify the owner privately
+
+The owner often mutes the agent groups. An agent can use `owner_notify` to reach the owner directly when something needs them. The shared bot sends the notice to the owner's private chat with the bot. The owner is the person who paired the agent's group or topic.
+
+Use it only for things that need the owner personally:
+
+- a decision;
+- a blocker;
+- an approval;
+- a direct question to the owner that has gone unanswered in the group.
+
+Never use it for routine updates, progress reports or thanks. Those belong in the group, with `message_send`.
+
+The notice starts with a label that names the agent and the group, for example `[Agent: Alpha | Release team]`. The agent can also pass `forward_message_id`. The bot then forwards that group message after the notice, so the owner sees the original. The message must belong to the agent's own group or topic: a message AOT captured there, or a message the shared bot published there. This is the same rule as for `message_react`.
+
+AOT enforces the volume, not the agent. Each agent can send at most 3 notices in any rolling hour and 10 in any rolling day. A notice that Telegram refused does not count. A notice with an `unknown` outcome counts, because it may have reached the owner.
+
+The owner must do one thing once: open a private chat with the bot and send `/start`. Telegram does not let a bot start a private chat by itself. No other setting is needed. Every paired agent can use `owner_notify`. A paused or suspended connection refuses it, as for `message_send`.
+
+`owner_notify` uses the same idempotency rules as `message_send`. The same key with the same request returns the same outcome. The same key with a different request is refused. `delivery_status` shows the outcome. An `unknown` outcome follows [uncertain-send recovery](#uncertain-sends) with the `owner_…` id. A `retry` repeats only the step that has no recorded message: the notice text or the forward.
+
+| Error code | Meaning |
+| --- | --- |
+| `owner_notify_limit` | The agent reached the hourly or daily limit. Nothing was sent. The error gives `retry_at`, the time when the next notice is allowed. |
+| `owner_chat_not_started` | Telegram refused the private chat (403): the owner never sent `/start` to the bot, or blocked it. Nothing was sent, and it does not count toward the limit. Ask the owner to send `/start` to the bot, then use a new idempotency key. |
+| `unknown_forward_target` | `forward_message_id` is not a message in the agent's own group or topic. Nothing was sent. |
+| `forward_rejected` | Not an error of the call. The status is `sent` because the owner got the notice text, but Telegram refused the forward, for example because the message was deleted. |
+
 ## Uncertain sends
 
 | Outcome | Meaning and action |
@@ -311,7 +339,7 @@ For `unknown`, the operator checks the intended Telegram destination and correla
 "$AOT_BIN" --state-dir "$AOT_STATE" resolve --outbox-id OUTBOX_ID --resolution retry
 ```
 
-These are alternatives, not a sequence. `accepted` records a verified publication. `cancel` stops further attempts while preserving the record. `retry` is an explicit decision to permit another attempt when the operator accepts duplication risk; it changes the original record to `queued` and does not send immediately. Continue the original intent/key. A later `messages_poll`, repeated `message_send` with that same intent/key, or explicit scoped flush can attempt the now-due record. The same command and resolutions apply to uncertain reactions (`--outbox-id react_…`); `accepted` needs no `--message-id` there because re-setting a reaction is the observable effect:
+These are alternatives, not a sequence. `accepted` records a verified publication. `cancel` stops further attempts while preserving the record. `retry` is an explicit decision to permit another attempt when the operator accepts duplication risk; it changes the original record to `queued` and does not send immediately. Continue the original intent/key. A later `messages_poll`, repeated `message_send` with that same intent/key, or explicit scoped flush can attempt the now-due record. The same command and resolutions apply to uncertain reactions (`--outbox-id react_…`) and owner notifications (`--outbox-id owner_…`); `accepted` needs no `--message-id` there:
 
 ```sh
 "$AOT_BIN" --state-dir "$AOT_STATE" flush --client-file "$AOT_STATE/clients/alpha.json"

@@ -30,8 +30,9 @@ class CoreError(Exception):
 
     def __init__(self, code: str, *, details: dict | None = None):
         self.code = code
-        # Only rolling send limits set details. They hold numbers only: the
-        # limit, its window, current usage and the earliest retry time.
+        # Rolling limits set details with numbers only: the limit, its window,
+        # current usage and the earliest retry time. owner_chat_not_started
+        # adds the registered bot username, which the owner must /start.
         self.details = details
         self.retry_at = (details or {}).get('retry_at')
         super().__init__(code)
@@ -274,6 +275,10 @@ class Core:
     REACTION_WINDOW = 3600
     REACTION_INTERVAL = 1.0
     REACTION_LIST_MAX = 16
+    # owner_notify interrupts the owner personally, so it stays low volume by
+    # rule: (limit, window seconds) pairs, each a rolling window per agent.
+    OWNER_NOTIFY_LIMITS = ((3, 3600), (10, 86400))
+    OWNER_NOTIFY_INTERVAL = 1.0
     REACTION_WAKE_MODES = ('own_messages', 'all', 'none')
     WAKE_EXEMPT_MODES = ('addressed,owner', 'addressed', 'owner', 'none')
     WAKE_INTERVAL_MAX = 86400
@@ -375,6 +380,17 @@ class Core:
                     created REAL NOT NULL, updated REAL NOT NULL, due REAL NOT NULL,
                     UNIQUE(client_id,idempotency_key)
                 );
+                CREATE TABLE IF NOT EXISTS owner_outbox (
+                    id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id),
+                    owner_id INTEGER NOT NULL, text TEXT NOT NULL,
+                    from_chat_id INTEGER, forward_message_id INTEGER,
+                    idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+                    status TEXT NOT NULL, error TEXT,
+                    message_id INTEGER, forwarded_message_id INTEGER,
+                    created REAL NOT NULL, updated REAL NOT NULL, due REAL NOT NULL,
+                    UNIQUE(client_id,idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS owner_outbox_window ON owner_outbox(client_id,created);
                 CREATE TABLE IF NOT EXISTS rate_limits (
                     scope TEXT PRIMARY KEY, next_at REAL NOT NULL
                 );
@@ -1696,6 +1712,7 @@ class Core:
                 'SELECT image FROM outbox WHERE status=\'queued\' AND (client_id=? OR recipient=?) AND image IS NOT NULL', (client_id, client_id))]
             db.execute('UPDATE outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND (client_id=? OR recipient=?)', (self.clock(), client_id, client_id))
             db.execute('UPDATE reaction_outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND client_id=?', (self.clock(), client_id))
+            db.execute('UPDATE owner_outbox SET status=\'rejected\',error=\'client_revoked\',updated=? WHERE status=\'queued\' AND client_id=?', (self.clock(), client_id))
             db.execute('UPDATE bindings SET connected=0 WHERE client_id=?', (client_id,))
             db.execute('UPDATE clients SET active=0 WHERE id=?', (client_id,))
             db.execute('UPDATE pairings SET consumed=1 WHERE client_id=?', (client_id,))
@@ -2064,6 +2081,88 @@ class Core:
         self.flush(client_id=client_id, limit=20)
         return self.delivery_status(client_id, reaction_id)
 
+    def _owner_notify_usage(self, db, client_id, now):
+        """The fullest owner_notify window as (used, limit, window, retry_at), or None.
+
+        Every request that was not refused counts, including queued and unknown
+        ones: an uncertain notification may already have reached the owner.
+        A refused one never reached the owner, so it does not count.
+        """
+        full = []
+        for limit, window in self.OWNER_NOTIFY_LIMITS:
+            stamps = [r[0] for r in db.execute(
+                "SELECT created FROM owner_outbox WHERE client_id=? AND created>? AND status!='rejected' "
+                'ORDER BY created DESC', (client_id, now - window))]
+            used, retry_at = self._window_usage(stamps, limit, window)
+            if retry_at is not None:
+                full.append((retry_at, used, limit, window))
+        if not full:
+            return None
+        # Report the latest time, when every full window has room again.
+        retry_at, used, limit, window = max(full)
+        return used, limit, window, retry_at
+
+    def owner_notify(self, client_id, text, idempotency_key, forward_message_id=None):
+        """Queue one low-volume notification to the owner's private chat with the bot.
+
+        The owner is the person who paired this destination; in a private chat
+        Telegram uses the user id as the chat id. A forward copies one message
+        from this agent's own bound destination, by the same rule as reactions.
+        Like message_send, the intent is durable before any network activity,
+        and a repeated idempotency key with the same content returns the same
+        outcome.
+        """
+        if not isinstance(text, str) or not 1 <= len(text) <= 3500:
+            raise CoreError('invalid_text')
+        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128:
+            raise CoreError('invalid_idempotency_key')
+        if forward_message_id is not None and (not _integer(forward_message_id) or forward_message_id <= 0):
+            raise CoreError('invalid_forward')
+        request_hash = _digest(json.dumps([text, forward_message_id]))
+        now = self.clock()
+        with self._tx() as db:
+            client = self._client(db, client_id)
+            existing = db.execute('SELECT * FROM owner_outbox WHERE client_id=? AND idempotency_key=?',
+                                  (client_id, idempotency_key)).fetchone()
+            if existing:
+                if existing['request_hash'] != request_hash:
+                    raise CoreError('idempotency_conflict')
+                notify_id = existing['id']
+            else:
+                binding = self._binding(db, client_id, usable=True)
+                if forward_message_id is not None and not self._known_reaction_target(db, binding, forward_message_id):
+                    raise CoreError('unknown_forward_target')
+                usage = self._owner_notify_usage(db, client_id, now)
+                if usage is not None:
+                    used, limit, window, retry_at = usage
+                    raise self._limit_error('owner_notify_limit', used, limit, window, retry_at, now)
+                notify_id = 'owner_' + secrets.token_hex(12)
+                # The owner reads this away from the group, so the label names
+                # the group instead of the bot, which is the private chat itself.
+                labelled = f'[Agent: {client["label"]} | {binding["title"]}]\n{text}'
+                db.execute("INSERT INTO owner_outbox(id,client_id,owner_id,text,from_chat_id,forward_message_id,"
+                           'idempotency_key,request_hash,status,created,updated,due) '
+                           "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                           (notify_id, client_id, binding['owner_id'], labelled,
+                            binding['chat_id'] if forward_message_id is not None else None, forward_message_id,
+                            idempotency_key, request_hash, now, now, now))
+            username = self._account(db)['username']
+        self.flush(client_id=client_id, limit=20)
+        status = self.delivery_status(client_id, notify_id)
+        if status['error'] == 'owner_chat_not_started':
+            # Only the validated bot username goes into the details.
+            raise CoreError('owner_chat_not_started', details={'bot_username': username})
+        return status
+
+    @staticmethod
+    def _owner_status(row):
+        return {'notify_id': row['id'], 'kind': 'owner_notify', 'status': row['status'],
+                'error': row['error'], 'message_id': row['message_id'],
+                'forward_message_id': row['forward_message_id'],
+                'forwarded_message_id': row['forwarded_message_id'],
+                'created_at': row['created'], 'updated_at': row['updated'],
+                'retry_at': row['due'] if row['status'] == 'queued' else None}
+
     @staticmethod
     def _reaction_status(row):
         return {'reaction_id': row['id'], 'kind': 'reaction', 'status': row['status'],
@@ -2083,14 +2182,18 @@ class Core:
             if row is not None:
                 return self._outbox_status(row)
             row = db.execute('SELECT * FROM reaction_outbox WHERE client_id=? AND id=?', (client_id, outbox_id)).fetchone()
+            if row is not None:
+                return self._reaction_status(row)
+            row = db.execute('SELECT * FROM owner_outbox WHERE client_id=? AND id=?', (client_id, outbox_id)).fetchone()
             if row is None:
                 raise CoreError('unknown_delivery')
-            return self._reaction_status(row)
+            return self._owner_status(row)
 
     def _recover_sends(self, db):
         # Only call while holding sender.lock: no live local sender can own a row.
         db.execute('UPDATE outbox SET status=\'unknown\',error=\'interrupted_send\',updated=? WHERE status=\'sending\'', (self.clock(),))
         db.execute('UPDATE reaction_outbox SET status=\'unknown\',error=\'interrupted_send\',updated=? WHERE status=\'sending\'', (self.clock(),))
+        db.execute('UPDATE owner_outbox SET status=\'unknown\',error=\'interrupted_send\',updated=? WHERE status=\'sending\'', (self.clock(),))
 
     def flush(self, client_id=None, limit=20):
         if not _integer(limit) or not 1 <= limit <= 100:
@@ -2100,11 +2203,12 @@ class Core:
                 self._client(db, client_id)
         with self._lock('sender') as acquired:
             if not acquired:
-                return {'status': 'busy', 'attempted': 0, 'reactions': 0}
+                return {'status': 'busy', 'attempted': 0, 'reactions': 0, 'owner_notifications': 0}
             with self._tx() as db:
                 self._recover_sends(db)
                 rows = db.execute('SELECT id FROM outbox WHERE status=\'queued\' AND due<=? AND (? IS NULL OR client_id=?) ORDER BY created,rowid LIMIT ?', (self.clock(), client_id, client_id, limit)).fetchall()
                 reactions = db.execute('SELECT id FROM reaction_outbox WHERE status=\'queued\' AND due<=? AND (? IS NULL OR client_id=?) ORDER BY created,rowid LIMIT ?', (self.clock(), client_id, client_id, limit)).fetchall()
+                notes = db.execute('SELECT id FROM owner_outbox WHERE status=\'queued\' AND due<=? AND (? IS NULL OR client_id=?) ORDER BY created,rowid LIMIT ?', (self.clock(), client_id, client_id, limit)).fetchall()
             attempted = 0
             for candidate in rows:
                 with self._tx() as db:
@@ -2189,7 +2293,8 @@ class Core:
                     # An unknown record keeps its copy: an operator retry sends it again.
                     self._delete_outbox_image(row['image'])
             reacted = self._flush_reactions(reactions)
-            return {'status': 'ok', 'attempted': attempted, 'reactions': reacted}
+            notified = self._flush_owner_notes(notes)
+            return {'status': 'ok', 'attempted': attempted, 'reactions': reacted, 'owner_notifications': notified}
 
     def _flush_reactions(self, candidates):
         """Attempt due queued reactions under the sender lock; returns attempts.
@@ -2250,6 +2355,84 @@ class Core:
                     db.execute('INSERT INTO rate_limits(scope,next_at) VALUES(\'react\',?) ON CONFLICT(scope) DO UPDATE SET next_at=max(next_at,excluded.next_at)', (due,))
         return attempted
 
+    def _flush_owner_notes(self, candidates):
+        """Attempt due owner notifications under the sender lock; returns attempts.
+
+        A notification has up to two steps: the labelled text, then the
+        optional forward. Each step records its message id when it succeeds,
+        so a retry after an unknown outcome repeats only the missing step.
+        Pacing uses one scope per owner private chat.
+        """
+        attempted = 0
+        for candidate in candidates:
+            with self._tx() as db:
+                row = db.execute('SELECT * FROM owner_outbox WHERE id=?', (candidate['id'],)).fetchone()
+                if row['status'] != 'queued':
+                    continue
+                try:
+                    self._binding(db, row['client_id'], usable=True)
+                except CoreError:
+                    continue
+                now = self.clock()
+                scope = f'owner:{row["owner_id"]}'
+                rate = db.execute('SELECT next_at FROM rate_limits WHERE scope=?', (scope,)).fetchone()
+                due = max(now, rate['next_at']) if rate else now
+                if due > now:
+                    db.execute('UPDATE owner_outbox SET due=? WHERE id=?', (due, row['id']))
+                    continue
+                db.execute('INSERT INTO rate_limits(scope,next_at) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET next_at=excluded.next_at',
+                           (scope, now + self.OWNER_NOTIFY_INTERVAL))
+                db.execute("UPDATE owner_outbox SET status='sending',updated=? WHERE id=?", (now, row['id']))
+            attempted += 1
+            message_id, forwarded_id = row['message_id'], row['forwarded_message_id']
+            step = 'text' if message_id is None else 'forward'
+            try:
+                if message_id is None:
+                    response = self.transport.send_message(chat_id=row['owner_id'], text=row['text'])
+                    if not isinstance(response, dict) or not _integer(response.get('message_id')) or response['message_id'] <= 0:
+                        raise UnknownSend()
+                    message_id = response['message_id']
+                    # Record the text at once, so a failure in the forward
+                    # below can never send the text a second time.
+                    with self._tx() as db:
+                        db.execute('UPDATE owner_outbox SET message_id=?,updated=? WHERE id=?', (message_id, self.clock(), row['id']))
+                    step = 'forward'
+                if row['forward_message_id'] is not None and forwarded_id is None:
+                    response = self.transport.forward_message(chat_id=row['owner_id'], from_chat_id=row['from_chat_id'],
+                                                              message_id=row['forward_message_id'])
+                    if not isinstance(response, dict) or not _integer(response.get('message_id')) or response['message_id'] <= 0:
+                        raise UnknownSend()
+                    forwarded_id = response['message_id']
+                status, error, due = 'sent', None, self.clock()
+            except UnknownSend:
+                status, error, due = 'unknown', 'uncertain_send', self.clock()
+            except TransportError as exc:
+                if str(exc.code) in ('429', 'rate_limited', 'telegram_429'):
+                    wait = exc.retry_after if isinstance(exc.retry_after, (int, float)) and not isinstance(exc.retry_after, bool) and math.isfinite(exc.retry_after) and exc.retry_after > 0 else 60
+                    due = self.clock() + min(wait, 86400)
+                    status, error = 'queued', 'rate_limited'
+                elif step == 'forward' and isinstance(exc.code, int) and 400 <= exc.code < 500:
+                    # The owner already has the text; only the copy of the
+                    # group message failed, for example because it was deleted.
+                    status, error, due = 'sent', 'forward_rejected', self.clock()
+                elif exc.code == 403:
+                    # A bot cannot open a private chat: the owner never sent it
+                    # /start, or blocked it. Nothing reached the owner.
+                    status, error, due = 'rejected', 'owner_chat_not_started', self.clock()
+                elif isinstance(exc.code, int) and 400 <= exc.code < 500:
+                    status, error, due = 'rejected', 'telegram_rejected', self.clock()
+                else:
+                    status, error, due = 'unknown', 'transport_failure', self.clock()
+            except Exception:
+                status, error, due = 'unknown', 'transport_failure', self.clock()
+            with self._tx() as db:
+                db.execute('UPDATE owner_outbox SET status=?,error=?,message_id=?,forwarded_message_id=?,due=?,updated=? WHERE id=?',
+                           (status, error, message_id, forwarded_id, due, self.clock(), row['id']))
+                if error == 'rate_limited':
+                    db.execute('INSERT INTO rate_limits(scope,next_at) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET next_at=max(next_at,excluded.next_at)',
+                               (f'owner:{row["owner_id"]}', due))
+        return attempted
+
     def resolve_unknown(self, outbox_id, resolution, message_id=None):
         if resolution not in ('accepted', 'cancel', 'retry'):
             raise CoreError('invalid_resolution')
@@ -2263,6 +2446,10 @@ class Core:
                 if row is None:
                     row = db.execute('SELECT * FROM reaction_outbox WHERE id=?', (outbox_id,)).fetchone()
                     table = 'reaction_outbox'
+                if row is None:
+                    # A retry repeats only the step without a recorded message id.
+                    row = db.execute('SELECT * FROM owner_outbox WHERE id=?', (outbox_id,)).fetchone()
+                    table = 'owner_outbox'
                 if row is None or row['status'] != 'unknown':
                     raise CoreError('not_unknown')
                 if resolution == 'accepted' and table == 'outbox' and (not _integer(message_id) or message_id <= 0):
@@ -2276,9 +2463,10 @@ class Core:
                 if table == 'outbox':
                     db.execute('UPDATE outbox SET status=?,error=?,message_id=?,due=?,updated=? WHERE id=?', (status, error, message_id if resolution == 'accepted' else None, self.clock(), self.clock(), outbox_id))
                 else:
-                    db.execute('UPDATE reaction_outbox SET status=?,error=?,due=?,updated=? WHERE id=?', (status, error, self.clock(), self.clock(), outbox_id))
+                    db.execute(f'UPDATE {table} SET status=?,error=?,due=?,updated=? WHERE id=?', (status, error, self.clock(), self.clock(), outbox_id))
                 result = db.execute(f'SELECT * FROM {table} WHERE id=?', (outbox_id,)).fetchone()
-                resolved = self._outbox_status(result) if table == 'outbox' else self._reaction_status(result)
+                resolved = {'outbox': self._outbox_status, 'reaction_outbox': self._reaction_status,
+                            'owner_outbox': self._owner_status}[table](result)
             if table == 'outbox' and resolution in ('accepted', 'cancel') and row['image']:
                 # Terminal: no later attempt can need the copy again. A retry keeps it.
                 self._delete_outbox_image(row['image'])

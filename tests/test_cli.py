@@ -140,6 +140,8 @@ def test_lazy_transport_passes_every_telegram_method_through():
     from agents_over_telegram.transport import TelegramTransport
 
     public = {name for name in vars(TelegramTransport) if not name.startswith("_")}
+    # owner_notify forwards group messages; a missing entry once failed silently.
+    assert "forward_message" in public
     lazy = LazyTransport("unused", fake=True)
     lazy.transport = FakeTransport()
     for name in public:
