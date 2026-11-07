@@ -37,6 +37,8 @@ Developers regenerate the requirements after updating `uv.lock` with `python3 sc
 
 For an existing project, keep using the command already configured in its `[mcp_servers.telegram]` entry. A plugin upgrade does not automatically migrate that command or discard the old runtime. If its executable is unavailable, report the broken path and follow a deliberate repair rather than silently pointing the project at a different installation.
 
+To move a Claude Code project to a newer runtime on purpose, update the plugin, run the new plugin's bootstrap, then run setup with the returned executable and `--prepare-only`. Setup records the runtime that runs it in `.aot-runtime.json`. It keeps the client, its pairing and its allowed senders. The plugin's MCP relay and hooks pick up the new runtime without a restart; see [agent hosts](HOSTS.md#claude-code). The `telegram-setup` skill has the exact steps.
+
 ### Pair the project
 
 Use the returned executable for the terminal wizard:

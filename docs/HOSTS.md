@@ -56,6 +56,13 @@ The plugin also declares a monitor that announces new messages. Claude Code star
 
 The plugin needs `python3` 3.8 or newer on `PATH` to run the small launcher. The launcher only reads `.aot-runtime.json` and then starts the prepared runtime, which uses its own Python.
 
+**The MCP server survives runtime changes.** Claude Code starts the plugin's MCP server once per session. The launcher stays running between Claude Code and the runtime's `aot mcp` process and passes messages through unchanged. It starts a new runtime process before the next tool call in two cases:
+
+- `.aot-runtime.json` now names a different executable, for example after the project moved to an updated runtime.
+- The runtime process stopped.
+
+The launcher waits until no call is in flight. It replays Claude Code's own `initialize` and `notifications/initialized` messages to the new process, then sends `notifications/tools/list_changed`, so Claude Code refetches the tools. A call that was in flight when the process stopped gets an error answer instead of no answer. Hooks and the wake waiter start a new process for every event, so they use the new runtime right away. A changed `hooks.json`, skill or monitor still needs `/reload-plugins` or a new session.
+
 Claude Code also offers "channels" for chat bridges. Channels need an allowlisted plugin or the `--dangerously-load-development-channels` flag, and they do not work with `-p`. AOT uses hooks and a monitor instead, which need neither.
 
 In `-p` (non-interactive) mode, Claude Code cancels background hooks when the run ends, so `aot wake` only covers the run itself.
