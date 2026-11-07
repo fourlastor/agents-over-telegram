@@ -269,7 +269,8 @@ def test_killed_wrapper_does_not_leave_backend_running(bridge):
     while time.monotonic() < deadline:
         try:
             status = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[0]
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # Gone, either before the open or (ESRCH) between the open and the read.
             break
         if status == "Z":  # Exited and waiting for the host init process to reap.
             break
