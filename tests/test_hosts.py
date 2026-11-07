@@ -1123,4 +1123,17 @@ def test_tool_command_needs_the_project_folder(tmp_path):
     elsewhere = tmp_path / 'elsewhere'
     elsewhere.mkdir()
     code, body, stderr = run_tool(elsewhere, 'messages_poll')
-    assert (code, body) == (1, None) and 'client_file_required' in stderr
+    assert (code, body) == (1, None) and 'project_profile_missing_run_setup' in stderr
+
+
+@pytest.mark.parametrize('host,event,field', [('claude', 'SessionStart', 'additionalContext'),
+                                              ('claude', 'Stop', 'reason'),
+                                              ('codex', 'SessionStart', 'additionalContext')])
+def test_only_claude_hook_notices_name_the_shell_fallback(tmp_path, host, event, field):
+    result = connected(tmp_path)
+    receive(result)
+    answer = json.loads(run_hook(json.dumps({'hook_event_name': event}), '--project-dir',
+                                 result['project_dir'], host=host).stdout)
+    text = answer['reason'] if field == 'reason' else answer['hookSpecificOutput'][field]
+    assert text.startswith('[Agents over Telegram] 1 new Telegram message')
+    assert (f'"{RUNTIME}" tool messages_poll' in text) == (host == 'claude')

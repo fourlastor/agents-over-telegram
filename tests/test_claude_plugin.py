@@ -49,7 +49,7 @@ def test_monitor_collects_and_idles_in_unconfigured_projects():
     assert manifest['experimental']['monitors'] == './claude/monitors.json'
     (monitor,) = load('claude/monitors.json')
     assert monitor['name'] == 'telegram-inbox'
-    assert monitor['command'] == f'python3 {LAUNCH} watch --idle-if-unconfigured --collect --format text'
+    assert monitor['command'] == f'python3 {LAUNCH} watch --idle-if-unconfigured --collect --format text --host claude'
     assert not (ROOT / 'monitors' / 'monitors.json').exists()
 
 

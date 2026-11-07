@@ -55,6 +55,11 @@ def shell_fallback() -> str:
             f'messages_ack with their JSON arguments on stdin.')
 
 
+def with_shell_fallback(notice: str) -> str:
+    """A Claude Code notice: the plugin's MCP server may not be connected yet."""
+    return notice + ' ' + shell_fallback()
+
+
 def ensure_tables(core) -> None:
     # No explicit write transaction: once the table exists these statements are
     # no-ops, so frequent hook calls do not take the shared write lock.
@@ -86,7 +91,7 @@ def notice_text(new: int, pending: int, senders: list[str]) -> str:
     text = f'[Agents over Telegram] {new} new Telegram {noun} for this agent ({pending} pending in total).'
     if senders:
         text += ' From: ' + ', '.join(senders) + '.'
-    return text + ' ' + NOTICE_GUIDANCE + ' ' + shell_fallback()
+    return text + ' ' + NOTICE_GUIDANCE
 
 
 def claim_new(core, client_id: str, surface: str, *, limit: int = 50) -> dict[str, Any] | None:
@@ -135,7 +140,7 @@ def pending_summary(core, client_id: str) -> dict[str, Any] | None:
         return None
     noun = 'message is' if pending == 1 else 'messages are'
     return {'pending': pending, 'notice': f'[Agents over Telegram] {pending} Telegram {noun} still pending '
-            f'for this agent. {NOTICE_GUIDANCE} {shell_fallback()}'}
+            f'for this agent. {NOTICE_GUIDANCE}'}
 
 
 def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool = False,

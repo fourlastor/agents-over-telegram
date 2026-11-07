@@ -173,6 +173,8 @@ def parser():
             command.add_argument("--topic-open", action="store_true",
                                  help="Confirm you checked that a closed or changed topic is open again")
         if name == "watch":
+            command.add_argument("--host", choices=["claude"],
+                                 help="Name the host, so notices add its shell fallback")
             command.add_argument("--collect", action="store_true", help="Also long-poll the shared Telegram collector; never sends or acknowledges")
             command.add_argument("--duration", type=float, default=0, help="Seconds to watch; 0 runs until stopped")
             command.add_argument("--interval", type=float, default=2.0, help="Seconds between local inbox checks")
@@ -476,7 +478,8 @@ def run(args):
             if args.format == "jsonl":
                 print(json.dumps(event, separators=(",", ":")), flush=True)
             elif event.get("type") == "telegram_messages":
-                print(event["notice"], flush=True)
+                from .push import with_shell_fallback
+                print(with_shell_fallback(event["notice"]) if args.host == "claude" else event["notice"], flush=True)
             else:
                 print("[Agents over Telegram] Watching stopped: " + event.get("reason", "unknown") + ".", flush=True)
         parent = os.getppid()

@@ -281,8 +281,11 @@ def test_notice_names_this_runtimes_shell_fallback():
     import sys
     from pathlib import Path
     executable = Path(sys.executable).absolute().parent / 'aot'
-    text = push.notice_text(1, 1, [])
-    assert text.endswith(push.shell_fallback())
+    plain = push.notice_text(1, 1, [])
+    # Codex, Pi and Amp load their tools from project configuration: no fallback.
+    assert 'tool messages_poll' not in plain
+    text = push.with_shell_fallback(plain)
+    assert text.startswith(plain) and text.endswith(push.shell_fallback())
     assert f'"{executable}" tool messages_poll' in text and 'JSON arguments on stdin' in text
 
 
