@@ -740,6 +740,8 @@ for line in sys.stdin:
         time.sleep(1.5)
     if method == "hang":
         time.sleep(60)
+    if method == "initialize" and {version!r} == "mute":
+        sys.exit(1)
     if method == "initialize":
         result = {{"protocolVersion": "2025-06-18", "capabilities": {{"tools": {{}}}},
                    "serverInfo": {{"name": "fake", "version": {version!r}}}}}
@@ -747,6 +749,8 @@ for line in sys.stdin:
         result = {{"version": {version!r}, "method": method}}
     sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": ident, "result": result}}) + "\\n")
     sys.stdout.flush()
+    if method == "initialize" and {version!r} == "crashy":
+        sys.exit(1)
 '''
 
 
@@ -979,11 +983,12 @@ def test_relay_brings_the_tools_up_when_setup_finishes_mid_session(tmp_path):
         init = session.receive()['result']
         assert init['protocolVersion'] == '2025-06-18'
         assert init['capabilities']['tools'] == {'listChanged': True}
-        assert 'no restart is needed' in init['instructions']
+        assert 'with no restart' in init['instructions']
         session.send(None, 'notifications/initialized')
         assert session.call(2, 'tools/list')['result'] == {'tools': []}
         assert session.call(3, 'ping')['result'] == {}
-        assert session.call(4, 'tools/call')['error']['code'] == -32603
+        error = session.call(4, 'tools/call')['error']
+        assert error['code'] == -32603 and 'not set up' in error['message']
         # Setup runs in another process while the session stays open.
         assert connected(tmp_path)['project_dir'] == str(project)
         assert session.receive() == {'jsonrpc': '2.0', 'method': 'notifications/tools/list_changed'}
@@ -1013,3 +1018,63 @@ def test_idle_monitor_starts_watching_once_the_folder_is_set_up(tmp_path):
     finally:
         if process.poll() is None:
             process.kill()
+
+
+def relay_starts(tmp_path):
+    return len((tmp_path / 'pids').read_text().split())
+
+
+def notices_until(session, seconds):
+    import queue
+    received, deadline = [], time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            received.append(session.lines.get(timeout=max(0.05, deadline - time.monotonic())))
+        except queue.Empty:
+            break
+    return received
+
+
+@needs_system_python
+def test_relay_backs_off_from_a_runtime_that_keeps_crashing(tmp_path):
+    project = Path(prepare(tmp_path, 'claude')['project_dir'])
+    write_pointer(project, {'version': 1, 'executable': str(fake_mcp_runtime(tmp_path, 'crashy'))})
+    session = RelaySession(project)
+    try:
+        session.send(1, 'initialize', protocolVersion='2025-06-18')
+        assert session.receive()['result']['serverInfo']['version'] == 'crashy'
+        session.send(None, 'notifications/initialized')
+        later = notices_until(session, 8)
+        # Once at once, then after 4 s and 8 s: at most three starts in 8 s, not one every 2 s.
+        assert relay_starts(tmp_path) <= 3
+        assert len(later) <= 2
+    finally:
+        assert session.close() == 0
+
+
+@needs_system_python
+def test_relay_answers_initialize_itself_when_the_runtime_dies_first(tmp_path):
+    project = Path(prepare(tmp_path, 'claude')['project_dir'])
+    write_pointer(project, {'version': 1, 'executable': str(fake_mcp_runtime(tmp_path, 'mute'))})
+    session = RelaySession(project)
+    try:
+        session.send(1, 'initialize', protocolVersion='2025-06-18')
+        init = session.receive()
+        assert init['id'] == 1 and init['result']['serverInfo']['version'] == 'launcher'
+        session.send(None, 'notifications/initialized')
+        assert session.call(2, 'tools/list')['result'] == {'tools': []}
+        write_pointer(project, {'version': 1, 'executable': str(fake_mcp_runtime(tmp_path, 'v1'))})
+        assert session.receive() == {'jsonrpc': '2.0', 'method': 'notifications/tools/list_changed'}
+        assert session.call(3, 'tools/list')['result']['version'] == 'v1'
+    finally:
+        assert session.close() == 0
+
+
+def test_waiting_instructions_carry_the_runtime_guidance():
+    import importlib.util
+    from agents_over_telegram.mcp_server import INSTRUCTIONS
+    spec = importlib.util.spec_from_file_location('aot_host_launch', LAUNCHER)
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    assert launcher.RUNTIME_INSTRUCTIONS == INSTRUCTIONS
+    assert launcher.WAITING_INSTRUCTIONS.endswith(INSTRUCTIONS)
