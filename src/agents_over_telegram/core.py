@@ -897,13 +897,16 @@ class Core:
                        'note': 'Reaction updates arrive while the shared bot stays an administrator in this destination.'}
         else:
             receive = {'available': False, 'bot_admin': False, 'requires_bot_admin': True,
-                       'note': 'The shared bot is not an administrator in this destination, so reactions from people never arrive. Ask the local owner to promote it to administrator.'}
+                       'note': 'The shared bot is not an administrator in this destination, so reactions from people never arrive. Ask the local owner to promote it to administrator. Collection checks this again about once an hour.'}
         return {'send': {'per_message': 1,
                          'emoji': "one standard reaction emoji Telegram allows for bots, or an empty emoji to remove the bot's reaction",
                          'note': 'Bots cannot use paid reactions, and this tool never sends custom emoji reactions.'},
                 'receive': receive, 'wake': row['reaction_wake']}
 
     BOT_ADMIN_RETRY = 600
+    # A known flag is checked again this often: a missed my_chat_member update
+    # (for example one consumed by an older runtime) must not leave it stale.
+    BOT_ADMIN_RECHECK = 3600
 
     def _unmatched(self, db, update_id, chat_id, reason, now):
         db.execute('INSERT OR IGNORE INTO unmatched(update_id,chat_id,reason,created) VALUES(?,?,?,?)', (update_id, chat_id, reason, now))
@@ -973,8 +976,10 @@ class Core:
         client_id, old_chat_id = binding['client_id'], binding['chat_id']
         # A suspension for this same migration no longer applies. Any other
         # reason stays. The new seq makes a racing owner clear fail.
+        # The bot's administrator status in the new supergroup is not known yet.
         db.execute('UPDATE bindings SET chat_id=?,suspension_seq=suspension_seq+1,'
-                   'suspended=CASE WHEN suspended=? THEN NULL ELSE suspended END '
+                   'suspended=CASE WHEN suspended=? THEN NULL ELSE suspended END,'
+                   'bot_admin=NULL,bot_admin_probed=NULL '
                    'WHERE client_id=? AND connected=1',
                    (new_chat_id, 'group_migrated:' + str(new_chat_id), client_id))
         # Message ids are per chat: the supergroup numbers its own messages, and
@@ -995,8 +1000,8 @@ class Core:
             if _integer(chat_id) and _mapping(new.get('user')).get('id') == account['bot_id']:
                 # Receiving reactions requires administrator status, so every
                 # membership event refreshes what status can tell the owner.
-                db.execute('UPDATE bindings SET bot_admin=? WHERE chat_id=? AND connected=1',
-                           (1 if new.get('status') == 'administrator' else 0, chat_id))
+                db.execute('UPDATE bindings SET bot_admin=?,bot_admin_probed=? WHERE chat_id=? AND connected=1',
+                           (1 if new.get('status') == 'administrator' else 0, now, chat_id))
                 if (new.get('status') in ('left', 'kicked') or (new.get('status') == 'restricted' and (not new.get('is_member', True) or not new.get('can_send_messages', True)))):
                     self._suspend(db, 'bot_removed_or_restricted', chat_id)
             return
@@ -1300,13 +1305,15 @@ class Core:
                 raise CoreError(code) from None
 
     def _probe_bot_admin(self, account):
-        """Fill unknown bot_admin flags once per binding; never fails collection.
+        """Keep bot_admin flags current with getChatMember; never fails collection.
 
-        Reaction updates arrive only while the bot is an administrator, so a
-        binding with an unknown flag is checked with getChatMember. A definite
-        client error means the bot cannot even see the chat, which is recorded
-        as not-admin; other failures leave the flag unknown. Later
-        my_chat_member events keep the flag current.
+        Reaction updates arrive only while the bot is an administrator. A binding
+        with an unknown flag is checked first, and a known flag is checked again
+        BOT_ADMIN_RECHECK seconds after it was last set, because the
+        my_chat_member update that would change it can be missed: an older
+        runtime on the same bot may consume it, or the promotion may predate the
+        pairing. A definite client error means the bot cannot even see the chat,
+        which is recorded as not-admin; other failures keep the flag as it was.
 
         Collection runs this while holding the collector lock, so each call
         makes at most one network request, and a binding whose probe failed is
@@ -1316,10 +1323,11 @@ class Core:
         now = self.clock()
         with self._db() as db:
             pending = db.execute('SELECT b.client_id,b.chat_id FROM bindings b JOIN clients c ON c.id=b.client_id '
-                                 'WHERE b.connected=1 AND c.active=1 AND b.bot_admin IS NULL '
-                                 'AND (b.bot_admin_probed IS NULL OR b.bot_admin_probed<=?) '
-                                 'ORDER BY b.bot_admin_probed IS NOT NULL, b.bot_admin_probed LIMIT 1',
-                                 (now - self.BOT_ADMIN_RETRY,)).fetchall()
+                                 'WHERE b.connected=1 AND c.active=1 AND ('
+                                 '(b.bot_admin IS NULL AND (b.bot_admin_probed IS NULL OR b.bot_admin_probed<=?)) '
+                                 'OR (b.bot_admin IS NOT NULL AND (b.bot_admin_probed IS NULL OR b.bot_admin_probed<=?))) '
+                                 'ORDER BY b.bot_admin IS NOT NULL, b.bot_admin_probed IS NOT NULL, b.bot_admin_probed LIMIT 1',
+                                 (now - self.BOT_ADMIN_RETRY, now - self.BOT_ADMIN_RECHECK)).fetchall()
         for row in pending:
             admin = None
             try:
@@ -1332,11 +1340,12 @@ class Core:
                 admin = None
             with self._tx() as db:
                 if admin is None:
+                    # A failed check keeps the flag; a known one is retried at the next recheck.
                     db.execute('UPDATE bindings SET bot_admin_probed=? WHERE client_id=? AND connected=1',
                                (self.clock(), row['client_id']))
                 else:
-                    db.execute('UPDATE bindings SET bot_admin=?,bot_admin_probed=NULL WHERE client_id=? AND connected=1',
-                               (admin, row['client_id']))
+                    db.execute('UPDATE bindings SET bot_admin=?,bot_admin_probed=? WHERE client_id=? AND connected=1',
+                               (admin, self.clock(), row['client_id']))
 
     def poll(self, client_id, limit=20, lease_seconds=60):
         if not _integer(limit) or not 1 <= limit <= 100 or not _integer(lease_seconds) or not 1 <= lease_seconds <= 3600:
@@ -1549,8 +1558,8 @@ class Core:
             raise CoreError('bot_cannot_post')
         with self._tx() as db:
             # The suspension check also refreshes what reactions can arrive here.
-            db.execute('UPDATE bindings SET bot_admin=? WHERE client_id=? AND connected=1',
-                       (1 if status == 'administrator' else 0, client_id))
+            db.execute('UPDATE bindings SET bot_admin=?,bot_admin_probed=? WHERE client_id=? AND connected=1',
+                       (1 if status == 'administrator' else 0, self.clock(), client_id))
             current = db.execute('SELECT * FROM bindings WHERE client_id=? AND connected=1 AND suspended=? AND suspension_seq=?',
                                  (client_id, reason, seq)).fetchone()
             if current is None:
