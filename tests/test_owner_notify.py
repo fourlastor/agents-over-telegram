@@ -329,3 +329,82 @@ def test_private_chat_messages_are_unassigned_with_their_own_reason(env):
     assert core.poll(client)['deliveries'] == []
     with sqlite3.connect(core.database) as db:
         assert db.execute("SELECT chat_id FROM unmatched WHERE reason='private_chat'").fetchall() == [(None,), (None,)]
+
+
+def private_reaction(transport, message_id, sender=OWNER, chat=OWNER, emoji='👍'):
+    number = max((u['update_id'] for u in transport.updates), default=0) + 1
+    transport.updates.append({'update_id': number, 'message_reaction': {
+        'chat': {'id': chat, 'type': 'private', 'first_name': 'Owner'}, 'message_id': message_id, 'date': 1000,
+        'user': {'id': sender, 'is_bot': False, 'username': 'owner'},
+        'old_reaction': [], 'new_reaction': [{'type': 'emoji', 'emoji': emoji}]}})
+    return number
+
+
+def private_reasons(core):
+    return [row['reason'] for row in core.unassigned()['updates']]
+
+
+def test_owner_reaction_on_a_notice_reaches_the_sending_agent(env):
+    core, transport, clock = env
+    sender = bind(core, transport)
+    other = bind(core, transport, 'Beta', chat=-200)
+    notice = core.owner_notify(sender, 'Approve the release?', 'n1')
+    clock.advance()
+    core.owner_notify(other, 'Unrelated question', 'n2')
+    private_reaction(transport, notice['message_id'])
+    assert core.collect()['status'] == 'ok'
+    [delivery] = core.poll(sender)['deliveries']
+    assert delivery['kind'] == 'reaction' and delivery['own_message'] is True
+    assert delivery['chat_id'] == OWNER and delivery['thread_id'] is None
+    assert delivery['message_id'] == notice['message_id']
+    assert delivery['new_reaction'] == ['👍']
+    assert core.poll(other)['deliveries'] == []
+    assert 'private_chat' not in private_reasons(core)
+
+
+def test_owner_reaction_on_a_forward_reaches_the_sending_agent(env):
+    core, transport, _ = env
+    sender = bind(core, transport)
+    number = append(transport, 'Seb, which option?')
+    core.collect()
+    core.poll(sender)  # lease the group message, so only the reaction is new below
+    notice = core.owner_notify(sender, 'Look at this.', 'n1', forward_message_id=number)
+    private_reaction(transport, notice['forwarded_message_id'])
+    core.collect()
+    deliveries = [d for d in core.poll(sender, lease_seconds=10)['deliveries'] if d['kind'] == 'reaction']
+    [delivery] = deliveries
+    assert delivery['message_id'] == notice['forwarded_message_id'] and delivery['own_message'] is True
+
+
+def test_owner_reaction_follows_reaction_wake(env):
+    core, transport, _ = env
+    sender = bind(core, transport)
+    core.delivery_settings(sender, reaction_wake='none')
+    notice = core.owner_notify(sender, 'Approve?', 'n1')
+    private_reaction(transport, notice['message_id'])
+    core.collect()
+    assert core.poll(sender)['deliveries'] == []
+    assert 'private_chat' not in private_reasons(core)
+
+
+def test_other_private_reactions_and_membership_are_private_chat(env):
+    core, transport, _ = env
+    sender = bind(core, transport)
+    notice = core.owner_notify(sender, 'Approve?', 'n1')
+    # Someone else reacting in their own private chat with the bot, on the same id.
+    private_reaction(transport, notice['message_id'], sender=202, chat=202)
+    # The owner reacting to a message that is not a notice.
+    private_reaction(transport, notice['message_id'] + 50)
+    # The owner blocking the bot.
+    number = max(u['update_id'] for u in transport.updates) + 1
+    transport.updates.append({'update_id': number, 'my_chat_member': {
+        'chat': {'id': OWNER, 'type': 'private'}, 'from': {'id': OWNER, 'is_bot': False},
+        'date': 1000, 'old_chat_member': {'status': 'member', 'user': {'id': transport.bot_id, 'is_bot': True}},
+        'new_chat_member': {'status': 'kicked', 'user': {'id': transport.bot_id, 'is_bot': True}}}})
+    core.collect()
+    assert core.poll(sender)['deliveries'] == []
+    assert private_reasons(core)[:3] == ['private_chat'] * 3
+    with sqlite3.connect(core.database) as db:
+        assert db.execute("SELECT count(*) FROM unmatched WHERE reason='private_chat' AND chat_id IS NOT NULL").fetchone()[0] == 0
+    # The group binding is untouched by the private membership change.
+    assert core.poll(sender)['suspended'] is None

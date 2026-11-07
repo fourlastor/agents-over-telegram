@@ -1114,6 +1114,11 @@ class Core:
         update_id = update['update_id']
         membership = update.get('my_chat_member')
         if isinstance(membership, dict):
+            if _mapping(membership.get('chat')).get('type') == 'private':
+                # The owner blocking or starting the bot: no binding is a private
+                # chat, so there is nothing to suspend or refresh.
+                self._unmatched(db, update_id, None, 'private_chat', now)
+                return
             chat_id = _mapping(membership.get('chat')).get('id')
             new = _mapping(membership.get('new_chat_member'))
             if _integer(chat_id) and _mapping(new.get('user')).get('id') == account['bot_id']:
@@ -1287,15 +1292,25 @@ class Core:
         rules match messages. The owner's reaction_wake setting decides which
         reactions are delivered and can wake this agent: by default only
         reactions on messages this agent published; the rest are kept as context.
+        In a private chat, only the owner's reaction on an owner_notify notice
+        or its forward reaches the agent that sent it; anything else there is
+        recorded as private_chat.
         """
         chat = _mapping(reaction.get('chat'))
         chat_id = chat.get('id')
-        if not _integer(chat_id) or chat.get('type') not in ('group', 'supergroup'):
+        private = chat.get('type') == 'private'
+        if not private and (not _integer(chat_id) or chat.get('type') not in ('group', 'supergroup')):
             self._unmatched(db, update_id, chat_id if _integer(chat_id) else None, 'unsupported_destination', now)
             return
+
+        def refuse(reason):
+            # A private chat id is a person's user id: never stored, and every
+            # refusal there has the one private_chat reason.
+            self._unmatched(db, update_id, None if private else chat_id, 'private_chat' if private else reason, now)
+
         message_id = reaction.get('message_id')
         if not _integer(message_id) or message_id <= 0:
-            self._unmatched(db, update_id, chat_id, 'unsupported_update', now)
+            refuse('unsupported_update')
             return
         sender = _mapping(reaction.get('user'))
         sender_id = sender.get('id')
@@ -1303,15 +1318,25 @@ class Core:
         # allowed-sender rule can apply; they stay unassigned like anonymous
         # channel posts.
         if not _integer(sender_id) or sender_id <= 0 or not isinstance(sender.get('is_bot'), bool) or reaction.get('actor_chat'):
-            self._unmatched(db, update_id, chat_id, 'unverified_sender', now)
+            refuse('unverified_sender')
             return
         if sender_id == account['bot_id']:
-            self._unmatched(db, update_id, chat_id, 'shared_bot_echo', now)
+            refuse('shared_bot_echo')
             return
         old = reaction_types(reaction.get('old_reaction'))
         new = reaction_types(reaction.get('new_reaction'))
         if old is None or new is None:
-            self._unmatched(db, update_id, chat_id, 'unsupported_update', now)
+            refuse('unsupported_update')
+            return
+        if private:
+            binding = self._owner_notice_binding(db, chat_id, sender_id, message_id)
+            if binding is None:
+                refuse('private_chat')
+                return
+            # The notice was this agent's own message; its reactions have no
+            # group conversation, so they share the agent's reaction one.
+            self._deliver_reaction(db, update_id, reaction, binding, chat_id, message_id, sender, old, new,
+                                   True, None, now, thread_id=None, refuse=refuse)
             return
         conversation = None
         binding = None
@@ -1352,13 +1377,37 @@ class Core:
                 (chat_id,)).fetchone() else 'unresolved_reaction'
             self._unmatched(db, update_id, chat_id, reason, now)
             return
+        self._deliver_reaction(db, update_id, reaction, binding, chat_id, message_id, sender, old, new,
+                               own_message, conversation, now, thread_id=binding['thread_id'] or None, refuse=refuse)
+
+    def _owner_notice_binding(self, db, chat_id, sender_id, message_id):
+        """The binding whose owner notice (or its forward) a private reaction targets, or None.
+
+        In a private chat the chat id is the person's user id, and message ids
+        are numbered per chat, so (owner chat, message id) names one notice. Only
+        the binding's own owner, reacting in their own chat, is accepted.
+        """
+        if not _integer(chat_id) or chat_id != sender_id:
+            return None
+        row = db.execute('SELECT client_id FROM owner_outbox WHERE owner_id=? AND (message_id=? OR forwarded_message_id=?) '
+                         'ORDER BY created DESC LIMIT 1', (chat_id, message_id, message_id)).fetchone()
+        if row is None:
+            return None
+        return db.execute('SELECT b.* FROM bindings b JOIN clients c ON c.id=b.client_id '
+                          'WHERE b.client_id=? AND b.owner_id=? AND b.connected=1 AND c.active=1',
+                          (row['client_id'], sender_id)).fetchone()
+
+    def _deliver_reaction(self, db, update_id, reaction, binding, chat_id, message_id, sender, old, new,
+                          own_message, conversation, now, *, thread_id, refuse):
+        """Deliver, or keep as context, one validated reaction for one binding."""
+        sender_id = sender['id']
         allowed = db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?',
                              (binding['client_id'], sender_id, int(sender['is_bot']))).fetchone()
         if not allowed and not binding['capture_context']:
-            self._unmatched(db, update_id, chat_id, 'sender_not_allowed', now)
+            refuse('sender_not_allowed')
             return
         payload = {'origin': 'telegram', 'kind': 'reaction', 'update_id': update_id,
-                   'message_id': message_id, 'chat_id': chat_id, 'thread_id': binding['thread_id'] or None,
+                   'message_id': message_id, 'chat_id': chat_id, 'thread_id': thread_id,
                    'sender': {'id': sender_id, 'is_bot': sender['is_bot'], 'username': _bounded(sender.get('username', ''), 64)},
                    'old_reaction': old[0], 'new_reaction': new[0], 'own_message': own_message}
         if old[1]:
