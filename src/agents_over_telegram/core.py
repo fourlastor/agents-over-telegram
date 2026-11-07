@@ -2160,7 +2160,10 @@ class Core:
                 # The owner reads this away from the group, so the label names
                 # the group instead of the bot, which is the private chat itself.
                 # A reply here cannot reach one agent when several share the bot.
-                labelled = f'[Agent: {client["label"]} | {binding["title"]}]\n{text}\n{self.OWNER_NOTIFY_FOOTER}'
+                # Pairing already strips control characters from the title; collapse
+                # any whitespace too, so a group name can't fake a label or footer line.
+                title = ' '.join(str(binding['title']).split())
+                labelled = f'[Agent: {client["label"]} | {title}]\n{text}\n{self.OWNER_NOTIFY_FOOTER}'
                 db.execute("INSERT INTO owner_outbox(id,client_id,owner_id,text,from_chat_id,forward_message_id,"
                            'idempotency_key,request_hash,status,created,updated,due) '
                            "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",
