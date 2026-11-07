@@ -27,7 +27,7 @@ def test_private_cli_setup_once_two_clients_and_pairing(tmp_path):
     assert "client_secret" not in a
     pairs = [command(state, "pair-begin", "--client-file", str(path)) for path in (client_a,client_b)]
     fake = read_private_json(state / "fake-transport.json")
-    fake["updates"] = [{"update_id": i, "message": {"message_id": i, "chat": {"id": -100, "type": "supergroup"},
+    fake["updates"] = [{"update_id": i, "message": {"message_id": i, "chat": {"id": -100, "type": "supergroup", "is_forum": True},
         "message_thread_id": i, "from": {"id": 101, "is_bot": False}, "text": pair["command"]}} for i,pair in enumerate(pairs,1)]
     write_private_json(state / "fake-transport.json", fake, overwrite=True)
     assert command(state, "collect")["updates"] == 2

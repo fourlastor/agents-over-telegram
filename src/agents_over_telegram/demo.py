@@ -7,8 +7,8 @@ from .transport import FakeTransport
 
 def _update(update_id, text, thread_id, *, sender_id=101, chat_id=-100123):
     return {"update_id": update_id, "message": {"message_id": update_id,
-        "chat": {"id": chat_id, "type": "supergroup", "title": "Isolated offline example"},
-        "message_thread_id": thread_id,
+        "chat": {"id": chat_id, "type": "supergroup", "title": "Isolated offline example", "is_forum": True},
+        "message_thread_id": thread_id, "is_topic_message": True,
         "from": {"id": sender_id, "is_bot": False}, "text": text}}
 
 

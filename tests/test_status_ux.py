@@ -36,7 +36,7 @@ def environment(tmp_path):
 def append(transport, text, chat=-100, topic=7, sender=101):
     number = max((update['update_id'] for update in transport.updates), default=0) + 1
     transport.updates.append({'update_id': number, 'message': {
-        'message_id': number, 'chat': {'id': chat, 'type': 'supergroup', 'title': f'Group {chat}'},
+        'message_id': number, 'chat': {'id': chat, 'type': 'supergroup', 'title': f'Group {chat}', 'is_forum': True},
         'message_thread_id': topic, 'from': {'id': sender, 'is_bot': False}, 'text': text}})
 
 

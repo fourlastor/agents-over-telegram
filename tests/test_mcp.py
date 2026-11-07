@@ -250,7 +250,7 @@ async def test_two_simultaneous_sdk_sessions_have_separate_fixed_identities():
 
 def _telegram_update(update_id, topic, text):
     return {"update_id": update_id, "message": {"message_id": update_id + 100,
-        "chat": {"id": -100123, "type": "supergroup", "title": "Offline agents"},
+        "chat": {"id": -100123, "type": "supergroup", "title": "Offline agents", "is_forum": True},
         "message_thread_id": topic, "from": {"id": 42, "is_bot": False, "first_name": "Owner"},
         "text": text}}
 
