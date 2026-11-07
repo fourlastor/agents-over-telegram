@@ -374,8 +374,9 @@ def stub_runtime(tmp_path, mode=0o700):
 def test_launcher_without_pointer(tmp_path):
     plain = tmp_path / 'plain'
     plain.mkdir()
+    # The MCP relay stays up for a later setup; with no host input it simply ends.
     mcp = launch(plain, 'mcp')
-    assert mcp.returncode == 2 and 'not set up for this project folder' in mcp.stderr
+    assert (mcp.returncode, mcp.stdout) == (0, '') and 'not set up for this project folder' in mcp.stderr
     watch = launch(plain, 'watch')
     assert (watch.returncode, watch.stdout, watch.stderr) == (0, '', '')
     hook = launch(plain, 'hook', '--host', 'claude', stdin='{"hook_event_name":"Stop"}' * 10000)
@@ -402,7 +403,7 @@ def test_launcher_idles_in_unconfigured_folder_when_asked(tmp_path):
         if process.poll() is None:
             process.kill()
     # The flag never makes mcp or hook wait.
-    assert launch(plain, 'mcp', '--idle-if-unconfigured').returncode == 2
+    assert launch(plain, 'mcp', '--idle-if-unconfigured').returncode == 0
     assert launch(plain, 'hook', '--idle-if-unconfigured', timeout=10).returncode == 0
 
 
@@ -436,7 +437,7 @@ def test_launcher_uses_claude_project_dir_then_cwd(tmp_path):
     sub = project / 'src'
     sub.mkdir()
     nested = launch(sub, 'mcp', env_project=False)
-    assert nested.returncode == 2 and 'not set up' in nested.stderr
+    assert nested.returncode == 0 and 'not set up' in nested.stderr
 
 
 @needs_system_python
@@ -476,7 +477,7 @@ def test_launcher_refuses_unsafe_pointer_or_runtime(tmp_path, problem):
     elif problem == 'unsafe_profile':
         os.chmod(project / '.aot-profile.json', 0o660)
     mcp = launch(project, 'mcp')
-    assert mcp.returncode == 2
+    assert mcp.returncode == 0
     assert 'missing or unsafe' in mcp.stderr and mcp.stdout == ''
     watch = launch(project, 'watch')
     assert (watch.returncode, watch.stdout) == (0, '')
@@ -494,7 +495,7 @@ def test_launcher_exec_failure_messages(tmp_path):
     os.chmod(broken, 0o700)
     write_pointer(project, {'version': 1, 'executable': str(broken)})
     mcp = launch(project, 'mcp')
-    assert mcp.returncode == 2 and 'could not be started' in mcp.stderr
+    assert mcp.returncode == 0 and 'could not be started' in mcp.stderr
     hook = launch(project, 'hook', '--host', 'claude', stdin='{}')
     assert (hook.returncode, hook.stdout) == (0, '')
 
@@ -923,7 +924,7 @@ def test_relay_refuses_calls_while_the_runtime_cannot_start(tmp_path):
         session.receive()
         broken = tmp_path / 'bin' / 'aot-v1'
         os.chmod(broken, 0o777)  # unsafe now, so the launcher will not start it
-        error = session.call(3, 'tools/list')
+        error = session.call(3, 'tools/call')
         assert error['id'] == 3 and error['error']['code'] == -32603
         os.chmod(broken, 0o700)
         assert session.call(4, 'tools/list')['method'] == 'notifications/tools/list_changed'
@@ -965,3 +966,50 @@ def test_setup_from_a_newer_runtime_moves_a_paired_project_to_it(tmp_path, monke
     assert read_runtime_pointer(project) == newer / 'aot'
     assert again['connected'] and 'pairing_command' not in again
     assert again['client_id'] == result['client_id']
+
+
+@needs_system_python
+def test_relay_brings_the_tools_up_when_setup_finishes_mid_session(tmp_path):
+    project = tmp_path / 'project-claude'
+    project.mkdir(mode=0o700)
+    session = RelaySession(project)
+    try:
+        session.send(1, 'initialize', protocolVersion='2025-06-18', capabilities={},
+                     clientInfo={'name': 'test-host', 'version': '1'})
+        init = session.receive()['result']
+        assert init['protocolVersion'] == '2025-06-18'
+        assert init['capabilities']['tools'] == {'listChanged': True}
+        assert 'no restart is needed' in init['instructions']
+        session.send(None, 'notifications/initialized')
+        assert session.call(2, 'tools/list')['result'] == {'tools': []}
+        assert session.call(3, 'ping')['result'] == {}
+        assert session.call(4, 'tools/call')['error']['code'] == -32603
+        # Setup runs in another process while the session stays open.
+        assert connected(tmp_path)['project_dir'] == str(project)
+        assert session.receive() == {'jsonrpc': '2.0', 'method': 'notifications/tools/list_changed'}
+        tools = {tool['name'] for tool in session.call(5, 'tools/list')['result']['tools']}
+        assert {'messages_poll', 'message_send', 'messages_ack'} <= tools
+    finally:
+        assert session.close() == 0
+
+
+@needs_system_python
+def test_idle_monitor_starts_watching_once_the_folder_is_set_up(tmp_path):
+    plain = tmp_path / 'plain'
+    plain.mkdir()
+    process = subprocess.Popen([SYSTEM_PYTHON, str(LAUNCHER), 'watch', '--idle-if-unconfigured', '--format', 'text'],
+                               cwd=plain, env=clean_env(AOT_PROJECT_DIR=str(plain)), stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True)
+    try:
+        time.sleep(1.0)
+        assert process.poll() is None
+        profile = plain / '.aot-profile.json'
+        profile.write_text('{}')
+        os.chmod(profile, 0o600)
+        write_pointer(plain, {'version': 1, 'executable': str(stub_runtime(tmp_path))})
+        out, err = process.communicate(timeout=20)
+        assert process.returncode == 0, err
+        assert out.splitlines() == [str(plain), 'watch', '--format', 'text']
+    finally:
+        if process.poll() is None:
+            process.kill()

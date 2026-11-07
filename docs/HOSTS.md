@@ -42,8 +42,10 @@ aot setup --label Alpha --project-dir /absolute/path/to/project --host claude
    claude plugin install agents-over-telegram@agents-over-telegram --scope local
    ```
 
-   Local scope keeps the plugin out of other projects. In other projects it would stay quiet anyway, but the MCP server would report that the folder is not set up.
+   Local scope keeps the plugin out of other projects. In other projects it would stay quiet anyway, but it would keep an idle `telegram` MCP server with no tools.
 2. Start Claude Code in the project folder and ask "Telegram status".
+
+**Setting up during a session.** The project can be set up while a Claude Code session with the plugin is already open; no restart is needed. Until setup writes `.aot-runtime.json`, the plugin's MCP server answers with no tools, and its instructions say that setup is pending. The launcher checks for the pointer every 2 seconds. Once it appears, the launcher starts the runtime and sends `notifications/tools/list_changed`, and the Telegram tools appear in the session. Hooks read the pointer on every event. The wake waiter starts at the next turn end. A monitor that started in the folder before setup begins watching within seconds. The plugin itself must be enabled when the session starts; enabling it later needs `/reload-plugins` (terminal CLI) or a new session (desktop app).
 3. Keep the session open. The plugin collects Telegram updates for this project, so you do not need a separate listener.
 
 **How an idle session wakes up.** The plugin starts `aot wake` as an `asyncRewake` hook when the session starts and each time a turn ends. Claude Code runs this hook in the background. The hook waits for a new delivery and collects from Telegram while it waits. When a message arrives, the hook writes the notice and exits with status 2. Claude Code then wakes the session, even when it is idle, and shows the notice to the model.
