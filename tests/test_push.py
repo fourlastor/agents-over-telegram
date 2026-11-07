@@ -369,6 +369,8 @@ def test_wake_settings_are_validated_and_reported(env):
 
 @pytest.mark.parametrize('payload,exempt,expected', [
     ({'origin': 'telegram', 'kind': 'reaction', 'sender': {'id': 101, 'is_bot': False}}, {'addressed', 'owner'}, False),
+    ({'origin': 'telegram', 'kind': 'reaction', 'owner_notice': True, 'sender': {'id': 101, 'is_bot': False}}, {'owner'}, True),
+    ({'origin': 'telegram', 'kind': 'reaction', 'owner_notice': True, 'sender': {'id': 202, 'is_bot': False}}, {'owner'}, False),
     ({'origin': 'broker', 'kind': 'message'}, {'addressed'}, True),
     ({'origin': 'broker', 'kind': 'message'}, {'owner'}, False),
     ({'origin': 'telegram', 'kind': 'edited', 'addressed': True, 'sender': {'id': 5, 'is_bot': True}}, {'addressed'}, True),
