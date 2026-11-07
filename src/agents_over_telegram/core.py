@@ -279,6 +279,7 @@ class Core:
     # rule: (limit, window seconds) pairs, each a rolling window per agent.
     OWNER_NOTIFY_LIMITS = ((3, 3600), (10, 86400))
     OWNER_NOTIFY_INTERVAL = 1.0
+    OWNER_NOTIFY_FOOTER = 'Reply in the group, not here.'
     REACTION_WAKE_MODES = ('own_messages', 'all', 'none')
     WAKE_EXEMPT_MODES = ('addressed,owner', 'addressed', 'owner', 'none')
     WAKE_INTERVAL_MAX = 86400
@@ -479,6 +480,10 @@ class Core:
                 db.execute('ALTER TABLE bindings ADD COLUMN wake_interval INTEGER NOT NULL DEFAULT 0')
             if 'wake_exempt' not in binding_columns:
                 db.execute("ALTER TABLE bindings ADD COLUMN wake_exempt TEXT NOT NULL DEFAULT 'addressed,owner'")
+            # owner_notify is the first tool that writes outside the bound
+            # destination, so the owner switches it on knowingly per connection.
+            if 'owner_notify' not in binding_columns:
+                db.execute('ALTER TABLE bindings ADD COLUMN owner_notify INTEGER NOT NULL DEFAULT 0')
             # When the last admin probe ran, so a failing probe is retried only after a pause.
             if 'bot_admin_probed' not in binding_columns:
                 db.execute('ALTER TABLE bindings ADD COLUMN bot_admin_probed REAL')
@@ -714,7 +719,7 @@ class Core:
     DELIVERY_FILTERS = ('all', 'addressed')
 
     def delivery_settings(self, client_id, delivery_filter=None, capture_context=None, accept_media=None,
-                          reaction_wake=None, wake_interval=None, wake_exempt=None):
+                          reaction_wake=None, wake_interval=None, wake_exempt=None, owner_notify=None):
         """Local operator control; never exposed as an agent MCP mutation.
 
         ``delivery_filter`` 'all' (the default) delivers every message from an
@@ -738,11 +743,13 @@ class Core:
         immediately and can always be polled. ``wake_exempt`` names what is
         announced at once anyway: 'addressed,owner' (the default) for messages
         that address the bot and messages from the owner, 'addressed', 'owner'
-        or 'none'. The other settings default to the original behavior.
+        or 'none'. ``owner_notify`` lets the agent send private notices to
+        the owner with the owner_notify tool; it is off until the owner turns
+        it on. The other settings default to the original behavior.
         """
         if delivery_filter is not None and delivery_filter not in self.DELIVERY_FILTERS:
             raise CoreError('invalid_delivery_settings')
-        if any(value is not None and type(value) is not bool for value in (capture_context, accept_media)):
+        if any(value is not None and type(value) is not bool for value in (capture_context, accept_media, owner_notify)):
             raise CoreError('invalid_delivery_settings')
         if reaction_wake is not None and reaction_wake not in self.REACTION_WAKE_MODES:
             raise CoreError('invalid_delivery_settings')
@@ -765,10 +772,13 @@ class Core:
                 db.execute('UPDATE bindings SET wake_interval=? WHERE client_id=? AND connected=1', (wake_interval, client_id))
             if wake_exempt is not None:
                 db.execute('UPDATE bindings SET wake_exempt=? WHERE client_id=? AND connected=1', (wake_exempt, client_id))
+            if owner_notify is not None:
+                db.execute('UPDATE bindings SET owner_notify=? WHERE client_id=? AND connected=1', (int(owner_notify), client_id))
             row = self._binding(db, client_id)
         return {'delivery_filter': row['delivery_filter'], 'capture_context': bool(row['capture_context']),
                 'accept_media': bool(row['accept_media']), 'reaction_wake': row['reaction_wake'],
                 'wake_interval': row['wake_interval'], 'wake_exempt': row['wake_exempt'],
+                'owner_notify': bool(row['owner_notify']),
                 'context_window_seconds': self.HISTORY_WINDOW}
 
     def _limits(self, db):
@@ -989,7 +999,8 @@ class Core:
                             'capture_context': bool(row['capture_context']),
                             'accept_media': bool(row['accept_media']),
                             'wake_interval': row['wake_interval'],
-                            'wake_exempt': row['wake_exempt']} if row else None,
+                            'wake_exempt': row['wake_exempt'],
+                            'owner_notify': bool(row['owner_notify'])} if row else None,
                 'reactions': self._reaction_capability(row) if row else None,
                 'state': state, 'next_action': {'code': action, 'message': message},
             }
@@ -1128,6 +1139,12 @@ class Core:
         # not a forum: it is the first message of the reply chain, not a topic.
         # Only a forum has topics, so only a forum's thread id selects a binding.
         thread_id = msg.get('message_thread_id', 0) if chat.get('is_forum') is True else 0
+        if chat.get('type') == 'private':
+            # Several agents can share the bot, so a private message, including
+            # the owner's /start and replies to owner_notify, has no single
+            # agent to go to. Its own reason keeps it from looking like a bug.
+            self._unmatched(db, update_id, None, 'private_chat', now)
+            return
         if not _integer(chat_id) or not _integer(thread_id) or thread_id < 0 or chat.get('type') not in ('group', 'supergroup'):
             self._unmatched(db, update_id, None, 'unsupported_destination', now)
             return
@@ -2130,6 +2147,9 @@ class Core:
                 notify_id = existing['id']
             else:
                 binding = self._binding(db, client_id, usable=True)
+                if not binding['owner_notify']:
+                    # Nothing is stored, so this refusal never counts toward a limit.
+                    raise CoreError('owner_notify_disabled')
                 if forward_message_id is not None and not self._known_reaction_target(db, binding, forward_message_id):
                     raise CoreError('unknown_forward_target')
                 usage = self._owner_notify_usage(db, client_id, now)
@@ -2139,7 +2159,8 @@ class Core:
                 notify_id = 'owner_' + secrets.token_hex(12)
                 # The owner reads this away from the group, so the label names
                 # the group instead of the bot, which is the private chat itself.
-                labelled = f'[Agent: {client["label"]} | {binding["title"]}]\n{text}'
+                # A reply here cannot reach one agent when several share the bot.
+                labelled = f'[Agent: {client["label"]} | {binding["title"]}]\n{text}\n{self.OWNER_NOTIFY_FOOTER}'
                 db.execute("INSERT INTO owner_outbox(id,client_id,owner_id,text,from_chat_id,forward_message_id,"
                            'idempotency_key,request_hash,status,created,updated,due) '
                            "VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?)",

@@ -110,6 +110,7 @@ ERROR_MESSAGES = {
     "invalid_forward": "forward_message_id must be a positive message id.",
     "unknown_forward_target": "This message id is not known in this agent's bound group or topic, so it cannot be forwarded to the owner.",
     "owner_notify_limit": "Owner notification limit reached; wait until retry_at.",
+    "owner_notify_disabled": "Owner notifications are off for this connection. Nothing was sent, and this does not count toward any limit. If the owner should get this, ask the local owner whether to run \"aot delivery-settings --owner-notify on\" for this connection on this computer; the owner decides. Do not run it yourself without their yes.",
     "owner_chat_not_started": "The owner has not started a private chat with the shared bot, or blocked it. Nothing was sent. Ask the owner to open a private chat with the bot and send /start, then call owner_notify again with a new idempotency key.",
 }
 
@@ -192,7 +193,7 @@ TOOLS = (
         "emoji": {"type": "string", "maxLength": 32},
         "idempotency_key": _string(),
     }, ("message_id", "idempotency_key")), destructive=True, idempotent=True, open_world=True),
-    _tool("owner_notify", "Send a short private notice to the owner (the person who paired this agent) in their private chat with the shared bot. Use it ONLY for things that need the owner personally: a decision, a blocker, an approval, or a direct question to the owner that has gone unanswered in the group. Never use it for routine updates, progress reports or thanks; those belong in the group with message_send. The text is labeled with this agent and the group title. Optionally pass forward_message_id to also forward one message captured or published in this agent's own bound group or topic, so the owner sees the original. Limits per agent: 3 per rolling hour and 10 per rolling day; notices Telegram refused do not count. The owner must have sent /start to the bot in a private chat once. Reuse the same idempotency key for the same intent; unknown outcomes need private operator recovery.", _schema({
+    _tool("owner_notify", "Send a short private notice to the owner (the person who paired this agent) in their private chat with the shared bot. Use it ONLY for things that need the owner personally: a decision, a blocker, an approval, or a direct question to the owner that has gone unanswered in the group. Never use it for routine updates, progress reports or thanks; those belong in the group with message_send. The text is labeled with this agent and the group title. Optionally pass forward_message_id to also forward one message captured or published in this agent's own bound group or topic, so the owner sees the original. It is off until the local owner turns it on for this connection. Limits per agent: 3 per rolling hour and 10 per rolling day; notices Telegram refused do not count. A reply in the private chat cannot reach this agent, so each notice ends by asking the owner to reply in the group. The owner must have sent /start to the bot in a private chat once. Reuse the same idempotency key for the same intent; unknown outcomes need private operator recovery.", _schema({
         "text": _string(3500), "idempotency_key": _string(),
         "forward_message_id": {"type": "integer", "minimum": 1},
     }, ("text", "idempotency_key")), destructive=True, idempotent=True, open_world=True),

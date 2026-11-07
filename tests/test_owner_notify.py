@@ -43,13 +43,22 @@ def env(tmp_path):
     return core, transport, clock
 
 
-def bind(core, transport, label='Alpha', chat=GROUP, sender=OWNER):
+def bind(core, transport, label='Alpha', chat=GROUP, sender=OWNER, enable=True):
     client_id = core.create_client(label)['client_id']
     pairing = core.connection_begin(client_id)
     append(transport, pairing['command'], chat=chat, sender=sender)
     core.collect()
     core.confirm_pairing(pairing['pairing_id'])
+    if enable:
+        core.delivery_settings(client_id, owner_notify=True)
     return client_id
+
+
+def private(transport, text, sender=OWNER):
+    number = max((u['update_id'] for u in transport.updates), default=0) + 1
+    transport.updates.append({'update_id': number, 'message': {
+        'message_id': number, 'chat': {'id': sender, 'type': 'private', 'first_name': 'Owner'},
+        'from': {'id': sender, 'is_bot': False, 'username': 'owner'}, 'text': text}})
 
 
 def owner_messages(transport):
@@ -63,7 +72,8 @@ def test_sends_labelled_text_to_owner_private_chat(env):
     assert result['status'] == 'sent' and result['kind'] == 'owner_notify' and result['error'] is None
     [sent] = owner_messages(transport)
     # The private chat id is the owner's user id, recorded at pairing.
-    assert sent['text'] == '[Agent: Alpha | Test group]\nNeed your approval to merge.'
+    assert sent['text'] == ('[Agent: Alpha | Test group]\nNeed your approval to merge.\n'
+                            'Reply in the group, not here.')
     assert sent['message_thread_id'] is None and sent['reply_to_message_id'] is None
     assert core.delivery_status(client, result['notify_id']) == result
 
@@ -76,7 +86,7 @@ def test_forwards_a_captured_group_message_after_the_text(env):
     result = core.owner_notify(client, 'Unanswered question for you.', 'n1', forward_message_id=number)
     assert result['status'] == 'sent' and result['forwarded_message_id'] is not None
     assert transport.forwards == [{'chat_id': OWNER, 'from_chat_id': GROUP, 'message_id': number}]
-    assert [m.get('text') for m in owner_messages(transport)][0].endswith('Unanswered question for you.')
+    assert 'Unanswered question for you.' in [m.get('text') for m in owner_messages(transport)][0]
 
 
 def test_forwards_a_message_the_bot_published_in_the_destination(env):
@@ -255,3 +265,67 @@ def test_lazy_transport_passes_forward_message():
     lazy.transport = FakeTransport()
     result = lazy.forward_message(chat_id=OWNER, from_chat_id=GROUP, message_id=7)
     assert result['forwarded_from'] == {'chat_id': GROUP, 'message_id': 7}
+
+
+def test_off_by_default_and_refusal_is_clear_and_not_counted(env):
+    core, transport, clock = env
+    client = bind(core, transport, enable=False)
+    assert core.connection_status(client)['routing']['owner_notify'] is False
+    for index in range(5):
+        with pytest.raises(CoreError) as error:
+            core.owner_notify(client, 'Approve?', f'off{index}')
+        assert error.value.code == 'owner_notify_disabled'
+    body = _error_body('owner_notify_disabled')['error']
+    assert 'aot delivery-settings --owner-notify on' in body['message'] and 'owner decides' in body['message']
+    assert owner_messages(transport) == []
+    with sqlite3.connect(core.database) as db:
+        assert db.execute('SELECT count(*) FROM owner_outbox').fetchone()[0] == 0
+    settings = core.delivery_settings(client, owner_notify=True)
+    assert settings['owner_notify'] is True
+    assert core.connection_status(client)['routing']['owner_notify'] is True
+    # Earlier refusals used no part of the limit.
+    for index in range(3):
+        clock.advance()
+        assert core.owner_notify(client, 'Approve?', f'on{index}')['status'] == 'sent'
+    core.delivery_settings(client, owner_notify=False)
+    with pytest.raises(CoreError, match='owner_notify_disabled'):
+        core.owner_notify(client, 'Approve?', 'off-again')
+    with pytest.raises(CoreError, match='invalid_delivery_settings'):
+        core.delivery_settings(client, owner_notify='on')
+
+
+def test_existing_bindings_migrate_with_owner_notify_off(env, tmp_path):
+    core, transport, clock = env
+    client = bind(core, transport, enable=False)
+    with sqlite3.connect(core.database) as db:
+        db.execute('ALTER TABLE bindings DROP COLUMN owner_notify')
+    core = Core(core.state_dir, transport, clock=clock)
+    assert core.connection_status(client)['routing']['owner_notify'] is False
+
+
+def test_delivery_settings_cli_flag():
+    from agents_over_telegram.cli import parser
+
+    args = parser().parse_args(['delivery-settings', '--client-file', 'c.json', '--owner-notify', 'on'])
+    assert args.owner_notify == 'on'
+    both = parser().parse_args(['delivery-settings', '--client-file', 'c.json', '--owner-notify', 'off',
+                                '--wake-interval', '600', '--wake-exempt', 'owner'])
+    assert (both.owner_notify, both.wake_interval, both.wake_exempt) == ('off', 600, 'owner')
+    assert parser().parse_args(['delivery-settings', '--client-file', 'c.json']).owner_notify is None
+    with pytest.raises(SystemExit):
+        parser().parse_args(['delivery-settings', '--client-file', 'c.json', '--owner-notify', 'yes'])
+
+
+def test_private_chat_messages_are_unassigned_with_their_own_reason(env):
+    core, transport, _ = env
+    client = bind(core, transport)
+    private(transport, '/start')
+    private(transport, 'Yes, go ahead.')
+    assert core.collect()['status'] == 'ok'
+    reasons = [row['reason'] for row in core.unassigned()['updates']]
+    assert reasons.count('private_chat') == 2
+    assert 'unsupported_destination' not in reasons
+    # Nothing reaches any agent, and no text is kept.
+    assert core.poll(client)['deliveries'] == []
+    with sqlite3.connect(core.database) as db:
+        assert db.execute("SELECT chat_id FROM unmatched WHERE reason='private_chat'").fetchall() == [(None,), (None,)]

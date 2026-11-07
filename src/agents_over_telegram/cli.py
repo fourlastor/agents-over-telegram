@@ -214,6 +214,9 @@ def parser():
                                  choices=["addressed,owner", "addressed", "owner", "none"],
                                  help="what is still announced at once while batching: addressed,owner "
                                       "(default) messages that address the bot and messages from the owner")
+            command.add_argument("--owner-notify", dest="owner_notify", choices=["on", "off"],
+                                 help="on: let this agent send private notices to the owner with owner_notify "
+                                      "(at most 3 per hour and 10 per day; off by default)")
         if name == "bot-exchange-policy":
             command.add_argument("--sender-id", type=int, required=True)
             change = command.add_mutually_exclusive_group()
@@ -463,7 +466,8 @@ def run(args):
                                       capture_context=None if args.capture_context is None else args.capture_context == "on",
                                       accept_media=None if args.accept_media is None else args.accept_media == "on",
                                       reaction_wake=args.reaction_wake, wake_interval=args.wake_interval,
-                                      wake_exempt=args.wake_exempt)
+                                      wake_exempt=args.wake_exempt,
+                                      owner_notify=None if args.owner_notify is None else args.owner_notify == "on")
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command == "conversation-budget":

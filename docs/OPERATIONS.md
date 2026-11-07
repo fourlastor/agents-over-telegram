@@ -310,12 +310,24 @@ The notice starts with a label that names the agent and the group, for example `
 
 AOT enforces the volume, not the agent. Each agent can send at most 3 notices in any rolling hour and 10 in any rolling day. A notice that Telegram refused does not count. A notice with an `unknown` outcome counts, because it may have reached the owner.
 
-The owner must do one thing once: open a private chat with the bot and send `/start`. Telegram does not let a bot start a private chat by itself. No other setting is needed. Every paired agent can use `owner_notify`. A paused or suspended connection refuses it, as for `message_send`.
+`owner_notify` is off for every connection until the owner turns it on. It is the first tool that writes outside the agent's own group or topic, so the owner decides for each connection. During setup, the agent asks the owner after pairing and runs the command only on a yes. The owner can also turn it on or off at any time:
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --owner-notify on
+"$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --owner-notify off
+```
+
+`connection_status` shows the setting as `routing.owner_notify`.
+
+The owner must also do one thing once: open a private chat with the bot and send `/start`. Telegram does not let a bot start a private chat by itself. A paused or suspended connection refuses `owner_notify`, as for `message_send`.
+
+Several agents can share one bot, so AOT cannot give a reply in the private chat to one agent. Each notice therefore ends with "Reply in the group, not here." AOT keeps every private chat message, including `/start`, as unassigned metadata with the reason `private_chat`. It stores no text, and it delivers the message to no agent. `aot unassigned` shows these entries; they are expected, not a fault.
 
 `owner_notify` uses the same idempotency rules as `message_send`. The same key with the same request returns the same outcome. The same key with a different request is refused. `delivery_status` shows the outcome. An `unknown` outcome follows [uncertain-send recovery](#uncertain-sends) with the `owner_…` id. A `retry` repeats only the step that has no recorded message: the notice text or the forward.
 
 | Error code | Meaning |
 | --- | --- |
+| `owner_notify_disabled` | The owner has not turned on `owner_notify` for this connection. Nothing was sent, and it does not count toward the limit. The agent asks the owner; only the owner runs `delivery-settings --owner-notify on`. |
 | `owner_notify_limit` | The agent reached the hourly or daily limit. Nothing was sent. The error gives `retry_at`, the time when the next notice is allowed. |
 | `owner_chat_not_started` | Telegram refused the private chat (403): the owner never sent `/start` to the bot, or blocked it. Nothing was sent, and it does not count toward the limit. Ask the owner to send `/start` to the bot, then use a new idempotency key. |
 | `unknown_forward_target` | `forward_message_id` is not a message in the agent's own group or topic. Nothing was sent. |
