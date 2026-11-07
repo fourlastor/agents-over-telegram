@@ -50,6 +50,11 @@ STUCK_WAKE_CHECK_SECONDS = 60
 # An enqueue whose outcome is unknown is checked against the desktop's own
 # records once its child process has surely ended (it is killed after 30 s).
 UNKNOWN_ENQUEUE_CHECK_AFTER_SECONDS = 120
+# A chat whose latest turn is in progress and showed activity this recently is
+# busy: AOT's Codex hooks deliver the notice inside that turn, so the listener
+# does not also queue one. An older in-progress turn is treated as stale (for
+# example left open by a crash), and the listener queues as usual.
+BUSY_TURN_ACTIVITY_SECONDS = 600
 STUCK_WAKE_WARNING_REPEAT_SECONDS = 3600
 STUCK_WAKE_MESSAGES = {
     'review_uncertain_wake': (
@@ -349,6 +354,31 @@ class NativeDesktopQueue:
             raise DesktopQueueError('desktop_records_unreadable') from None
         return ('delivered', None) if row is not None else ('absent', None)
 
+    def thread_busy(self, thread_id, now):
+        """True while the chat's latest turn is in progress and recently active. Read-only.
+
+        Unreadable records count as not busy, so the listener falls back to
+        queueing, which was the behavior before this check.
+        """
+        if not _uuid(thread_id):
+            return False
+        try:
+            with sqlite3.connect((self.home / 'thread_history_1.sqlite').as_uri() + '?mode=ro', uri=True) as db:
+                row = db.execute(
+                    'SELECT t.status, t.started_at, (SELECT MAX(i.created_at_ms) FROM thread_items i '
+                    'WHERE i.thread_id=t.thread_id AND i.turn_id=t.turn_id) '
+                    'FROM thread_turns t WHERE t.thread_id=? ORDER BY t.rollout_ordinal DESC LIMIT 1',
+                    (thread_id,)).fetchone()
+        except (OSError, sqlite3.Error, ValueError):
+            return False
+        # thread_turns.started_at is in seconds and thread_items.created_at_ms in
+        # milliseconds (checked against a live desktop database).
+        if row is None or row[0] != 'inProgress':
+            return False
+        activity = [value for value in (row[1], row[2] / 1000 if isinstance(row[2], (int, float)) else None)
+                    if isinstance(value, (int, float))]
+        return bool(activity) and now - max(activity) <= BUSY_TURN_ACTIVITY_SECONDS
+
     def wake(self, binding):
         self._guard(binding)
         try:
@@ -607,7 +637,15 @@ def run_desktop_dispatcher(core, store, *, codex_binary=None, codex_home=None,
                                 or (current['thread_id'], current['project_dir']) !=
                                    (event['thread_id'], event['project_dir'])):
                             store.resolve(event['notification_id'], 'failed')
+                        elif transport.thread_busy(event['thread_id'], core.clock()):
+                            # The hooks reach a busy chat inside its turn. Try
+                            # again later; once it is idle, the notice is queued.
+                            receipt = store.resolve(event['notification_id'], 'failed')
+                            report('busy:' + event['client_id'], {'type': 'desktop_wake_deferred_busy',
+                                   'client_id': event['client_id'], 'thread_id': event['thread_id'],
+                                   'error': 'thread_busy', **receipt})
                         else:
+                            last_errors.pop('busy:' + event['client_id'], None)
                             handoffs.prepare(event)
                             if stop.is_set() or not transport.desktop_running():
                                 store.resolve(event['notification_id'], 'failed')
