@@ -408,3 +408,40 @@ def test_other_private_reactions_and_membership_are_private_chat(env):
         assert db.execute("SELECT count(*) FROM unmatched WHERE reason='private_chat' AND chat_id IS NOT NULL").fetchone()[0] == 0
     # The group binding is untouched by the private membership change.
     assert core.poll(sender)['suspended'] is None
+
+
+@pytest.mark.parametrize('exempt,announced', [('addressed,owner', True), ('owner', True),
+                                              ('addressed', False), ('none', False)])
+def test_owner_reaction_on_a_notice_wakes_at_once_while_batching(env, exempt, announced):
+    from agents_over_telegram import push
+    core, transport, clock = env
+    sender = bind(core, transport)
+    core.delivery_settings(sender, wake_interval=600, wake_exempt=exempt)
+    push.ensure_tables(core)
+    core.allow_sender(sender, 202)
+    append(transport, 'first', sender=202)
+    core.collect()
+    assert push.claim_new(core, sender, 'watch')['new'] == 1  # starts the interval
+    notice = core.owner_notify(sender, 'Approve the release?', 'n1')
+    private_reaction(transport, notice['message_id'])
+    core.collect()
+    claimed = push.claim_new(core, sender, 'watch')
+    assert (claimed is not None) == announced
+    payload = core.poll(sender)['deliveries'][-1]
+    assert payload['kind'] == 'reaction' and payload['owner_notice'] is True
+
+
+def test_group_reactions_do_not_carry_the_owner_notice_mark(env):
+    core, transport, _ = env
+    sender = bind(core, transport)
+    core.delivery_settings(sender, reaction_wake='all')
+    number = append(transport, 'hello')
+    core.collect()
+    core.poll(sender)
+    transport.updates.append({'update_id': number + 1, 'message_reaction': {
+        'chat': {'id': GROUP, 'type': 'supergroup', 'title': 'Test group'}, 'message_id': number, 'date': 1000,
+        'user': {'id': OWNER, 'is_bot': False, 'username': 'participant'},
+        'old_reaction': [], 'new_reaction': [{'type': 'emoji', 'emoji': '👍'}]}})
+    core.collect()
+    [reaction] = [d for d in core.poll(sender, lease_seconds=10)['deliveries'] if d['kind'] == 'reaction']
+    assert 'owner_notice' not in reaction

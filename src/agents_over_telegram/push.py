@@ -99,14 +99,17 @@ def _wakes_at_once(payload: dict, binding, exempt: set[str]) -> bool:
     if payload.get('origin') == 'broker':
         # A peer agent sends to this agent on purpose.
         return 'addressed' in exempt
+    sender = _mapping(payload.get('sender'))
+    from_owner = sender.get('is_bot') is False and sender.get('id') == binding['owner_id']
+    if payload.get('kind') == 'reaction':
+        # Reactions ride along with the next notice, except the owner's reaction
+        # on an owner_notify notice, which answers the agent like a message.
+        return 'owner' in exempt and from_owner and payload.get('owner_notice') is True
     if payload.get('kind') not in ('message', 'edited'):
-        # Reactions only ever ride along with the next notice.
         return False
     if 'addressed' in exempt and payload.get('addressed') is True:
         return True
-    sender = _mapping(payload.get('sender'))
-    return ('owner' in exempt and sender.get('is_bot') is False
-            and sender.get('id') == binding['owner_id'])
+    return 'owner' in exempt and from_owner
 
 
 def last_notice(db, client_id: str) -> float | None:

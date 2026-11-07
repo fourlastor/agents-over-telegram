@@ -1336,7 +1336,7 @@ class Core:
             # The notice was this agent's own message; its reactions have no
             # group conversation, so they share the agent's reaction one.
             self._deliver_reaction(db, update_id, reaction, binding, chat_id, message_id, sender, old, new,
-                                   True, None, now, thread_id=None, refuse=refuse)
+                                   True, None, now, thread_id=None, refuse=refuse, owner_notice=True)
             return
         conversation = None
         binding = None
@@ -1398,7 +1398,7 @@ class Core:
                           (row['client_id'], sender_id)).fetchone()
 
     def _deliver_reaction(self, db, update_id, reaction, binding, chat_id, message_id, sender, old, new,
-                          own_message, conversation, now, *, thread_id, refuse):
+                          own_message, conversation, now, *, thread_id, refuse, owner_notice=False):
         """Deliver, or keep as context, one validated reaction for one binding."""
         sender_id = sender['id']
         allowed = db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?',
@@ -1410,6 +1410,10 @@ class Core:
                    'message_id': message_id, 'chat_id': chat_id, 'thread_id': thread_id,
                    'sender': {'id': sender_id, 'is_bot': sender['is_bot'], 'username': _bounded(sender.get('username', ''), 64)},
                    'old_reaction': old[0], 'new_reaction': new[0], 'own_message': own_message}
+        if owner_notice:
+            # The owner answering an owner_notify notice: wake batching treats
+            # it like the owner's own messages.
+            payload['owner_notice'] = True
         if old[1]:
             payload['old_reaction_truncated'] = True
         if new[1]:
