@@ -45,6 +45,19 @@ def _integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _telegram_message_keys(payload):
+    """Return (chat_id, message_id) for a captured Telegram message, else None.
+
+    Reaction deliveries are excluded: a reaction is not itself a reaction target.
+    """
+    if not isinstance(payload, dict) or payload.get('origin') != 'telegram' or payload.get('kind') == 'reaction':
+        return None
+    chat_id, message_id = payload.get('chat_id'), payload.get('message_id')
+    if not _integer(chat_id) or not _integer(message_id):
+        return None
+    return chat_id, message_id
+
+
 def _mapping(value: Any) -> dict:
     return value if isinstance(value, dict) else {}
 
@@ -380,6 +393,20 @@ class Core:
             # for reactions on the agent's own published messages.
             if 'reaction_wake' not in binding_columns:
                 db.execute("ALTER TABLE bindings ADD COLUMN reaction_wake TEXT NOT NULL DEFAULT 'own_messages'")
+            # When the last admin probe ran, so a failing probe is retried only after a pause.
+            if 'bot_admin_probed' not in binding_columns:
+                db.execute('ALTER TABLE bindings ADD COLUMN bot_admin_probed REAL')
+            # Telegram chat and message IDs of captured messages, so a reaction finds
+            # its target with an index lookup instead of decoding the whole inbox.
+            inbox_columns = {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}
+            if 'tg_message_id' not in inbox_columns:
+                db.execute('ALTER TABLE inbox ADD COLUMN tg_chat_id INTEGER')
+                db.execute('ALTER TABLE inbox ADD COLUMN tg_message_id INTEGER')
+                for row in db.execute('SELECT rowid,payload FROM inbox').fetchall():
+                    keys = _telegram_message_keys(json.loads(row['payload']))
+                    if keys is not None:
+                        db.execute('UPDATE inbox SET tg_chat_id=?,tg_message_id=? WHERE rowid=?', (*keys, row['rowid']))
+            db.execute('CREATE INDEX IF NOT EXISTS inbox_telegram_message ON inbox(tg_chat_id,tg_message_id)')
             db.execute('CREATE INDEX IF NOT EXISTS reaction_outbox_history ON reaction_outbox(client_id,created DESC)')
             db.execute('INSERT OR IGNORE INTO history_keys(singleton,secret) VALUES(1,?)', (secrets.token_bytes(32),))
             db.execute('CREATE INDEX IF NOT EXISTS inbox_history ON inbox(client_id,COALESCE(event_at,created) DESC)')
@@ -876,6 +903,8 @@ class Core:
                          'note': 'Bots cannot use paid reactions, and this tool never sends custom emoji reactions.'},
                 'receive': receive, 'wake': row['reaction_wake']}
 
+    BOT_ADMIN_RETRY = 600
+
     def _unmatched(self, db, update_id, chat_id, reason, now):
         db.execute('INSERT OR IGNORE INTO unmatched(update_id,chat_id,reason,created) VALUES(?,?,?,?)', (update_id, chat_id, reason, now))
         db.execute('DELETE FROM unmatched WHERE update_id NOT IN (SELECT update_id FROM unmatched ORDER BY update_id DESC LIMIT ?)', (self.UNMATCHED_LIMIT,))
@@ -886,7 +915,8 @@ class Core:
         count = db.execute('SELECT count(*) FROM inbox WHERE client_id=? AND acknowledged=0', (client_id,)).fetchone()[0]
         if count >= self.queue_limit:
             raise CoreError('queue_full')
-        db.execute('INSERT INTO inbox(id,client_id,event_key,payload,created,conversation_id,outbox_id,event_at) VALUES(?,?,?,?,?,?,?,?)', ('msg_' + secrets.token_hex(12), client_id, event_key, json.dumps(payload, ensure_ascii=False), now, conversation_id, outbox_id, now if event_at is None else event_at))
+        keys = _telegram_message_keys(payload) or (None, None)
+        db.execute('INSERT INTO inbox(id,client_id,event_key,payload,created,conversation_id,outbox_id,event_at,tg_chat_id,tg_message_id) VALUES(?,?,?,?,?,?,?,?,?,?)', ('msg_' + secrets.token_hex(12), client_id, event_key, json.dumps(payload, ensure_ascii=False), now, conversation_id, outbox_id, now if event_at is None else event_at, *keys))
 
     # A new suspension never replaces a reason that needs more owner work.
     # Clearing topic_changed also checks bot membership, and a migration
@@ -1092,11 +1122,10 @@ class Core:
             own_message = binding is not None and published['client_id'] == binding['client_id']
         else:
             captured = None
-            for row in db.execute('SELECT client_id,payload,conversation_id FROM inbox ORDER BY created,rowid'):
-                payload = json.loads(row['payload'])
-                if (payload.get('origin') == 'telegram' and payload.get('message_id') == message_id
-                        and payload.get('chat_id') == chat_id):
-                    captured = (row['client_id'], payload.get('thread_id') or 0, row['conversation_id'])
+            row = db.execute('SELECT client_id,payload,conversation_id FROM inbox WHERE tg_chat_id=? AND tg_message_id=? '
+                             'ORDER BY created DESC,rowid DESC LIMIT 1', (chat_id, message_id)).fetchone()
+            if row is not None:
+                captured = (row['client_id'], json.loads(row['payload']).get('thread_id') or 0, row['conversation_id'])
             if captured is not None:
                 known_message = True
                 binding = db.execute('SELECT b.* FROM bindings b JOIN clients c ON c.id=b.client_id '
@@ -1215,14 +1244,23 @@ class Core:
         """Fill unknown bot_admin flags once per binding; never fails collection.
 
         Reaction updates arrive only while the bot is an administrator, so a
-        binding with an unknown flag is checked with getChatMember once. A
-        definite client error means the bot cannot even see the chat, which is
-        recorded as not-admin; other failures leave the flag unknown for a later
-        collection. Later my_chat_member events keep the flag current.
+        binding with an unknown flag is checked with getChatMember. A definite
+        client error means the bot cannot even see the chat, which is recorded
+        as not-admin; other failures leave the flag unknown. Later
+        my_chat_member events keep the flag current.
+
+        Collection runs this while holding the collector lock, so each call
+        makes at most one network request, and a binding whose probe failed is
+        tried again only BOT_ADMIN_RETRY seconds after it ended. A slow or
+        failing probe therefore cannot delay intake on every collection.
         """
+        now = self.clock()
         with self._db() as db:
             pending = db.execute('SELECT b.client_id,b.chat_id FROM bindings b JOIN clients c ON c.id=b.client_id '
-                                 'WHERE b.connected=1 AND c.active=1 AND b.bot_admin IS NULL').fetchall()
+                                 'WHERE b.connected=1 AND c.active=1 AND b.bot_admin IS NULL '
+                                 'AND (b.bot_admin_probed IS NULL OR b.bot_admin_probed<=?) '
+                                 'ORDER BY b.bot_admin_probed IS NOT NULL, b.bot_admin_probed LIMIT 1',
+                                 (now - self.BOT_ADMIN_RETRY,)).fetchall()
         for row in pending:
             admin = None
             try:
@@ -1233,9 +1271,12 @@ class Core:
                     admin = 0
             except Exception:
                 admin = None
-            if admin is not None:
-                with self._tx() as db:
-                    db.execute('UPDATE bindings SET bot_admin=? WHERE client_id=? AND connected=1',
+            with self._tx() as db:
+                if admin is None:
+                    db.execute('UPDATE bindings SET bot_admin_probed=? WHERE client_id=? AND connected=1',
+                               (self.clock(), row['client_id']))
+                else:
+                    db.execute('UPDATE bindings SET bot_admin=?,bot_admin_probed=NULL WHERE client_id=? AND connected=1',
                                (admin, row['client_id']))
 
     def poll(self, client_id, limit=20, lease_seconds=60):

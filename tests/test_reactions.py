@@ -505,3 +505,52 @@ def test_transport_requests_reactions_and_sends_one_emoji(tmp_path):
     assert body == {"chat_id": -100, "message_id": 42, "reaction": [{"type": "emoji", "emoji": "👍"}]}
     transport.set_message_reaction(-100, 42, "")
     assert json.loads(captured[-1].data.decode())["reaction"] == []
+
+
+def test_failed_admin_probe_waits_before_retrying(env):
+    core, transport, clock = env
+    bind(core, transport, 'Alpha', chat=-100)
+    bind(core, transport, 'Beta', chat=-200)
+    with sqlite3.connect(core.database) as db:
+        db.execute('UPDATE bindings SET bot_admin=NULL,bot_admin_probed=NULL')
+    calls = []
+
+    def failing(chat_id, user_id):
+        calls.append(chat_id)
+        raise TransportError(502)
+
+    transport.get_chat_member = failing
+    # Each collection makes at most one probe, so a slow Telegram cannot hold
+    # the collector lock once per binding.
+    collect_one(core, transport, message(next_number(transport), 'one'))
+    assert len(calls) == 1
+    collect_one(core, transport, message(next_number(transport), 'two'))
+    assert len(calls) == 2 and calls[0] != calls[1]
+    # Both probes failed, so neither binding is tried again until the pause ends.
+    collect_one(core, transport, message(next_number(transport), 'three'))
+    assert len(calls) == 2
+    clock.advance(core.BOT_ADMIN_RETRY)
+    collect_one(core, transport, message(next_number(transport), 'four'))
+    assert len(calls) == 3
+
+
+def test_reaction_target_is_found_through_the_message_index(env):
+    core, transport, clock = env
+    alpha = bind(core, transport, 'Alpha', chat=-100, topic=7)
+    bind(core, transport, 'Beta', chat=-100, topic=8)
+    core.delivery_settings(alpha, reaction_wake='all')
+    collect_one(core, transport, message(next_number(transport), 'to alpha', topic=7))
+    target = core.poll(alpha)['deliveries'][0]['message_id']
+    assert rows(core, 'SELECT tg_chat_id FROM inbox WHERE tg_message_id=?', (target,)) == [(-100,)]
+    # An older state directory has no index columns; the migration fills them
+    # from the stored payloads, so earlier captured messages still resolve.
+    with sqlite3.connect(core.database) as db:
+        db.execute('DROP INDEX inbox_telegram_message')
+        db.execute('ALTER TABLE inbox DROP COLUMN tg_chat_id')
+        db.execute('ALTER TABLE inbox DROP COLUMN tg_message_id')
+    migrated = Core(core.state_dir, transport, clock=core.clock)
+    assert rows(migrated, 'SELECT tg_chat_id FROM inbox WHERE tg_message_id=?', (target,)) == [(-100,)]
+    collect_one(migrated, transport, reaction(next_number(transport), target, new=emoji(['👍'])))
+    assert migrated.poll(alpha)['deliveries'][0]['kind'] == 'reaction'
+    plan = rows(migrated, 'EXPLAIN QUERY PLAN SELECT client_id FROM inbox WHERE tg_chat_id=? AND tg_message_id=?', (-100, target))
+    assert any('inbox_telegram_message' in str(step) for step in plan)
