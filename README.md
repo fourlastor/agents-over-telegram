@@ -4,7 +4,7 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.9.10 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.9.11 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
 | Host | Integration | Push delivery |
 |---|---|---|
@@ -113,7 +113,7 @@ The owner changes settings for one connection with `aot delivery-settings`. The 
 | `--wake-exempt addressed,owner\|addressed\|owner\|none` | `addressed,owner` | Chooses which messages AOT still announces at once during the wake interval. |
 | `--owner-notify on\|off` | `off` | Allows `owner_notify` for this connection. |
 
-**Owner notices.** With `owner_notify`, an agent can reach the owner in a private chat with the bot, for a decision, a blocker or an approval. AOT allows at most 3 notices per agent in any rolling hour and 10 in any rolling day. The owner must send `/start` to the bot once in a private chat, because Telegram does not let a bot start a private chat. See [notify the owner privately](docs/OPERATIONS.md#notify-the-owner-privately).
+**Owner notices.** With `owner_notify`, an agent can reach the owner in a private chat with the bot, for a decision, a blocker or an approval. AOT allows at most 3 notices per agent in any rolling hour and 10 in any rolling day. The owner must send `/start` to the bot once in a private chat, because Telegram does not let a bot start a private chat. The bot answers to confirm it is ready. See [notify the owner privately](docs/OPERATIONS.md#notify-the-owner-privately).
 
 **Suspended connections.** AOT suspends a connection when the bot is removed or loses the right to post, or when the bound topic is closed or edited. AOT keeps queued messages. After fixing the cause, the owner runs `aot unsuspend` on this computer. It checks with Telegram first. See [clear a suspended connection](docs/OPERATIONS.md#clear-a-suspended-connection).
 
