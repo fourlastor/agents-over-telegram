@@ -140,6 +140,216 @@ def _executable(project):
     return executable, None
 
 
+RELAY_INIT_TIMEOUT = 30
+RELAY_STOP_TIMEOUT = 5
+RUNTIME_STOPPED = "The Agents over Telegram runtime stopped. Retry the call."
+
+
+def _key(value):
+    return json.dumps(value, sort_keys=True)
+
+
+def _messages(line):
+    """The JSON-RPC objects in one stdio line, or [] when it is not JSON."""
+    try:
+        value = json.loads(line)
+    except (ValueError, UnicodeError):
+        return []
+    items = value if isinstance(value, list) else [value]
+    return [item for item in items if isinstance(item, dict)]
+
+
+class _Relay:
+    """Keep one MCP connection to the host across runtime restarts.
+
+    The host starts this launcher once per session. Instead of replacing itself
+    with the runtime, it relays stdio to a runtime child. When the project's
+    .aot-runtime.json names a different executable, or the child has stopped,
+    the next request starts a new child, replays the host's initialize and
+    initialized messages to it, and tells the host that the tool list changed.
+    A swap waits until no host request is in flight, so no answer is lost.
+    """
+
+    def __init__(self, project, rest):
+        import subprocess
+        import threading
+        self._subprocess = subprocess
+        self.project = project
+        self.rest = rest
+        self.lock = threading.Lock()
+        self.out_lock = threading.Lock()
+        self.child = None
+        self.executable = None
+        self.pending = set()
+        self.init_line = None
+        self.init_key = None
+        self.initialized_line = None
+        self.replay_key = None
+        self.replay_done = threading.Event()
+        self.replay_ok = False
+        self.replays = 0
+
+    def _upstream(self, line):
+        with self.out_lock:
+            sys.stdout.buffer.write(line if line.endswith(b"\n") else line + b"\n")
+            sys.stdout.buffer.flush()
+
+    def _error(self, key):
+        self._upstream(json.dumps({"jsonrpc": "2.0", "id": json.loads(key),
+                                   "error": {"code": -32603, "message": RUNTIME_STOPPED}}).encode())
+
+    def _start(self):
+        import threading
+        executable, _problem = _executable(self.project)
+        if executable is None:
+            raise OSError("runtime unavailable")
+        child = self._subprocess.Popen([executable, "mcp"] + self.rest, cwd=self.project,
+                                       stdin=self._subprocess.PIPE, stdout=self._subprocess.PIPE, bufsize=0)
+        with self.lock:
+            self.child, self.executable = child, executable
+        threading.Thread(target=self._read_child, args=(child,), daemon=True).start()
+
+    def _stop(self):
+        with self.lock:
+            child, self.child = self.child, None
+        if child is None:
+            return
+        try:
+            child.stdin.close()
+        except OSError:
+            pass
+        try:
+            child.wait(timeout=RELAY_STOP_TIMEOUT)
+        except self._subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+
+    def _read_child(self, child):
+        for line in iter(child.stdout.readline, b""):
+            forward = True
+            with self.lock:
+                if child is not self.child:
+                    return
+                for message in _messages(line):
+                    if "method" in message or "id" not in message:
+                        continue
+                    key = _key(message["id"])
+                    if key == self.replay_key:
+                        forward = False
+                        self.replay_ok = "result" in message
+                        self.replay_done.set()
+                    elif key in self.pending:
+                        self.pending.discard(key)
+                        if key == self.init_key and isinstance(message.get("result"), dict):
+                            # The relay announces tool list changes after a swap.
+                            tools = message["result"].setdefault("capabilities", {}).setdefault("tools", {})
+                            if isinstance(tools, dict):
+                                tools["listChanged"] = True
+                                line = json.dumps(message).encode()
+            if forward:
+                self._upstream(line)
+        with self.lock:
+            if child is not self.child:
+                return
+            self.child = None
+            lost, self.pending = self.pending, set()
+            self.replay_done.set()
+        for key in sorted(lost):
+            self._error(key)
+
+    def _restart(self):
+        """Start a fresh child and bring it to the host's session state."""
+        self._stop()
+        self._start()
+        if self.init_line is None:
+            return True
+        self.replays += 1
+        message = json.loads(self.init_line)
+        message["id"] = "aot-relay-replay-%d" % self.replays
+        with self.lock:
+            self.replay_key = _key(message["id"])
+            self.replay_done.clear()
+            self.replay_ok = False
+            child = self.child
+        try:
+            child.stdin.write(json.dumps(message).encode() + b"\n")
+            child.stdin.flush()
+        except (OSError, AttributeError):
+            return False
+        if not self.replay_done.wait(RELAY_INIT_TIMEOUT) or not self.replay_ok:
+            self._stop()
+            return False
+        if self.initialized_line is not None:
+            try:
+                child.stdin.write(self.initialized_line)
+                child.stdin.flush()
+            except OSError:
+                return False
+        self._upstream(b'{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}')
+        return True
+
+    def _needs_restart(self):
+        with self.lock:
+            if self.child is None:
+                return True
+            if self.pending:
+                return False
+            current = self.executable
+        executable, _problem = _executable(self.project)
+        return executable is not None and executable != current
+
+    def run(self):
+        try:
+            self._start()
+        except OSError:
+            sys.stderr.write("The prepared Agents over Telegram runtime could not be started.\n")
+            return 2
+        for line in iter(sys.stdin.buffer.readline, b""):
+            if not line.endswith(b"\n"):
+                line += b"\n"
+            messages = _messages(line)
+            requests = [m for m in messages if "method" in m and "id" in m]
+            initialize = any(m.get("method") == "initialize" for m in requests)
+            if any(m.get("method") == "notifications/initialized" for m in messages):
+                self.initialized_line = line
+            if requests and self._needs_restart():
+                try:
+                    if initialize:
+                        # A new session's initialize is forwarded as is, never replayed.
+                        self._stop()
+                        self._start()
+                        ready = True
+                    else:
+                        ready = self._restart()
+                except OSError:
+                    ready = False
+                if not ready:
+                    for message in requests:
+                        self._error(_key(message["id"]))
+                    continue
+            with self.lock:
+                child = self.child
+                for message in requests:
+                    self.pending.add(_key(message["id"]))
+                    if message.get("method") == "initialize":
+                        self.init_key = _key(message["id"])
+            if initialize:
+                self.init_line = line
+            try:
+                if child is None:
+                    raise OSError("no runtime")
+                child.stdin.write(line)
+                child.stdin.flush()
+            except OSError:
+                with self.lock:
+                    lost = [k for k in (_key(m["id"]) for m in requests) if k in self.pending]
+                    self.pending.difference_update(lost)
+                for key in lost:
+                    self._error(key)
+        self._stop()
+        return 0
+
+
 def main(argv):
     if not argv or argv[0] not in COMMANDS:
         if argv and argv[0] in HOOK_COMMANDS:
@@ -191,6 +401,8 @@ def main(argv):
         return 0
     if command == "wake":
         return _wake(args, project, hook_input)
+    if command == "mcp":
+        return _Relay(project, rest).run()
     try:
         os.execv(executable, args)
     except OSError:

@@ -717,3 +717,189 @@ def test_waiting_waiter_keeps_waiting_until_replaced(tmp_path):
             if waiting.poll() is None:
                 waiting.kill()
                 waiting.communicate(timeout=10)
+
+
+# ------------------------------------------------------------ the MCP relay
+
+FAKE_MCP = '''#!{python}
+import json, sys, time
+log = open({log!r}, "a")
+for line in sys.stdin:
+    message = json.loads(line)
+    log.write(json.dumps({{"version": {version!r}, "message": message}}) + "\\n")
+    log.flush()
+    method, ident = message.get("method"), message.get("id")
+    if method == "crash":
+        sys.exit(3)
+    if ident is None:
+        continue
+    if method == "slow":
+        time.sleep(1.5)
+    if method == "initialize":
+        result = {{"protocolVersion": "2025-06-18", "capabilities": {{"tools": {{}}}},
+                   "serverInfo": {{"name": "fake", "version": {version!r}}}}}
+    else:
+        result = {{"version": {version!r}, "method": method}}
+    sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": ident, "result": result}}) + "\\n")
+    sys.stdout.flush()
+'''
+
+
+def fake_mcp_runtime(tmp_path, version):
+    path = tmp_path / 'bin' / ('aot-' + version)
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(FAKE_MCP.format(python=sys.executable, log=str(tmp_path / 'mcp.log'), version=version))
+    os.chmod(path, 0o700)
+    return path
+
+
+class RelaySession:
+    """A host talking newline-delimited JSON-RPC to the launcher's mcp relay."""
+
+    def __init__(self, project):
+        import queue
+        import threading
+        self.process = subprocess.Popen([SYSTEM_PYTHON, str(LAUNCHER), 'mcp'], cwd=project,
+                                        env=clean_env(AOT_PROJECT_DIR=str(project)), stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.lines = queue.Queue()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        for line in iter(self.process.stdout.readline, b''):
+            self.lines.put(json.loads(line))
+
+    def send(self, ident, method, **params):
+        message = {'jsonrpc': '2.0', 'method': method, 'params': params}
+        if ident is not None:
+            message['id'] = ident
+        self.process.stdin.write(json.dumps(message).encode() + b'\n')
+        self.process.stdin.flush()
+
+    def receive(self):
+        return self.lines.get(timeout=20)
+
+    def call(self, ident, method):
+        self.send(ident, method)
+        return self.receive()
+
+    def close(self):
+        self.process.stdin.close()
+        try:
+            return self.process.wait(timeout=20)
+        finally:
+            if self.process.poll() is None:
+                self.process.kill()
+
+
+def relay_log(tmp_path):
+    return [json.loads(line) for line in (tmp_path / 'mcp.log').read_text().splitlines()]
+
+
+def relay_project(tmp_path):
+    project = Path(prepare(tmp_path, 'claude')['project_dir'])
+    write_pointer(project, {'version': 1, 'executable': str(fake_mcp_runtime(tmp_path, 'v1'))})
+    session = RelaySession(project)
+    session.send(1, 'initialize', protocolVersion='2025-06-18')
+    init = session.receive()
+    session.send(None, 'notifications/initialized')
+    return project, session, init
+
+
+@needs_system_python
+def test_relay_passes_the_session_through_and_announces_tool_changes(tmp_path):
+    project, session, init = relay_project(tmp_path)
+    try:
+        assert init['id'] == 1 and init['result']['serverInfo']['version'] == 'v1'
+        assert init['result']['capabilities']['tools'] == {'listChanged': True}
+        assert session.call(2, 'tools/list')['result'] == {'version': 'v1', 'method': 'tools/list'}
+    finally:
+        assert session.close() == 0
+    methods = [entry['message'].get('method') for entry in relay_log(tmp_path)]
+    assert methods == ['initialize', 'notifications/initialized', 'tools/list']
+
+
+@needs_system_python
+def test_relay_moves_to_a_new_runtime_without_a_new_session(tmp_path):
+    project, session, _ = relay_project(tmp_path)
+    try:
+        assert session.call(2, 'tools/list')['result']['version'] == 'v1'
+        write_pointer(project, {'version': 1, 'executable': str(fake_mcp_runtime(tmp_path, 'v2'))})
+        session.send(3, 'tools/list')
+        assert session.receive() == {'jsonrpc': '2.0', 'method': 'notifications/tools/list_changed'}
+        assert session.receive() == {'jsonrpc': '2.0', 'id': 3, 'result': {'version': 'v2', 'method': 'tools/list'}}
+    finally:
+        assert session.close() == 0
+    v2 = [entry['message'] for entry in relay_log(tmp_path) if entry['version'] == 'v2']
+    # The new runtime gets the host's own initialize under a relay id, then initialized.
+    assert [m.get('method') for m in v2] == ['initialize', 'notifications/initialized', 'tools/list']
+    assert v2[0]['params'] == {'protocolVersion': '2025-06-18'} and v2[0]['id'] != 1
+
+
+@needs_system_python
+def test_relay_waits_for_requests_in_flight_before_swapping(tmp_path):
+    project, session, _ = relay_project(tmp_path)
+    try:
+        session.send(2, 'slow')
+        time.sleep(0.3)
+        write_pointer(project, {'version': 1, 'executable': str(fake_mcp_runtime(tmp_path, 'v2'))})
+        # Still busy: this request goes to the old runtime too.
+        session.send(3, 'tools/list')
+        answers = {}
+        while len(answers) < 2:
+            message = session.receive()
+            answers[message['id']] = message['result']['version']
+        assert answers == {2: 'v1', 3: 'v1'}
+        assert session.call(4, 'tools/list')['method'] == 'notifications/tools/list_changed'
+        assert session.receive()['result']['version'] == 'v2'
+    finally:
+        assert session.close() == 0
+
+
+@needs_system_python
+def test_relay_answers_lost_calls_and_restarts_a_stopped_runtime(tmp_path):
+    project, session, _ = relay_project(tmp_path)
+    try:
+        session.send(2, 'crash')
+        lost = session.receive()
+        assert lost['id'] == 2 and lost['error']['code'] == -32603
+        assert session.call(3, 'tools/list')['method'] == 'notifications/tools/list_changed'
+        assert session.receive() == {'jsonrpc': '2.0', 'id': 3, 'result': {'version': 'v1', 'method': 'tools/list'}}
+    finally:
+        assert session.close() == 0
+
+
+@needs_system_python
+def test_relay_refuses_calls_while_the_runtime_cannot_start(tmp_path):
+    project, session, _ = relay_project(tmp_path)
+    try:
+        session.send(2, 'crash')
+        session.receive()
+        broken = tmp_path / 'bin' / 'aot-v1'
+        os.chmod(broken, 0o777)  # unsafe now, so the launcher will not start it
+        error = session.call(3, 'tools/list')
+        assert error['id'] == 3 and error['error']['code'] == -32603
+        os.chmod(broken, 0o700)
+        assert session.call(4, 'tools/list')['method'] == 'notifications/tools/list_changed'
+        assert session.receive()['id'] == 4
+    finally:
+        assert session.close() == 0
+
+
+@needs_system_python
+def test_relay_serves_the_real_runtime(tmp_path):
+    project = Path(connected(tmp_path)['project_dir'])
+    session = RelaySession(project)
+    try:
+        session.send(1, 'initialize', protocolVersion='2025-06-18', capabilities={},
+                     clientInfo={'name': 'test-host', 'version': '1'})
+        init = session.receive()
+        assert init['id'] == 1 and init['result']['capabilities']['tools']['listChanged'] is True
+        session.send(None, 'notifications/initialized')
+        tools = {tool['name'] for tool in session.call(2, 'tools/list')['result']['tools']}
+        assert {'messages_poll', 'message_send', 'messages_ack', 'connection_status'} <= tools
+        session.send(3, 'tools/call', name='connection_status', arguments={})
+        status = json.loads(session.receive()['result']['content'][0]['text'])
+        assert status['ok'] and status['result']['connected'] is True
+    finally:
+        assert session.close() == 0
