@@ -29,10 +29,10 @@ def history(core, client):
     return core.history(client, limit=50)['messages']
 
 
-def test_defaults_keep_the_original_behaviour(group):
+def test_defaults_deliver_everything_from_allowed_senders_with_media(group):
     core, transport, clock, client = group
     assert core.connection_status(client)['routing'] == {
-        'delivery_filter': 'all', 'capture_context': False, 'accept_media': False}
+        'delivery_filter': 'all', 'capture_context': False, 'accept_media': True}
     append(transport, 'plain owner message')
     append(transport, 'stranger message', sender=303)
     core.collect()
@@ -41,8 +41,72 @@ def test_defaults_keep_the_original_behaviour(group):
     assert rows(core, "SELECT reason FROM unmatched WHERE reason='sender_not_allowed'") == [('sender_not_allowed',)]
     media(transport, caption='a file', document={'file_id': 'D', 'file_unique_id': 'uD'})
     core.collect()
-    assert deliveries(core, client) == []
-    assert rows(core, "SELECT reason FROM unmatched WHERE reason='unsupported_message'") == [('unsupported_message',)]
+    [delivery] = deliveries(core, client)
+    assert delivery['text'] == 'a file' and delivery['attachments'][0]['file_unique_id'] == 'uD'
+
+
+def test_refused_media_from_an_allowed_sender_is_announced_not_dropped(group):
+    core, transport, clock, client = group
+    core.delivery_settings(client, accept_media=False)
+    media(transport, caption='look at this', photo=[{'file_id': 'P', 'file_unique_id': 'uP', 'file_size': 5}])
+    media(transport, document={'file_id': 'D', 'file_unique_id': 'uD'})
+    media(transport, sender=303, caption='stranger file', document={'file_id': 'S', 'file_unique_id': 'uS'})
+    core.collect()
+    got = deliveries(core, client)
+    assert [(d['text'], d.get('media_refused'), 'attachments' in d) for d in got] == [
+        ('look at this', ['photo'], False), ('', ['document'], False)]
+    with pytest.raises(CoreError, match='unknown_attachment'):
+        core.fetch_attachment(client, got[0]['delivery_id'], 'uP')
+    assert rows(core, "SELECT reason FROM unmatched") == [('unsupported_message',)]
+
+
+def test_reply_carries_the_quoted_message_and_its_media(group):
+    core, transport, clock, client = group
+    transport.files['Q'] = {'content': b'quoted image'}
+    quoted = {'message_id': 59, 'from': {'id': 303, 'is_bot': False, 'username': 'someone'},
+              'chat': {'id': -100, 'type': 'supergroup'}, 'caption': 'the screenshot',
+              'photo': [{'file_id': 'Q', 'file_unique_id': 'uQ', 'file_size': 12}]}
+    append(transport, 'here it is', reply_to_message=quoted)
+    core.collect()
+    [delivery] = deliveries(core, client)
+    assert delivery['reply_to'] == 59
+    assert delivery['reply_to_message'] == {
+        'message_id': 59, 'text': 'the screenshot',
+        'sender': {'id': 303, 'is_bot': False, 'username': 'someone', 'allowed': False},
+        'attachments': [{'kind': 'photo', 'file_id': 'Q', 'file_unique_id': 'uQ', 'file_size': 12}]}
+    assert core.fetch_attachment(client, delivery['delivery_id'], 'uQ')['size'] == 12
+
+
+def test_quoted_media_follows_the_media_setting(group):
+    core, transport, clock, client = group
+    core.delivery_settings(client, accept_media=False)
+    quoted = {'message_id': 59, 'from': {'id': 101, 'is_bot': False},
+              'photo': [{'file_id': 'Q', 'file_unique_id': 'uQ'}]}
+    append(transport, 'see above', reply_to_message=quoted)
+    append(transport, 'sticker reply', reply_to_message={'message_id': 60, 'sticker': {'file_id': 'S'}})
+    core.collect()
+    first, second = deliveries(core, client)
+    assert first['reply_to_message']['media_refused'] == ['photo']
+    assert 'attachments' not in first['reply_to_message']
+    assert 'reply_to_message' not in second and second['reply_to'] == 60
+
+
+@pytest.mark.parametrize('origin,expected', [
+    ({'type': 'user', 'date': 5, 'sender_user': {'id': 7, 'is_bot': False, 'first_name': 'Ann', 'last_name': 'Lee'}},
+     {'type': 'user', 'id': 7, 'name': 'Ann Lee', 'date': 5}),
+    ({'type': 'hidden_user', 'date': 5, 'sender_user_name': 'Private Person'},
+     {'type': 'hidden_user', 'name': 'Private Person', 'date': 5}),
+    ({'type': 'channel', 'date': 5, 'chat': {'id': -1001, 'type': 'channel', 'title': 'News'}, 'message_id': 3},
+     {'type': 'channel', 'id': -1001, 'name': 'News', 'date': 5}),
+    ({'type': 'unknown_kind'}, None),
+])
+def test_forwarded_messages_say_where_they_came_from(group, origin, expected):
+    core, transport, clock, client = group
+    append(transport, 'forwarded text', forward_origin=origin)
+    core.collect()
+    [delivery] = deliveries(core, client)
+    assert delivery['text'] == 'forwarded text'
+    assert delivery.get('forwarded_from') == expected
 
 
 def test_addressed_filter_delivers_only_mentions_replies_and_commands(group):
@@ -307,3 +371,37 @@ def test_pruning_uses_the_partial_context_index(group):
     plan = rows(core, """EXPLAIN QUERY PLAN SELECT id FROM inbox WHERE context=1 AND COALESCE(event_at,created)<?
         AND rowid<(SELECT MAX(rowid) FROM inbox)""", (0,))
     assert any('inbox_context_expiry' in str(step) for step in plan)
+
+
+def test_quoted_text_is_bounded_and_marks_allowed_senders(group):
+    core, transport, clock, client = group
+    long_text = 'x' * 4096
+    append(transport, 'replying to myself', reply_to_message={
+        'message_id': 7, 'from': {'id': 101, 'is_bot': False}, 'text': long_text})
+    core.collect()
+    [delivery] = deliveries(core, client)
+    quoted = delivery['reply_to_message']
+    assert len(quoted['text']) == 1024 and quoted['truncated'] is True
+    assert quoted['sender']['allowed'] is True
+
+
+def test_forum_topic_root_is_not_quoted(group):
+    core, transport, clock, client = group
+    # In a forum, Telegram sets reply_to_message to the topic's creation message.
+    append(transport, 'in a topic', reply_to_message={
+        'message_id': 3, 'from': {'id': 101, 'is_bot': False},
+        'forum_topic_created': {'name': 'Topic', 'icon_color': 1}})
+    core.collect()
+    [delivery] = deliveries(core, client)
+    assert 'reply_to_message' not in delivery and delivery['reply_to'] == 3
+
+
+def test_a_full_page_of_long_quoted_replies_fits_the_result_cap(group):
+    from agents_over_telegram.mcp_server import _result_body
+    core, transport, clock, client = group
+    wide = '\U0001F600' * 4096
+    for _ in range(50):
+        append(transport, wide, reply_to_message={'message_id': 7, 'from': {'id': 303, 'is_bot': False}, 'text': wide})
+    core.collect()
+    body = _result_body(core.poll(client, limit=50))
+    assert body['ok'] is True and len(body['result']['deliveries']) == 50

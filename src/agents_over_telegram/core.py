@@ -140,6 +140,68 @@ def _addressed(msg, text, account):
     return replied.get('id') == account['bot_id']
 
 
+def _forward_origin(msg):
+    """Who a forwarded message came from, bounded, or None for an ordinary message."""
+    origin = _mapping(msg.get('forward_origin'))
+    kind = origin.get('type')
+    if kind == 'user':
+        user = _mapping(origin.get('sender_user'))
+        name = user.get('username') or ' '.join(
+            part for part in (user.get('first_name'), user.get('last_name')) if isinstance(part, str))
+        found = {'type': 'user', 'id': user['id'] if _integer(user.get('id')) else None}
+    elif kind == 'hidden_user':
+        name, found = origin.get('sender_user_name'), {'type': 'hidden_user'}
+    elif kind in ('chat', 'channel'):
+        chat = _mapping(origin.get('sender_chat') if kind == 'chat' else origin.get('chat'))
+        name = chat.get('title') or chat.get('username')
+        found = {'type': kind, 'id': chat['id'] if _integer(chat.get('id')) else None}
+    else:
+        return None
+    found['name'] = _bounded(name, 128) if isinstance(name, str) else ''
+    if _integer(origin.get('date')):
+        found['date'] = origin['date']
+    return found
+
+
+QUOTED_TEXT_LIMIT = 1024
+
+
+def _quoted_message(msg, accept_media, allowed_sender):
+    """The message a reply quotes, so an agent can read what was replied to.
+
+    Telegram includes the replied-to message in the update. Its text and media
+    are kept like a delivered message's: media only when the connection accepts
+    it, otherwise only the media kinds. None when nothing readable is quoted, for
+    example a forum topic's creation message, which Telegram sets as the replied
+    message of every message in that topic. The text is cut to
+    QUOTED_TEXT_LIMIT characters, so a full poll page stays under the result
+    cap. ``allowed_sender`` tells whether the quoted sender is on the allow
+    list: an allowed sender quoting someone else passes that content on, like
+    a forward.
+    """
+    quoted = _mapping(msg.get('reply_to_message'))
+    if not _integer(quoted.get('message_id')):
+        return None
+    text, attachments = _message_content(quoted)
+    if text is None:
+        return None
+    sender = _mapping(quoted.get('from'))
+    sender_id = sender['id'] if _integer(sender.get('id')) else None
+    is_bot = sender.get('is_bot') is True
+    item = {'message_id': quoted['message_id'], 'text': text[:QUOTED_TEXT_LIMIT],
+            'sender': {'id': sender_id, 'is_bot': is_bot,
+                       'username': _bounded(sender.get('username', ''), 64)
+                       if isinstance(sender.get('username'), str) else '',
+                       'allowed': bool(sender_id is not None and allowed_sender(sender_id, is_bot))}}
+    if len(text) > QUOTED_TEXT_LIMIT:
+        item['truncated'] = True
+    if attachments and accept_media:
+        item['attachments'] = attachments
+    elif attachments:
+        item['media_refused'] = sorted({a['kind'] for a in attachments})
+    return item
+
+
 def reaction_emoji(value):
     """Normalize one agent-provided emoji to Telegram's documented form.
 
@@ -560,7 +622,8 @@ class Core:
                 raise CoreError('pairing_not_observed')
             if db.execute('SELECT 1 FROM bindings WHERE connected=1 AND (client_id=? OR (chat_id=? AND thread_id=?))', (row['client_id'], row['chat_id'], row['thread_id'])).fetchone():
                 raise CoreError('destination_already_bound')
-            db.execute('INSERT INTO bindings(client_id,chat_id,thread_id,owner_id,title,created) VALUES(?,?,?,?,?,?)', (row['client_id'], row['chat_id'], row['thread_id'], row['sender_id'], row['title'], now))
+            # New connections accept media: a refused photo is easy to miss.
+            db.execute('INSERT INTO bindings(client_id,chat_id,thread_id,owner_id,title,created,accept_media) VALUES(?,?,?,?,?,?,1)', (row['client_id'], row['chat_id'], row['thread_id'], row['sender_id'], row['title'], now))
             db.execute('INSERT INTO allowed_senders(client_id,sender_id,is_bot) VALUES(?,?,0)', (row['client_id'], row['sender_id']))
             db.execute('UPDATE pairings SET consumed=1 WHERE id=?', (pairing_id,))
         return self.connection_status(row['client_id'])
@@ -641,8 +704,11 @@ class Core:
         are delivered and can wake this agent: 'own_messages' (the default) only
         reactions on messages this agent published, 'all' every reaction, 'none'
         none; the rest are kept as context. The delivery filter does not apply to
-        reactions, which target one message already. Every setting defaults to
-        off, which is the original behavior.
+        reactions, which target one message already. A new connection accepts
+        media; connections made before that default keep their setting. With
+        media off, a media message from an allowed sender is still delivered,
+        with its caption and a ``media_refused`` list of kinds instead of the
+        attachments. The other settings default to the original behavior.
         """
         if delivery_filter is not None and delivery_filter not in self.DELIVERY_FILTERS:
             raise CoreError('invalid_delivery_settings')
@@ -1058,10 +1124,16 @@ class Core:
         if binding is None:
             self._unmatched(db, update_id, chat_id, 'unbound_destination', now)
             return
-        if attachments and not binding['accept_media']:
-            self._unmatched(db, update_id, chat_id, 'unsupported_message', now)
-            return
         allowed = db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?', (binding['client_id'], sender_id, int(sender['is_bot']))).fetchone()
+        media_refused = []
+        if attachments and not binding['accept_media']:
+            if not allowed:
+                self._unmatched(db, update_id, chat_id, 'unsupported_message', now)
+                return
+            # Tell the agent that a message came in with media it cannot read,
+            # instead of dropping it unseen. Only the media kinds are kept.
+            media_refused = sorted({item['kind'] for item in attachments})
+            attachments = []
         if not allowed and not binding['capture_context']:
             self._unmatched(db, update_id, chat_id, 'sender_not_allowed', now)
             return
@@ -1110,6 +1182,16 @@ class Core:
         payload = {'origin': 'telegram', 'kind': 'edited' if kind == 'edited_message' else 'message', 'update_id': update_id, 'message_id': msg['message_id'], 'chat_id': chat_id, 'thread_id': thread_id or None, 'sender': {'id': sender_id, 'is_bot': sender['is_bot'], 'username': _bounded(sender.get('username', ''), 64)}, 'text': text, 'reply_to': reply_to if _integer(reply_to) else None}
         if attachments:
             payload['attachments'] = attachments
+        if media_refused:
+            payload['media_refused'] = media_refused
+        quoted = _quoted_message(msg, binding['accept_media'], lambda quoted_id, quoted_bot: db.execute(
+            'SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?',
+            (binding['client_id'], quoted_id, int(quoted_bot))).fetchone() is not None)
+        if quoted is not None:
+            payload['reply_to_message'] = quoted
+        forwarded = _forward_origin(msg)
+        if forwarded is not None:
+            payload['forwarded_from'] = forwarded
         stamp = msg.get('edit_date' if kind == 'edited_message' else 'date')
         event_at = stamp if _integer(stamp) and 0 < stamp <= now else now
         if (allowed and not sender['is_bot'] and sender_id == binding['owner_id'] and kind == 'message'
@@ -1668,7 +1750,9 @@ class Core:
             self._binding(db, client_id)
             row = db.execute('SELECT payload FROM inbox WHERE id=? AND client_id=?', (delivery_id, client_id)).fetchone()
         payload = json.loads(row['payload']) if row else {}
-        item = next((a for a in payload.get('attachments', []) if a.get('file_unique_id') == file_unique_id), None)
+        # A reply's quoted message carries its own attachments; they are fetched the same way.
+        candidates = [*payload.get('attachments', []), *_mapping(payload.get('reply_to_message')).get('attachments', [])]
+        item = next((a for a in candidates if a.get('file_unique_id') == file_unique_id), None)
         if item is None:
             raise CoreError('unknown_attachment')
         # Context capture keeps such messages readable; it never lets their files in.
