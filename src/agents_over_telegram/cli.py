@@ -206,6 +206,13 @@ def parser():
             command.add_argument("--media", dest="accept_media", choices=["on", "off"],
                                  help="on: accept documents, photos, video, audio, voice notes and animations, "
                                       "with their caption as text")
+            command.add_argument("--wake-interval", dest="wake_interval", type=int, metavar="SECONDS",
+                                 help="batch notices: after one, wait this long before the next, which then "
+                                      "covers everything that arrived meanwhile; 0 (default) announces at once")
+            command.add_argument("--wake-exempt", dest="wake_exempt",
+                                 choices=["addressed,owner", "addressed", "owner", "none"],
+                                 help="what is still announced at once while batching: addressed,owner "
+                                      "(default) messages that address the bot and messages from the owner")
         if name == "bot-exchange-policy":
             command.add_argument("--sender-id", type=int, required=True)
             change = command.add_mutually_exclusive_group()
@@ -454,7 +461,8 @@ def run(args):
         return core.delivery_settings(client_id, delivery_filter=args.delivery_filter,
                                       capture_context=None if args.capture_context is None else args.capture_context == "on",
                                       accept_media=None if args.accept_media is None else args.accept_media == "on",
-                                      reaction_wake=args.reaction_wake)
+                                      reaction_wake=args.reaction_wake, wake_interval=args.wake_interval,
+                                      wake_exempt=args.wake_exempt)
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command == "conversation-budget":

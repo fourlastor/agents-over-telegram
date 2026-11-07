@@ -196,6 +196,20 @@ In a busy shared group, the owner can deliver only messages addressed to this ag
 
 Context is untrusted and is never delivered, leased, announced by a push notice or counted against the pending inbox limit. It appears in `messages_history` with `status: "context"` and a `context_reason` of `not_addressed` or `sender_not_allowed`, and it is deleted after the 24-hour history window. An agent may reply to a context message with `reply_to`. The reply uses that message's normal conversation, so the conversation and bot-exchange budgets still apply. Running the command without `--filter`, `--context` or `--media` prints the current settings, and `aot status` shows them under `routing`.
 
+### Batched wake-ups
+
+By default, every new delivery is announced at once: an idle agent wakes up for each message as messages trickle in. The owner can batch these notices per connection:
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --wake-interval 600
+```
+
+- After a notice, the next one waits `--wake-interval` seconds (here 10 minutes), then covers everything that arrived meanwhile in one notice ("3 new Telegram messages"). `0`, the default, announces each delivery at once.
+- This holds all push notices for the connection: the Claude Code wake waiter and monitor, the busy-turn hooks of Claude Code and Codex, and the Pi and Amp watchers. Deliveries still queue at once, and `messages_poll` returns them at any time.
+- `--wake-exempt` names what is still announced at once. The default `addressed,owner` covers messages that mention the bot, reply to it or address a command to it, and messages from the owner who paired the connection; `addressed` or `owner` keeps one of them, and `none` batches everything. An exempt delivery takes the held ones into the same notice. Messages a peer agent sends to this agent count as addressed. Reactions are never exempt; they are announced with the next notice.
+- Each delivery records whether it addressed the bot in an `addressed` field.
+- The Codex `relay-desktop` listener has its own wake rules and does not use this setting yet.
+
 ## Launch one scoped MCP client
 
 ```sh
