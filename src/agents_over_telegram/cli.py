@@ -495,12 +495,27 @@ def run(args):
                 print(with_shell_fallback(event["notice"]) if args.host == "claude" else event["notice"], flush=True)
             else:
                 print("[Agents over Telegram] Watching stopped: " + event.get("reason", "unknown") + ".", flush=True)
+        from .hosts import RUNTIME_MOVED_EXIT, runtime_moved
         parent = os.getppid()
-        # A host can die without stopping its watcher (for example on SIGKILL).
-        # Re-parenting means the host is gone, so stop instead of polling forever.
+        project = Path.cwd().resolve()
+        moved = []
+
+        def keep_running():
+            # A host can die without stopping its watcher (for example on SIGKILL).
+            # Re-parenting means the host is gone, so stop instead of polling forever.
+            if os.getppid() != parent:
+                return False
+            # A launcher that follows the runtime restarts this watcher on a new one.
+            if runtime_moved(project):
+                moved.append(True)
+                return False
+            return True
+
         watch(core, client_id, emit, collect=args.collect, duration=args.duration, interval=args.interval,
               poll_timeout=args.poll_timeout, announce_backlog=not args.no_backlog,
-              keep_running=lambda: os.getppid() == parent)
+              keep_running=keep_running)
+        if moved:
+            raise SystemExit(RUNTIME_MOVED_EXIT)
         return None
     if args.command == "mcp":
         from .mcp_server import serve
@@ -534,9 +549,12 @@ def main():
             return 0
         raise
     if args.command == "wake":
-        # Only a real wake may exit 2; anything else must stay silent.
+        # Only a real wake may exit 2, and only a moved runtime 3 (for the
+        # launcher to restart it); anything else must stay silent.
+        from .hosts import RUNTIME_MOVED_EXIT
         try:
-            return 2 if run(args) == 2 else 0
+            value = run(args)
+            return value if value in (2, RUNTIME_MOVED_EXIT) else 0
         except BaseException:
             return 0
     if args.command == "hook":

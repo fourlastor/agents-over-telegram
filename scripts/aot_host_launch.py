@@ -47,6 +47,45 @@ NOTICE = b"[Agents over Telegram] "
 MAX_NOTICE = 4096
 
 
+# A runtime started with AOT_FOLLOW_RUNTIME=1 exits with this status when the
+# project's .aot-runtime.json names another runtime; the launcher then starts
+# the same command on that one. An older runtime ignores the variable.
+RUNTIME_MOVED = 3
+# Bound the restarts of one launcher run, in case paths never compare equal.
+MAX_RUNTIME_SWITCHES = 5
+
+
+def _follow_env():
+    env = dict(os.environ)
+    env["AOT_FOLLOW_RUNTIME"] = "1"
+    return env
+
+
+def _next_runtime(args, project):
+    """The same command on the runtime the pointer names now, or None."""
+    executable, _problem = _executable(project)
+    if executable is None or executable == args[0]:
+        return None
+    return [executable] + args[1:]
+
+
+def _follow(args, project):
+    """Run a long-lived command and move it to each new runtime the pointer names."""
+    import subprocess
+    for _ in range(MAX_RUNTIME_SWITCHES + 1):
+        try:
+            code = subprocess.call(args, env=_follow_env())
+        except OSError:
+            sys.stderr.write("The prepared Agents over Telegram runtime could not be started.\n")
+            return 2
+        if code != RUNTIME_MOVED:
+            return code
+        args = _next_runtime(args, project)
+        if args is None:
+            return 0
+    return 0
+
+
 def _wake(args, project, hook_input):
     """Run the waiter and pass on exit status 2 only with a real notice.
 
@@ -60,11 +99,19 @@ def _wake(args, project, hook_input):
     session = _session(hook_input)
     if session:
         args += ["--session", session]
-    try:
-        result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE)
-    except OSError:
-        return 0
+    for _ in range(MAX_RUNTIME_SWITCHES + 1):
+        try:
+            result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, env=_follow_env())
+        except OSError:
+            return 0
+        if result.returncode != RUNTIME_MOVED:
+            break
+        # The project moved to a new runtime: keep waiting on that one, so an
+        # idle session is never left without a waiter running current code.
+        args = _next_runtime(args, project)
+        if args is None:
+            return 0
     notice = result.stderr[:MAX_NOTICE]
     if result.returncode != 2 or not notice.startswith(NOTICE):
         return 0
@@ -564,6 +611,9 @@ def main(argv):
         return 0
     if command == "wake":
         return _wake(args, project, hook_input)
+    if command == "watch" and idle:
+        # The Claude Code monitor runs for the whole session; follow updates.
+        return _follow(args, project)
     try:
         os.execv(executable, args)
     except OSError:

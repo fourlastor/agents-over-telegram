@@ -23,6 +23,24 @@ def runtime_pointer(executable: Path) -> str:
     return json.dumps({'version': 1, 'executable': str(executable)}, indent=2) + '\n'
 
 
+# A long-running waiter that the plugin launcher started with
+# AOT_FOLLOW_RUNTIME=1 exits with this status once the project's runtime
+# pointer names another runtime, and the launcher starts it again on that
+# one. Without the variable (an older launcher) it keeps running as before.
+RUNTIME_MOVED_EXIT = 3
+
+
+def runtime_moved(project: Path) -> bool:
+    """True when following is on and .aot-runtime.json names a runtime other than this one."""
+    if os.environ.get('AOT_FOLLOW_RUNTIME') != '1':
+        return False
+    pointer = read_runtime_pointer(project)
+    if pointer is None:
+        return False
+    own = Path(sys.executable).absolute().parent / 'aot'
+    return os.path.realpath(pointer) != os.path.realpath(own)
+
+
 def read_runtime_pointer(project: Path) -> Path | None:
     """Return the recorded executable, or None if the pointer is absent or unsafe."""
     from .onboarding import _read_local
@@ -186,7 +204,8 @@ def _wake(args) -> int:
     from .onboarding import read_profile
     from .push import watch
 
-    profile = read_profile(_hook_project(args, {}).resolve())
+    project = _hook_project(args, {}).resolve()
+    profile = read_profile(project)
     if profile is None:
         return 0
     state = Path(profile['state_dir'])
@@ -209,11 +228,19 @@ def _wake(args) -> int:
     parent = os.getppid()
     host = getattr(args, 'host_pid', None)
 
+    moved = []
+
     def keep_running():
         # Re-parenting or a missing host process means the host is gone,
         # so stop instead of polling forever. A newer owner replaces this waiter.
-        return (os.getppid() == parent and (not host or _alive(host))
-                and _read_owner(owner) == token)
+        if not (os.getppid() == parent and (not host or _alive(host)) and _read_owner(owner) == token):
+            return False
+        # An updated project runtime takes over: the launcher restarts this
+        # waiter on it, so collection never runs older code than the pointer.
+        if runtime_moved(project):
+            moved.append(True)
+            return False
+        return True
 
     # The running waiter notices the new owner only at the end of its cycle,
     # which can take longer than a Telegram long poll. Wait without a fixed
@@ -242,4 +269,4 @@ def _wake(args) -> int:
         sys.stderr.write(with_shell_fallback(notices[0]) + '\n')
         sys.stderr.flush()
         return WAKE_EXIT
-    return 0
+    return RUNTIME_MOVED_EXIT if moved else 0
