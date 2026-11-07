@@ -337,6 +337,8 @@ Before it clears anything, `unsuspend` calls Telegram `getChatMember` for the bo
 
 Telegram gives a group a new chat id when it becomes a supergroup. Telegram does this by itself when the owner changes some group settings. Telegram announces the change twice: in the old group (`migrate_to_chat_id`) and in the new supergroup (`migrate_from_chat_id`). When the collector sees either notice, AOT moves every connection of the old group to the new chat id. The client, its allowed senders, its held inbox messages and its queued outgoing messages stay the same. No owner action is needed.
 
+AOT can also learn about the upgrade from a send. If it sends to the old group after the upgrade, Telegram refuses the send and names the new chat id (`migrate_to_chat_id`). Nothing was published, so AOT moves the connections as above and queues the message again, with the error `group_migrated`, for the next flush in the new chat. A reaction refused this way is rejected with `group_migrated` instead, because the message it targets stays in the old group, which Telegram has closed.
+
 AOT suspends a connection with `group_migrated:<new chat id>` instead of moving it in two cases:
 
 - Another connection already uses the new chat id. `unsuspend` then fails with `destination_already_bound` until that connection is disconnected.

@@ -440,6 +440,75 @@ def test_group_migration_onto_a_bound_chat_suspends_instead(env):
     assert core.connection_status(taken)['suspended'] is None
 
 
+def migrated(new_chat_id):
+    # What Telegram answers when the bot writes to a group that became a supergroup.
+    return TransportError(400, migrate_to_chat_id=new_chat_id)
+
+
+def test_send_refused_by_a_migration_moves_the_binding_and_retries_in_the_new_chat(env):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    transport.outcomes = [migrated(-1009)]
+    held = core.send(a, 'hello', 'key')
+    assert (held['status'], held['error']) == ('queued', 'group_migrated')
+    assert rows(core, 'SELECT chat_id FROM bindings WHERE client_id=?', (a,))[0][0] == -1009
+    assert core.connection_status(a)['suspended'] is None
+    clock.advance()
+    core.flush()
+    assert core.delivery_status(a, held['outbox_id'])['status'] == 'sent'
+    assert [m['chat']['id'] for m in transport.sent] == [-1009]
+
+
+def test_send_refused_by_a_migration_follows_a_binding_already_moved(env):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    with sqlite3.connect(core.database) as db:
+        # A send that was in flight while the collector moved the binding.
+        db.execute("INSERT INTO outbox(id,client_id,chat_id,thread_id,idempotency_key,request_hash,text,"
+                   "conversation_id,status,created,updated,due) VALUES('out_q',?,-100,0,'k','h','late text',"
+                   "'conv','queued',0,0,0)", (a,))
+        db.execute('UPDATE bindings SET chat_id=-1009 WHERE client_id=?', (a,))
+    transport.outcomes = [migrated(-1009)]
+    core.flush()
+    assert rows(core, "SELECT status,error,chat_id FROM outbox WHERE id='out_q'") == [('queued', 'group_migrated', -1009)]
+    clock.advance()
+    core.flush()
+    assert [m['chat']['id'] for m in transport.sent] == [-1009]
+
+
+def test_send_refused_by_a_migration_onto_a_bound_chat_suspends_and_holds_it(env):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    bind(core, transport, 'Taken', -1009)
+    transport.outcomes = [migrated(-1009)]
+    held = core.send(a, 'hello', 'key')
+    assert core.connection_status(a)['suspended'] == 'group_migrated:-1009'
+    assert rows(core, 'SELECT status,chat_id FROM outbox WHERE id=?', (held['outbox_id'],)) == [('queued', -100)]
+    clock.advance()
+    core.flush()
+    assert transport.sent == []
+
+
+def test_other_refusals_with_a_bad_migration_target_are_still_rejected(env):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    transport.outcomes = [migrated(-100)]
+    assert core.send(a, 'hello', 'key')['status'] == 'rejected'
+    assert rows(core, 'SELECT chat_id FROM bindings WHERE client_id=?', (a,))[0][0] == -100
+
+
+def test_reaction_refused_by_a_migration_is_rejected_but_moves_the_binding(env):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    target = append(transport, 'react to me')['message']['message_id']
+    core.collect()
+    transport.outcomes = [migrated(-1009)]
+    reaction = core.react(a, target, '👍', 'r1')
+    assert (reaction['status'], reaction['error']) == ('rejected', 'group_migrated')
+    assert rows(core, 'SELECT chat_id FROM bindings WHERE client_id=?', (a,))[0][0] == -1009
+    assert transport.reactions == []
+
+
 def test_bot_removal_suspends_only_affected_group(env):
     core, transport, clock = env
     a, _ = bind(core, transport)

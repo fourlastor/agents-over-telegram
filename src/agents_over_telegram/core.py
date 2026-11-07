@@ -955,6 +955,20 @@ class Core:
                 continue
             self._move_binding(db, binding, new_chat_id)
 
+    def _follow_send_migration(self, db, row, new_chat_id):
+        """A send was refused because its group became a supergroup.
+
+        This is the third migration signal, after the two service messages. It
+        moves the bindings like they do. The refused message is queued again;
+        it moves with the binding, or follows a binding that an earlier notice
+        already moved. If the binding stays on the old chat, suspended, the
+        message waits there like every other queued send.
+        """
+        self._follow_migration(db, row['chat_id'], new_chat_id)
+        db.execute("UPDATE outbox SET chat_id=? WHERE id=? AND status='queued' AND EXISTS("
+                   "SELECT 1 FROM bindings WHERE client_id=? AND chat_id=? AND connected=1)",
+                   (new_chat_id, row['id'], row['client_id'], new_chat_id))
+
     def _move_binding(self, db, binding, new_chat_id):
         client_id, old_chat_id = binding['client_id'], binding['chat_id']
         # A suspension for this same migration no longer applies. Any other
@@ -1992,6 +2006,7 @@ class Core:
                 attempted += 1
                 media = None
                 local_reject = None
+                migrated_to = None
                 if row['image']:
                     try:
                         data = (self.state_dir / 'outbox-images' / row['image']).read_bytes()
@@ -2022,6 +2037,11 @@ class Core:
                             wait = exc.retry_after if isinstance(exc.retry_after, (int, float)) and not isinstance(exc.retry_after, bool) and math.isfinite(exc.retry_after) and exc.retry_after > 0 else 60
                             due = self.clock() + min(wait, 86400)
                             status, error, message_id = 'queued', 'rate_limited', None
+                        elif _integer(exc.migrate_to_chat_id) and exc.migrate_to_chat_id != row['chat_id']:
+                            # A definite rejection: the group became a supergroup.
+                            # Nothing was sent, so the message waits for the new chat.
+                            status, error, message_id, due = 'queued', 'group_migrated', None, self.clock()
+                            migrated_to = exc.migrate_to_chat_id
                         elif isinstance(exc.code, int) and 400 <= exc.code < 500:
                             status, error, message_id, due = 'rejected', 'telegram_rejected', None, self.clock()
                         else:
@@ -2034,6 +2054,8 @@ class Core:
                         status, error, message_id, due = 'sent', None, response['message_id'], self.clock()
                 with self._tx() as db:
                     db.execute('UPDATE outbox SET status=?,error=?,message_id=?,due=?,updated=? WHERE id=?', (status, error, message_id, due, self.clock(), row['id']))
+                    if error == 'group_migrated':
+                        self._follow_send_migration(db, row, migrated_to)
                     if error == 'rate_limited':
                         db.execute('INSERT INTO rate_limits(scope,next_at) VALUES(\'bot\',?) ON CONFLICT(scope) DO UPDATE SET next_at=max(next_at,excluded.next_at)', (due,))
                 if status in ('sent', 'rejected') and row['image']:
@@ -2071,6 +2093,7 @@ class Core:
                 db.execute('INSERT INTO rate_limits(scope,next_at) VALUES(\'react\',?) ON CONFLICT(scope) DO UPDATE SET next_at=excluded.next_at', (now + self.REACTION_INTERVAL,))
                 db.execute('UPDATE reaction_outbox SET status=\'sending\',updated=? WHERE id=?', (now, row['id']))
             attempted += 1
+            migrated_to = None
             try:
                 self.transport.set_message_reaction(row['chat_id'], row['message_id'], row['emoji'])
                 status, error, due = 'sent', None, self.clock()
@@ -2081,6 +2104,11 @@ class Core:
                     wait = exc.retry_after if isinstance(exc.retry_after, (int, float)) and not isinstance(exc.retry_after, bool) and math.isfinite(exc.retry_after) and exc.retry_after > 0 else 60
                     due = self.clock() + min(wait, 86400)
                     status, error = 'queued', 'rate_limited'
+                elif _integer(exc.migrate_to_chat_id) and exc.migrate_to_chat_id != row['chat_id']:
+                    # The group became a supergroup. Its old messages stay in the
+                    # deactivated group, so this reaction cannot follow them.
+                    status, error, due = 'rejected', 'group_migrated', self.clock()
+                    migrated_to = exc.migrate_to_chat_id
                 elif isinstance(exc.code, int) and 400 <= exc.code < 500:
                     status, error, due = 'rejected', 'telegram_rejected', self.clock()
                 else:
@@ -2089,6 +2117,8 @@ class Core:
                 status, error, due = 'unknown', 'transport_failure', self.clock()
             with self._tx() as db:
                 db.execute('UPDATE reaction_outbox SET status=?,error=?,due=?,updated=? WHERE id=?', (status, error, due, self.clock(), row['id']))
+                if migrated_to is not None:
+                    self._follow_migration(db, row['chat_id'], migrated_to)
                 if error == 'rate_limited':
                     db.execute('INSERT INTO rate_limits(scope,next_at) VALUES(\'react\',?) ON CONFLICT(scope) DO UPDATE SET next_at=max(next_at,excluded.next_at)', (due,))
         return attempted
