@@ -143,18 +143,47 @@ def test_network_failure_leaves_flag_and_reports_check_failure(env, monkeypatch)
     assert suspended_column(core, a) == 'bot_removed_or_restricted'
 
 
-def test_refuses_migration_without_asking_telegram(env, monkeypatch):
+def suspend_by_migration(core, client_id, new_chat):
+    # As an older runtime, or a migration onto a taken chat, left it.
+    with sqlite3.connect(core.database) as db:
+        db.execute("UPDATE bindings SET suspended=?,suspension_seq=suspension_seq+1 WHERE client_id=?",
+                   (f'group_migrated:{new_chat}', client_id))
+
+
+def bound_chat(core, client_id):
+    with sqlite3.connect(core.database) as db:
+        return db.execute('SELECT chat_id FROM bindings WHERE client_id=? AND connected=1', (client_id,)).fetchone()[0]
+
+
+def test_unsuspend_moves_a_migrated_binding_after_checking_the_new_chat(env):
     core, transport = env
     a = bind(core, transport)
-    append(transport, 'service', migrate_to_chat_id=-999)
-    core.collect()
-    set_member(transport, 'member')
-    monkeypatch.setattr(transport, 'get_chat_member', lambda *args: pytest.fail('migration must not be checked'))
-    with pytest.raises(CoreError, match='group_migrated_pair_again'):
+    suspend_by_migration(core, a, -999)
+    assert 'aot unsuspend' in core.connection_status(a)['next_action']['message']
+    set_member(transport, 'member')  # Only the old chat: the bot is not in the new one yet.
+    with pytest.raises(CoreError, match='bot_not_in_chat'):
         core.clear_suspension(a)
     assert suspended_column(core, a) == 'group_migrated:-999'
-    status = core.connection_status(a)
-    assert 'pair again' in status['next_action']['message']
+    set_member(transport, 'administrator', chat=-999)
+    result = core.clear_suspension(a)
+    assert result['previous_suspension'] == 'group_migrated:-999'
+    assert result['suspended'] is None
+    assert bound_chat(core, a) == -999
+    append(transport, 'in the new chat', chat=-999)
+    core.collect()
+    assert [m['text'] for m in core.poll(a)['deliveries']] == ['in the new chat']
+
+
+def test_unsuspend_refuses_a_migration_onto_a_bound_chat(env):
+    core, transport = env
+    a = bind(core, transport)
+    bind(core, transport, 'Taken', chat=-999)
+    suspend_by_migration(core, a, -999)
+    set_member(transport, 'member', chat=-999)
+    with pytest.raises(CoreError, match='destination_already_bound'):
+        core.clear_suspension(a)
+    assert bound_chat(core, a) == -100
+    assert suspended_column(core, a) == 'group_migrated:-999'
 
 
 def test_topic_change_needs_owner_confirmation_and_bot_membership(env):
@@ -241,15 +270,23 @@ def test_topic_close_after_removal_needs_topic_confirmation(env):
 def test_migration_is_never_replaced_by_a_weaker_reason(env, later):
     core, transport = env
     a = bind(core, transport, topic=7)
-    append(transport, 'service', migrate_to_chat_id=-999)
+    suspend_by_migration(core, a, -999)
     if later == 'removal':
         membership(transport, 'kicked')
     else:
         append(transport, 'service', topic=7, forum_topic_closed={})
     core.collect()
     assert suspended_column(core, a) == 'group_migrated:-999'
-    with pytest.raises(CoreError, match='group_migrated_pair_again'):
-        core.clear_suspension(a, topic_open_confirmed=True)
+
+
+def test_events_in_the_old_chat_do_not_touch_a_moved_binding(env):
+    core, transport = env
+    a = bind(core, transport)
+    append(transport, 'service', migrate_to_chat_id=-999)
+    membership(transport, 'kicked')
+    core.collect()
+    assert bound_chat(core, a) == -999
+    assert suspended_column(core, a) is None
 
 
 def test_outgoing_queued_before_suspension_is_sent_after_clear(tmp_path):
