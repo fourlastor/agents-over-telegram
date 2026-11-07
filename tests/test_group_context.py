@@ -32,7 +32,8 @@ def history(core, client):
 def test_defaults_deliver_everything_from_allowed_senders_with_media(group):
     core, transport, clock, client = group
     assert core.connection_status(client)['routing'] == {
-        'delivery_filter': 'all', 'capture_context': False, 'accept_media': True}
+        'delivery_filter': 'all', 'capture_context': False, 'accept_media': True,
+        'wake_interval': 0, 'wake_exempt': 'addressed,owner'}
     append(transport, 'plain owner message')
     append(transport, 'stranger message', sender=303)
     core.collect()
@@ -242,7 +243,8 @@ def test_existing_state_migrates_with_original_defaults(group):
         db.execute('ALTER TABLE inbox DROP COLUMN context')
     core = Core(core.state_dir, transport, clock=clock)
     assert core.connection_status(client)['routing'] == {
-        'delivery_filter': 'all', 'capture_context': False, 'accept_media': False}
+        'delivery_filter': 'all', 'capture_context': False, 'accept_media': False,
+        'wake_interval': 0, 'wake_exempt': 'addressed,owner'}
     assert [d['text'] for d in deliveries(core, client)] == ['before upgrade']
 
 

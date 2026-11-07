@@ -94,6 +94,40 @@ def notice_text(new: int, pending: int, senders: list[str]) -> str:
     return text + ' ' + NOTICE_GUIDANCE
 
 
+def _wakes_at_once(payload: dict, binding, exempt: set[str]) -> bool:
+    """True for a delivery that wake batching announces without waiting."""
+    if payload.get('origin') == 'broker':
+        # A peer agent sends to this agent on purpose.
+        return 'addressed' in exempt
+    if payload.get('kind') not in ('message', 'edited'):
+        # Reactions only ever ride along with the next notice.
+        return False
+    if 'addressed' in exempt and payload.get('addressed') is True:
+        return True
+    sender = _mapping(payload.get('sender'))
+    return ('owner' in exempt and sender.get('is_bot') is False
+            and sender.get('id') == binding['owner_id'])
+
+
+def _held(db, binding, rows, now) -> bool:
+    """Wake batching: hold these deliveries until the connection's interval has passed.
+
+    After a notice, the next one waits wake_interval seconds and then covers
+    everything that arrived meanwhile. A delivery that wakes at once takes the
+    held ones along. Deliveries are queued and pollable all the time; only the
+    notice waits.
+    """
+    interval = binding['wake_interval']
+    if not interval:
+        return False
+    last = db.execute('SELECT max(announced) FROM push_announcements WHERE client_id=?',
+                      (binding['client_id'],)).fetchone()[0]
+    if last is None or now - last >= interval:
+        return False
+    exempt = set() if binding['wake_exempt'] == 'none' else set(binding['wake_exempt'].split(','))
+    return not any(_wakes_at_once(json.loads(row['payload']), binding, exempt) for row in rows)
+
+
 def claim_new(core, client_id: str, surface: str, *, limit: int = 50) -> dict[str, Any] | None:
     """Atomically record and summarize deliveries not yet announced to this client.
 
@@ -113,6 +147,8 @@ def claim_new(core, client_id: str, surface: str, *, limit: int = 50) -> dict[st
             AND (i.lease_until IS NULL OR i.lease_until<=?)
             ORDER BY i.created,i.rowid LIMIT ?''', (client_id, now, limit)).fetchall()
         if not rows:
+            return None
+        if _held(db, binding, rows, now):
             return None
         senders: list[str] = []
         for row in rows:

@@ -275,6 +275,8 @@ class Core:
     REACTION_INTERVAL = 1.0
     REACTION_LIST_MAX = 16
     REACTION_WAKE_MODES = ('own_messages', 'all', 'none')
+    WAKE_EXEMPT_MODES = ('addressed,owner', 'addressed', 'owner', 'none')
+    WAKE_INTERVAL_MAX = 86400
 
     # The exact standard reaction emoji Telegram documents for bots
     # (core.telegram.org/bots/api#reactiontypeemoji). Telegram compares the bare
@@ -455,6 +457,12 @@ class Core:
             # for reactions on the agent's own published messages.
             if 'reaction_wake' not in binding_columns:
                 db.execute("ALTER TABLE bindings ADD COLUMN reaction_wake TEXT NOT NULL DEFAULT 'own_messages'")
+            # Wake batching: at most one notice per interval (0 = every delivery
+            # at once), except for the kinds of delivery named in wake_exempt.
+            if 'wake_interval' not in binding_columns:
+                db.execute('ALTER TABLE bindings ADD COLUMN wake_interval INTEGER NOT NULL DEFAULT 0')
+            if 'wake_exempt' not in binding_columns:
+                db.execute("ALTER TABLE bindings ADD COLUMN wake_exempt TEXT NOT NULL DEFAULT 'addressed,owner'")
             # When the last admin probe ran, so a failing probe is retried only after a pause.
             if 'bot_admin_probed' not in binding_columns:
                 db.execute('ALTER TABLE bindings ADD COLUMN bot_admin_probed REAL')
@@ -690,7 +698,7 @@ class Core:
     DELIVERY_FILTERS = ('all', 'addressed')
 
     def delivery_settings(self, client_id, delivery_filter=None, capture_context=None, accept_media=None,
-                          reaction_wake=None):
+                          reaction_wake=None, wake_interval=None, wake_exempt=None):
         """Local operator control; never exposed as an agent MCP mutation.
 
         ``delivery_filter`` 'all' (the default) delivers every message from an
@@ -708,13 +716,24 @@ class Core:
         media; connections made before that default keep their setting. With
         media off, a media message from an allowed sender is still delivered,
         with its caption and a ``media_refused`` list of kinds instead of the
-        attachments. The other settings default to the original behavior.
+        attachments. ``wake_interval`` batches notices: after one, the next waits
+        this many seconds and then covers everything that arrived meanwhile; 0
+        (the default) announces each delivery at once. Deliveries still queue
+        immediately and can always be polled. ``wake_exempt`` names what is
+        announced at once anyway: 'addressed,owner' (the default) for messages
+        that address the bot and messages from the owner, 'addressed', 'owner'
+        or 'none'. The other settings default to the original behavior.
         """
         if delivery_filter is not None and delivery_filter not in self.DELIVERY_FILTERS:
             raise CoreError('invalid_delivery_settings')
         if any(value is not None and type(value) is not bool for value in (capture_context, accept_media)):
             raise CoreError('invalid_delivery_settings')
         if reaction_wake is not None and reaction_wake not in self.REACTION_WAKE_MODES:
+            raise CoreError('invalid_delivery_settings')
+        if wake_interval is not None and (not _integer(wake_interval)
+                                          or not 0 <= wake_interval <= self.WAKE_INTERVAL_MAX):
+            raise CoreError('invalid_delivery_settings')
+        if wake_exempt is not None and wake_exempt not in self.WAKE_EXEMPT_MODES:
             raise CoreError('invalid_delivery_settings')
         with self._tx() as db:
             self._binding(db, client_id)
@@ -726,9 +745,14 @@ class Core:
                 db.execute('UPDATE bindings SET accept_media=? WHERE client_id=? AND connected=1', (int(accept_media), client_id))
             if reaction_wake is not None:
                 db.execute('UPDATE bindings SET reaction_wake=? WHERE client_id=? AND connected=1', (reaction_wake, client_id))
+            if wake_interval is not None:
+                db.execute('UPDATE bindings SET wake_interval=? WHERE client_id=? AND connected=1', (wake_interval, client_id))
+            if wake_exempt is not None:
+                db.execute('UPDATE bindings SET wake_exempt=? WHERE client_id=? AND connected=1', (wake_exempt, client_id))
             row = self._binding(db, client_id)
         return {'delivery_filter': row['delivery_filter'], 'capture_context': bool(row['capture_context']),
                 'accept_media': bool(row['accept_media']), 'reaction_wake': row['reaction_wake'],
+                'wake_interval': row['wake_interval'], 'wake_exempt': row['wake_exempt'],
                 'context_window_seconds': self.HISTORY_WINDOW}
 
     def _limits(self, db):
@@ -947,7 +971,9 @@ class Core:
                 'history': {'window_hours': self.HISTORY_WINDOW // 3600, 'kind': 'captured_only'},
                 'routing': {'delivery_filter': row['delivery_filter'],
                             'capture_context': bool(row['capture_context']),
-                            'accept_media': bool(row['accept_media'])} if row else None,
+                            'accept_media': bool(row['accept_media']),
+                            'wake_interval': row['wake_interval'],
+                            'wake_exempt': row['wake_exempt']} if row else None,
                 'reactions': self._reaction_capability(row) if row else None,
                 'state': state, 'next_action': {'code': action, 'message': message},
             }
@@ -1179,7 +1205,10 @@ class Core:
                 (binding['client_id'], sender_id)).fetchone():
             db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
                        (conversation, binding['client_id'], sender_id))
-        payload = {'origin': 'telegram', 'kind': 'edited' if kind == 'edited_message' else 'message', 'update_id': update_id, 'message_id': msg['message_id'], 'chat_id': chat_id, 'thread_id': thread_id or None, 'sender': {'id': sender_id, 'is_bot': sender['is_bot'], 'username': _bounded(sender.get('username', ''), 64)}, 'text': text, 'reply_to': reply_to if _integer(reply_to) else None}
+        payload = {'origin': 'telegram', 'kind': 'edited' if kind == 'edited_message' else 'message', 'update_id': update_id, 'message_id': msg['message_id'], 'chat_id': chat_id, 'thread_id': thread_id or None, 'sender': {'id': sender_id, 'is_bot': sender['is_bot'], 'username': _bounded(sender.get('username', ''), 64)}, 'text': text, 'reply_to': reply_to if _integer(reply_to) else None,
+                   # Mentions the bot, replies to it or addresses a command to it;
+                   # wake batching announces these at once.
+                   'addressed': _addressed(msg, text, account)}
         if attachments:
             payload['attachments'] = attachments
         if media_refused:
@@ -1206,7 +1235,7 @@ class Core:
                        (conversation, event_at))
         if not allowed:
             reason = 'sender_not_allowed'
-        elif binding['delivery_filter'] == 'addressed' and not edited_delivery and not _addressed(msg, text, account):
+        elif binding['delivery_filter'] == 'addressed' and not edited_delivery and not payload['addressed']:
             reason = 'not_addressed'
         else:
             self._enqueue(db, binding['client_id'], f'tg:{update_id}', payload, conversation, now, event_at=event_at)

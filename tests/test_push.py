@@ -289,6 +289,95 @@ def test_notice_names_this_runtimes_shell_fallback():
     assert f'"{executable}" tool messages_poll' in text and 'JSON arguments on stdin' in text
 
 
+# ---------------------------------------------------------------- wake batching
+
+def batching(env, exempt=None):
+    core, transport, clock = env
+    client = bind(core, transport)  # the owner is sender 101
+    core.allow_sender(client, 202)
+    core.delivery_settings(client, wake_interval=600, wake_exempt=exempt)
+    return core, transport, clock, client
+
+
+def test_wake_interval_holds_notices_and_then_covers_everything(env):
+    core, transport, clock, client = batching(env)
+    deliver(core, transport, 'first', sender=202)
+    # Nothing was announced yet, so the first delivery wakes at once.
+    assert push.claim_new(core, client, 'watch')['new'] == 1
+    deliver(core, transport, 'second', sender=202)
+    deliver(core, transport, 'third', sender=202)
+    assert push.claim_new(core, client, 'watch') is None
+    assert push.claim_new(core, client, 'hook') is None
+    # Held deliveries are queued and can be polled at any time.
+    assert len(core.poll(client)['deliveries']) == 3
+    # The poll's lease has ended and nothing was acknowledged, so after the
+    # interval the two held deliveries are announced in one notice.
+    clock.advance(600)
+    assert push.claim_new(core, client, 'watch')['new'] == 2
+
+
+def test_held_deliveries_are_announced_together_after_the_interval(env):
+    core, transport, clock, client = batching(env)
+    deliver(core, transport, 'first', sender=202)
+    push.claim_new(core, client, 'watch')
+    for text in ('second', 'third'):
+        clock.advance(100)
+        deliver(core, transport, text, sender=202)
+        assert push.claim_new(core, client, 'watch') is None
+    clock.advance(400)
+    batch = push.claim_new(core, client, 'watch')
+    assert batch['new'] == 2 and '2 new Telegram messages' in batch['notice']
+
+
+def test_addressed_and_owner_messages_wake_at_once_and_take_the_batch_along(env):
+    core, transport, clock, client = batching(env)
+    deliver(core, transport, 'first', sender=202)
+    push.claim_new(core, client, 'watch')
+    deliver(core, transport, 'chatter', sender=202)
+    assert push.claim_new(core, client, 'watch') is None
+    deliver(core, transport, f'question for @{transport.username}', sender=202)
+    assert push.claim_new(core, client, 'watch')['new'] == 2
+    deliver(core, transport, 'more chatter', sender=202)
+    assert push.claim_new(core, client, 'watch') is None
+    deliver(core, transport, 'from the owner')
+    assert push.claim_new(core, client, 'watch')['new'] == 2
+
+
+def test_wake_exempt_none_batches_everything(env):
+    core, transport, clock, client = batching(env, exempt='none')
+    deliver(core, transport, 'first')
+    push.claim_new(core, client, 'watch')
+    deliver(core, transport, 'owner again')
+    deliver(core, transport, f'hey @{transport.username}', sender=202)
+    assert push.claim_new(core, client, 'watch') is None
+    clock.advance(600)
+    assert push.claim_new(core, client, 'watch')['new'] == 2
+
+
+def test_wake_settings_are_validated_and_reported(env):
+    core, transport, clock = env
+    client = bind(core, transport)
+    for bad in ({'wake_interval': -1}, {'wake_interval': 86401}, {'wake_interval': True},
+                {'wake_interval': 1.5}, {'wake_exempt': 'everyone'}):
+        with pytest.raises(CoreError, match='invalid_delivery_settings'):
+            core.delivery_settings(client, **bad)
+    settings = core.delivery_settings(client, wake_interval=900, wake_exempt='owner')
+    assert (settings['wake_interval'], settings['wake_exempt']) == (900, 'owner')
+    routing = core.connection_status(client)['routing']
+    assert (routing['wake_interval'], routing['wake_exempt']) == (900, 'owner')
+
+
+@pytest.mark.parametrize('payload,exempt,expected', [
+    ({'origin': 'telegram', 'kind': 'reaction', 'sender': {'id': 101, 'is_bot': False}}, {'addressed', 'owner'}, False),
+    ({'origin': 'broker', 'kind': 'message'}, {'addressed'}, True),
+    ({'origin': 'broker', 'kind': 'message'}, {'owner'}, False),
+    ({'origin': 'telegram', 'kind': 'edited', 'addressed': True, 'sender': {'id': 5, 'is_bot': True}}, {'addressed'}, True),
+    ({'origin': 'telegram', 'kind': 'message', 'sender': {'id': 101, 'is_bot': True}}, {'owner'}, False),
+])
+def test_which_deliveries_wake_at_once(payload, exempt, expected):
+    assert push._wakes_at_once(payload, {'owner_id': 101}, exempt) is expected
+
+
 # ------------------------------------------------------------ pending_summary
 
 def test_pending_summary_counts_without_announcing(env):
