@@ -321,7 +321,9 @@ AOT enforces the volume, not the agent. Each agent can send at most 3 notices in
 
 The owner must also do one thing once: open a private chat with the bot and send `/start`. Telegram does not let a bot start a private chat by itself. A paused or suspended connection refuses `owner_notify`, as for `message_send`.
 
-Several agents can share one bot, so AOT cannot give a reply in the private chat to one agent. Each notice therefore ends with "Reply in the group, not here." AOT keeps every private chat message, including `/start`, as unassigned metadata with the reason `private_chat`. It stores no text, and it delivers the message to no agent. `aot unassigned` shows these entries; they are expected, not a fault.
+Several agents can share one bot, so AOT cannot give a text reply in the private chat to one agent. Each notice therefore ends with "Reply in the group, not here." The owner can still react to a notice, or to its forward, to acknowledge it. A reaction targets one message, and AOT knows which agent sent it. The reaction reaches that agent as a normal reaction delivery on its own message, with the private chat as `chat_id`. It wakes the agent under the same `reaction_wake` rules as other reactions on its own messages. Only the owner's own reactions are routed this way.
+
+AOT keeps every other private chat update as unassigned metadata with the reason `private_chat`. This includes `/start`, text replies, reactions on other messages, reactions from other people, and the owner blocking or unblocking the bot. AOT stores no text and no private chat id, and it delivers these updates to no agent. `aot unassigned` shows these entries; they are expected, not a fault.
 
 `owner_notify` uses the same idempotency rules as `message_send`. The same key with the same request returns the same outcome. The same key with a different request is refused. `delivery_status` shows the outcome. An `unknown` outcome follows [uncertain-send recovery](#uncertain-sends) with the `owner_…` id. A `retry` repeats only the step that has no recorded message: the notice text or the forward.
 
