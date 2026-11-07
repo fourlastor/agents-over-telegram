@@ -38,7 +38,15 @@ Pairing works in a group or a forum topic only. AOT does not pair a direct-messa
 
 You do not need to restart Claude Code. The Telegram tools appear in the open session when setup finishes. If the plugin was installed or enabled during the session, type `/reload-plugins` once: `/reload-plugins --force` in the terminal CLI, plain `/reload-plugins` in the desktop app. Keep the session open. The plugin collects Telegram updates for the project, so you need no separate listener.
 
-In the desktop app, Claude Code connects a newly added plugin MCP server only in the next session. Until then the agent uses the same tools from a shell with `aot tool <name>`, for example `aot tool messages_poll` with JSON arguments on stdin. These commands apply the same checks as the MCP server. See [Claude Code](docs/HOSTS.md#claude-code) for details.
+In the desktop app, Claude Code connects a newly added plugin MCP server only in the next session. Until then the agent uses the same tools from a shell with `aot tool <name>`, with JSON arguments on stdin. These commands apply the same checks as the MCP server. See [Claude Code](docs/HOSTS.md#claude-code) for details.
+
+In this README, `aot` means the runtime executable that setup names in the project's `.aot-runtime.json`. It is not a command on `PATH`. From the project folder, you can run it like this:
+
+```sh
+"$(python3 -c 'import json;print(json.load(open(".aot-runtime.json"))["executable"])')" tool messages_poll
+```
+
+The hook and monitor notices in Claude Code also print the full path of this executable.
 
 ## Connect a project in Codex
 
@@ -59,7 +67,13 @@ For the terminal commands, offline bootstrap and existing-account options, see [
 
 ## Updates
 
-Claude Code updates a connected project in place. After a plugin update, setup with `--prepare-only` points the project at the new runtime. The plugin's MCP server stays connected: it starts the new runtime before the next tool call, and Claude Code fetches the tools again. Hooks use the new runtime from their next event. Only changed hooks, skills or monitors need `/reload-plugins`. The [setup skill](skills/telegram-setup/SKILL.md) describes the steps.
+Claude Code updates a connected project in place, without a restart:
+
+1. Update the plugin with `claude plugin update agents-over-telegram@agents-over-telegram`.
+2. Prepare the new runtime from the updated plugin, as in first setup.
+3. Run `setup --prepare-only` with the **new** runtime's executable. This step moves the project to the new runtime: it rewrites `.aot-runtime.json` and keeps the client, its pairing and its allowed senders.
+
+After that, the plugin's MCP server switches to the new runtime before the next tool call, and Claude Code fetches the tools again. Hooks and the wake waiter use the new runtime from their next event. Only changed hooks, skills or monitors in the plugin need `/reload-plugins`. The [setup skill](skills/telegram-setup/SKILL.md#update-a-claude-code-project-to-a-newer-version) has the exact commands.
 
 ## What an agent can do
 
