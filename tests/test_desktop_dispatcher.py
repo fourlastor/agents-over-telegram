@@ -25,7 +25,8 @@ def native(env, monkeypatch):
     state = {'calls': [], 'running': True, 'validate_error': None,
              'enqueue_error': None, 'wake_error': None, 'callback': None,
              # Unreadable by default, so tests that predate the check see no change.
-             'notice_outcome': desktop.DesktopQueueError('desktop_records_unreadable')}
+             'notice_outcome': desktop.DesktopQueueError('desktop_records_unreadable'),
+             'busy': False}
 
     class Queue:
         def __init__(self, *args, **kwargs):
@@ -59,6 +60,10 @@ def native(env, monkeypatch):
             if state['enqueue_error']:
                 raise state['enqueue_error']
             return QUEUE_ID
+
+        def thread_busy(self, thread_id, now):
+            state['calls'].append(('busy', thread_id))
+            return state['busy']
 
         def notice_outcome(self, thread_id, since):
             state['calls'].append(('notice_outcome', (thread_id, since)))
@@ -605,3 +610,49 @@ def test_notice_outcome_reads_the_desktop_records(tmp_path, case, expected):
 def test_notice_outcome_never_reads_missing_records_as_absent(tmp_path):
     with pytest.raises(desktop.DesktopQueueError, match='desktop_records_unreadable'):
         records_reader(tmp_path).notice_outcome(ALPHA_THREAD, 1_000_000.0)
+
+
+def test_busy_chat_is_not_queued_and_is_retried_once_idle(env, native):
+    _, store, alpha = ready(env)
+    native['busy'] = True
+    _, events = run(env)
+    assert calls(native, 'enqueue') == []
+    deferred = [e for e in events if e['type'] == 'desktop_wake_deferred_busy']
+    assert len(deferred) == 1 and deferred[0]['client_id'] == alpha
+    assert wake_statuses(env) == ['retry']
+    native['busy'] = False
+    env[2].advance(60)
+    run(env)
+    assert len(calls(native, 'enqueue')) == 1
+    # The deferred notification ends as failed; its retry is the one accepted.
+    assert wake_statuses(env) == ['failed', 'accepted']
+
+
+def thread_history(home, turns):
+    with sqlite3.connect(home / 'thread_history_1.sqlite') as db:
+        db.execute('CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT, rollout_ordinal INTEGER,'
+                   ' status TEXT, started_at INTEGER)')
+        db.execute('CREATE TABLE thread_items (thread_id TEXT, turn_id TEXT, item_id TEXT, created_at_ms INTEGER)')
+        for ordinal, (status, started, last_item_ms) in enumerate(turns):
+            db.execute('INSERT INTO thread_turns VALUES(?,?,?,?,?)', (ALPHA_THREAD, f't{ordinal}', ordinal, status, started))
+            if last_item_ms is not None:
+                db.execute('INSERT INTO thread_items VALUES(?,?,?,?)', (ALPHA_THREAD, f't{ordinal}', 'i', last_item_ms))
+
+
+@pytest.mark.parametrize('turns,busy', [
+    ([], False),
+    ([('completed', 1000, 1_000_000)], False),
+    ([('inProgress', 1000, None)], True),
+    ([('inProgress', 1000, 1_500_000)], True),
+    ([('inProgress', 1000 - 3600, None)], False),
+    ([('inProgress', 1000 - 3600, 1_000_000)], True),
+    ([('inProgress', 1000, 1_000_000), ('completed', 1000, 1_000_000)], False),
+])
+def test_thread_busy_reads_the_latest_turn(tmp_path, turns, busy):
+    thread_history(tmp_path, turns)
+    now = 1000 + desktop.BUSY_TURN_ACTIVITY_SECONDS / 2
+    assert records_reader(tmp_path).thread_busy(ALPHA_THREAD, now) is busy
+
+
+def test_thread_busy_is_false_when_records_cannot_be_read(tmp_path):
+    assert records_reader(tmp_path).thread_busy(ALPHA_THREAD, 1000) is False

@@ -93,6 +93,8 @@ Unbinding stops new notifications for that mapping; it does not revoke Telegram 
 
 ### A long-held unresolved wake blocks later wakes
 
+While the target chat is busy, `relay-desktop` does not queue a wake. A chat is busy when its latest turn in the desktop's `thread_history_1.sqlite` is `inProgress` and showed activity in the last 10 minutes. AOT's Codex hooks then deliver the notice inside that turn, and a queued wake would only start a second, redundant turn afterwards. The listener records the wake as `failed`, writes one `desktop_wake_deferred_busy` record, and tries again on its normal retry schedule, at most a minute apart. Once the chat is idle, the notice is queued as usual. An `inProgress` turn with no activity for 10 minutes counts as stale, for example one left open by a crash, and does not block wakes. If the desktop records cannot be read, the listener queues as before.
+
 Each client has at most one outstanding notification. While a notification is `inflight` or `uncertain`, no new wake is sent for that client, even when new Telegram messages arrive. A wake that stays unresolved therefore blocks every later wake for that client.
 
 The relay reports this condition, but it does not fix it. When an `inflight` or `uncertain` notification is older than 15 minutes:
