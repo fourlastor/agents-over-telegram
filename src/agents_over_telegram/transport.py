@@ -19,11 +19,19 @@ from .credentials import load_token, private_directory, read_private_json, valid
 
 
 class TransportError(Exception):
-    def __init__(self, code="transport_failure", retry_after=None):
+    def __init__(self, code="transport_failure", retry_after=None, migrate_to_chat_id=None):
         # Codes are controlled by us; never use Telegram descriptions/URLs here.
         self.code = code if isinstance(code, (int, str)) else "transport_failure"
         self.retry_after = retry_after
+        # Set only on a 400 that says the group became this supergroup.
+        self.migrate_to_chat_id = migrate_to_chat_id
         super().__init__(str(self.code))
+
+
+def _migrate_to(parameters):
+    """The new chat id a rejection names after a group became a supergroup, or None."""
+    target = parameters.get("migrate_to_chat_id") if isinstance(parameters, dict) else None
+    return target if type(target) is int and target < 0 else None
 
 
 class UnknownSend(TransportError):
@@ -65,6 +73,13 @@ class TelegramTransport:
                     except Exception:
                         retry = 30
                     raise TransportError(429, retry) from None
+                if code == 400:
+                    # Only the integer migrate_to_chat_id is read from the body.
+                    try:
+                        migrate = _migrate_to(json.loads(error.read(16384)).get("parameters"))
+                    except Exception:
+                        migrate = None
+                    raise TransportError(code, migrate_to_chat_id=migrate) from None
                 if 400 <= code < 500:
                     raise TransportError(code) from None
                 raise UnknownSend() if sending else TransportError("http_failure") from None
@@ -79,7 +94,8 @@ class TelegramTransport:
                     retry = payload.get("parameters", {}).get("retry_after", 30) if code == 429 else None
                     if retry is not None:
                         retry = max(1, min(86400, int(retry)))
-                    raise TransportError(code, retry)
+                    migrate = _migrate_to(payload.get("parameters")) if code == 400 else None
+                    raise TransportError(code, retry, migrate_to_chat_id=migrate)
                 raise UnknownSend() if sending else TransportError("invalid_response")
             result = payload["result"]
             if sending and expects == "message" and (not isinstance(result, dict) or type(result.get("message_id")) is not int):

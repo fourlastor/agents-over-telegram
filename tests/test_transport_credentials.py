@@ -81,6 +81,39 @@ def test_http_outcomes(status, exception):
         assert exc.value.retry_after == 17
 
 
+MIGRATED = {"ok": False, "error_code": 400, "description": SECRET,
+            "parameters": {"migrate_to_chat_id": -1001234567890}}
+
+
+@pytest.mark.parametrize("as_http_error", [True, False])
+def test_rejection_names_the_supergroup_a_group_became(as_http_error):
+    body = json.dumps(MIGRATED).encode()
+    answer = (urllib.error.HTTPError("https://api.telegram.org/bot"+SECRET, 400, SECRET, {}, io.BytesIO(body))
+              if as_http_error else body)
+    with pytest.raises(TransportError) as exc:
+        TelegramTransport(SECRET, opener=Opener(answer)).send_message(-100, "test")
+    assert (exc.value.code, exc.value.migrate_to_chat_id) == (400, -1001234567890)
+    assert SECRET not in str(exc.value)
+
+
+@pytest.mark.parametrize("parameters", [{}, {"migrate_to_chat_id": "-100123"}, {"migrate_to_chat_id": 5},
+                                        {"migrate_to_chat_id": True}, "not a mapping"])
+def test_rejection_without_a_valid_migration_target_has_none(parameters):
+    body = json.dumps({"ok": False, "error_code": 400, "parameters": parameters}).encode()
+    error = urllib.error.HTTPError("https://api.telegram.org/bot"+SECRET, 400, SECRET, {}, io.BytesIO(body))
+    for answer in (body, error):
+        with pytest.raises(TransportError) as exc:
+            TelegramTransport(SECRET, opener=Opener(answer)).send_message(-100, "test")
+        assert exc.value.migrate_to_chat_id is None
+
+
+def test_only_a_400_carries_a_migration_target():
+    body = json.dumps({**MIGRATED, "error_code": 403}).encode()
+    with pytest.raises(TransportError) as exc:
+        TelegramTransport(SECRET, opener=Opener(body)).send_message(-100, "test")
+    assert (exc.value.code, exc.value.migrate_to_chat_id) == (403, None)
+
+
 @pytest.mark.parametrize("body", [b"not json", b"{}", b'{"ok":true,"result":{}}', b'{"ok":false,"error_code":500}', b"[]"])
 def test_malformed_send_response_is_unknown(body):
     with pytest.raises(UnknownSend):
