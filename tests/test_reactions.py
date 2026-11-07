@@ -568,3 +568,18 @@ def test_reaction_on_a_context_message_in_a_topic_is_routed(env):
     collect_one(core, transport, reaction(next_number(transport), number, new=emoji(['👍'])))
     assert 'unresolved_reaction' not in unassigned(core)
     assert core.poll(alpha)['deliveries'][0]['kind'] == 'reaction'
+
+
+def test_edit_is_not_matched_to_a_reaction_on_the_same_message(env):
+    core, transport, clock = env
+    client = bind(core, transport)
+    core.delivery_settings(client, delivery_filter='addressed', reaction_wake='all')
+    # A reaction on a message AOT never captured is delivered in a plain group.
+    collect_one(core, transport, reaction(next_number(transport), 777, new=emoji(['👍'])))
+    assert core.poll(client)['deliveries'][0]['kind'] == 'reaction'
+    # The author then edits that message without addressing the bot. The
+    # reaction must not count as the original delivered message.
+    edit = message(next_number(transport), 'edited, not for the bot')
+    edit['edited_message'] = dict(edit.pop('message'), message_id=777, edit_date=1001)
+    collect_one(core, transport, edit)
+    assert core.poll(client)['deliveries'] == []

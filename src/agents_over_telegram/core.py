@@ -1029,11 +1029,13 @@ class Core:
             conversation = f'participant:{binding["client_id"]}:{sender_id}'
         edited_delivery = False
         if kind == 'edited_message':
-            for original in db.execute('SELECT payload,conversation_id,context FROM inbox WHERE client_id=? ORDER BY created,rowid',
-                                       (binding['client_id'],)):
+            # The index holds only captured messages, never reactions, so a
+            # reaction on the same message ID cannot pose as the original.
+            for original in db.execute('SELECT payload,conversation_id,context FROM inbox '
+                                       'WHERE client_id=? AND tg_chat_id=? AND tg_message_id=? ORDER BY created,rowid',
+                                       (binding['client_id'], chat_id, msg['message_id'])):
                 prior = json.loads(original['payload'])
-                if (prior.get('origin') == 'telegram' and prior.get('message_id') == msg['message_id']
-                        and _mapping(prior.get('sender')).get('id') == sender_id):
+                if _mapping(prior.get('sender')).get('id') == sender_id:
                     conversation = original['conversation_id']
                     edited_delivery = not original['context']
                     break
