@@ -277,6 +277,18 @@ def test_notice_text_never_includes_more_than_counts_and_labels():
     assert 'From: @a (human), a peer agent.' in push.notice_text(2, 2, ['@a (human)', 'a peer agent'])
 
 
+def test_notice_names_this_runtimes_shell_fallback():
+    import sys
+    from pathlib import Path
+    executable = Path(sys.executable).absolute().parent / 'aot'
+    plain = push.notice_text(1, 1, [])
+    # Codex, Pi and Amp load their tools from project configuration: no fallback.
+    assert 'tool messages_poll' not in plain
+    text = push.with_shell_fallback(plain)
+    assert text.startswith(plain) and text.endswith(push.shell_fallback())
+    assert f'"{executable}" tool messages_poll' in text and 'JSON arguments on stdin' in text
+
+
 # ------------------------------------------------------------ pending_summary
 
 def test_pending_summary_counts_without_announcing(env):

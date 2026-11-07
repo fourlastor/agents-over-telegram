@@ -34,6 +34,24 @@ class LazyTransport:
         return getattr(self.transport, name)
 
 
+MAX_TOOL_ARGUMENTS = 1024 * 1024
+
+
+def _tool_arguments():
+    """The tool arguments as one JSON object on stdin; nothing on stdin means none."""
+    if sys.stdin is None or sys.stdin.isatty():
+        return {}
+    raw = sys.stdin.buffer.read(MAX_TOOL_ARGUMENTS + 1)
+    if len(raw) > MAX_TOOL_ARGUMENTS:
+        return []  # not an object, so the tool refuses it as invalid_arguments
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except (ValueError, UnicodeError):
+        return []
+
+
 def _emit(value):
     print(json.dumps(value, indent=2, sort_keys=True))
 
@@ -140,6 +158,10 @@ def parser():
     register = sub.add_parser("account-register", help="Prompt privately for one bot token, validate without polling")
     register.add_argument("--receiver-handoff-confirmed", action="store_true", help="Assert other receivers are stopped; webhooks are never changed")
     sub.add_parser("account-status")
+    tool = sub.add_parser("tool", help="Run one Telegram tool for this project's agent, as the MCP server does; "
+                                       "JSON arguments on stdin")
+    tool.add_argument("name", help="Tool name, for example messages_poll, message_send or messages_ack")
+    tool.add_argument("--client-file", type=Path)
     create = sub.add_parser("client-create")
     create.add_argument("--label", required=True)
     create.add_argument("--client-file", type=Path, required=True)
@@ -151,6 +173,8 @@ def parser():
             command.add_argument("--topic-open", action="store_true",
                                  help="Confirm you checked that a closed or changed topic is open again")
         if name == "watch":
+            command.add_argument("--host", choices=["claude"],
+                                 help="Name the host, so notices add its shell fallback")
             command.add_argument("--collect", action="store_true", help="Also long-poll the shared Telegram collector; never sends or acknowledges")
             command.add_argument("--duration", type=float, default=0, help="Seconds to watch; 0 runs until stopped")
             command.add_argument("--interval", type=float, default=2.0, help="Seconds between local inbox checks")
@@ -411,6 +435,9 @@ def run(args):
     if args.client_file is None:
         raise CredentialError("client_file_required")
     client_id = _client(core, args.client_file, args.expected_client_id)
+    if args.command == "tool":
+        from .mcp_server import call_tool
+        return call_tool(core, client_id, args.name, _tool_arguments())
     if args.command == "pair-begin":
         return core.connection_begin(client_id)
     if args.command == "status":
@@ -451,7 +478,8 @@ def run(args):
             if args.format == "jsonl":
                 print(json.dumps(event, separators=(",", ":")), flush=True)
             elif event.get("type") == "telegram_messages":
-                print(event["notice"], flush=True)
+                from .push import with_shell_fallback
+                print(with_shell_fallback(event["notice"]) if args.host == "claude" else event["notice"], flush=True)
             else:
                 print("[Agents over Telegram] Watching stopped: " + event.get("reason", "unknown") + ".", flush=True)
         parent = os.getppid()
@@ -519,6 +547,9 @@ def main():
                 from .onboarding import human_status
                 print(human_status(value["connection"]))
                 print("Next: " + json.dumps(value["next_step"], ensure_ascii=True)[1:-1])
+            elif args.command == "tool":
+                print(json.dumps(value, ensure_ascii=False, separators=(",", ":")), flush=True)
+                return 0 if value.get("ok") else 1
             elif args.command == "status" and args.human:
                 from .onboarding import human_status
                 print(human_status(value))

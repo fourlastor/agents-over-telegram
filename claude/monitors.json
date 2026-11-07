@@ -1,7 +1,7 @@
 [
   {
     "name": "telegram-inbox",
-    "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py\" watch --idle-if-unconfigured --collect --format text",
+    "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py\" watch --idle-if-unconfigured --collect --format text --host claude",
     "description": "New Telegram messages for this project's agent (notices only; read them with the Telegram tools)"
   }
 ]

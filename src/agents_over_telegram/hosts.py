@@ -84,7 +84,13 @@ def hook_answer(args, raw: str) -> dict | None:
     core = Core(state, _NoTransport(), recover_sends=False)
     client_id = _client(core, Path(profile['client_file']), profile['client_id'])
     _maybe_collect(core, state, profile['mode'] == 'fake', getattr(args, 'collect_interval', 0))
-    return hook_response(core, client_id, event, payload)
+    answer = hook_response(core, client_id, event, payload)
+    if answer is not None and args.host == 'claude':
+        from .push import with_shell_fallback
+        for container, key in ((answer, 'reason'), (answer.get('hookSpecificOutput'), 'additionalContext')):
+            if isinstance(container, dict) and isinstance(container.get(key), str):
+                container[key] = with_shell_fallback(container[key])
+    return answer
 
 
 def _maybe_collect(core, state: Path, fake: bool, interval) -> None:
@@ -231,7 +237,9 @@ def _wake(args) -> int:
     try:
         watch(core, client_id, emit, collect=True, duration=args.duration, keep_running=keep_running)
     except _Woken:
-        sys.stderr.write(notices[0] + '\n')
+        from .push import with_shell_fallback
+        # The asyncRewake waiter runs only for Claude Code.
+        sys.stderr.write(with_shell_fallback(notices[0]) + '\n')
         sys.stderr.flush()
         return WAKE_EXIT
     return 0
