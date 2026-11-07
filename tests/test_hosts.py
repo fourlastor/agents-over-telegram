@@ -1137,3 +1137,87 @@ def test_only_claude_hook_notices_name_the_shell_fallback(tmp_path, host, event,
     text = answer['reason'] if field == 'reason' else answer['hookSpecificOutput'][field]
     assert text.startswith('[Agents over Telegram] 1 new Telegram message')
     assert (f'"{RUNTIME}" tool messages_poll' in text) == (host == 'claude')
+
+
+# ------------------------------------------------------------ following a new runtime
+
+def follow_project(tmp_path):
+    """A connected project whose pointer names this checkout's real runtime."""
+    result = connected(tmp_path)
+    project = Path(result['project_dir'])
+    write_pointer(project, {'version': 1, 'executable': str(RUNTIME)})
+    return project
+
+
+@pytest.mark.parametrize('follow', [True, False])
+def test_waiter_exits_3_when_the_pointer_names_another_runtime(tmp_path, follow):
+    project = follow_project(tmp_path)
+    env = clean_env(AOT_FOLLOW_RUNTIME='1') if follow else clean_env()
+    process = subprocess.Popen([str(RUNTIME), 'wake', '--host', 'claude', '--project-dir', str(project),
+                                '--session', 'follow', '--duration', '8'], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env, text=True)
+    try:
+        time.sleep(1.0)
+        write_pointer(project, {'version': 1, 'executable': str(stub_runtime(tmp_path))})
+        # Following: exit 3 at the next cycle. Not following: run to the duration, then 0.
+        assert process.wait(timeout=30) == (3 if follow else 0)
+        assert process.stderr.read() == ''
+    finally:
+        if process.poll() is None:
+            process.kill()
+
+
+def test_watch_exits_3_when_following_and_the_pointer_moves(tmp_path):
+    project = follow_project(tmp_path)
+    process = subprocess.Popen([str(RUNTIME), 'watch', '--format', 'text', '--duration', '8'], cwd=project,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                               env=clean_env(AOT_FOLLOW_RUNTIME='1'), text=True)
+    try:
+        time.sleep(1.0)
+        write_pointer(project, {'version': 1, 'executable': str(stub_runtime(tmp_path))})
+        assert process.wait(timeout=30) == 3
+        assert process.stdout.read() == ''  # no "Watching stopped" line for the host
+    finally:
+        if process.poll() is None:
+            process.kill()
+
+
+def moving_stub(tmp_path, project, name, then):
+    """A runtime that, when followed, points the project at ``then`` and exits 3."""
+    path = tmp_path / 'bin' / name
+    path.parent.mkdir(exist_ok=True)
+    pointer = project / RUNTIME_POINTER
+    path.write_text('#!/bin/sh\n[ "$AOT_FOLLOW_RUNTIME" = 1 ] || exit 1\n'
+                    f'rm -f "{pointer}"\n'
+                    f'printf \'{{"version": 1, "executable": "%s"}}\' "{then}" > "{pointer}"\n'
+                    f'chmod 600 "{pointer}"\nexit 3\n')
+    os.chmod(path, 0o700)
+    return path
+
+
+@needs_system_python
+def test_launcher_restarts_the_waiter_on_the_new_runtime(tmp_path):
+    project = Path(prepare(tmp_path, 'claude')['project_dir'])
+    newer = wake_stub(tmp_path, 'printf "[Agents over Telegram] from the new runtime" >&2\nexit 2\n')
+    write_pointer(project, {'version': 1, 'executable': str(moving_stub(tmp_path, project, 'old', newer))})
+    wake = launch(project, 'wake', '--host', 'claude', stdin='{}')
+    assert (wake.returncode, wake.stderr) == (2, '[Agents over Telegram] from the new runtime')
+
+
+@needs_system_python
+def test_launcher_stops_when_a_runtime_says_moved_but_the_pointer_did_not(tmp_path):
+    project = Path(prepare(tmp_path, 'claude')['project_dir'])
+    write_pointer(project, {'version': 1, 'executable': str(wake_stub(tmp_path, 'exit 3\n'))})
+    started = time.monotonic()
+    wake = launch(project, 'wake', '--host', 'claude', stdin='{}')
+    assert (wake.returncode, wake.stderr) == (0, '') and time.monotonic() - started < 10
+
+
+@needs_system_python
+def test_launcher_moves_the_monitor_to_the_new_runtime(tmp_path):
+    project = Path(prepare(tmp_path, 'claude')['project_dir'])
+    newer = stub_runtime(tmp_path)  # prints its folder and arguments
+    write_pointer(project, {'version': 1, 'executable': str(moving_stub(tmp_path, project, 'old', newer))})
+    watch = launch(project, 'watch', '--idle-if-unconfigured', '--format', 'text')
+    assert watch.returncode == 0, watch.stderr
+    assert watch.stdout.splitlines() == [str(project), 'watch', '--format', 'text']
