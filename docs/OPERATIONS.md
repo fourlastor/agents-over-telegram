@@ -322,16 +322,27 @@ AOT suspends a connection when Telegram reports a change to its destination. A s
 | --- | --- | --- |
 | `bot_removed_or_restricted` | The bot left, was removed, or lost the right to post. | Add the bot back or restore its rights, then run `unsuspend`. |
 | `topic_changed` | The bound forum topic was closed or edited. | Reopen the topic if needed, check it, then run `unsuspend --topic-open`. |
-| `group_migrated:<new chat id>` | The group became a supergroup with a new chat id. | Run `disconnect`, then pair again in the new chat. `unsuspend` refuses this reason. |
+| `group_migrated:<new chat id>` | The group became a supergroup, and AOT could not move the connection by itself. See [group upgrades](#group-upgrades-to-a-supergroup). | Run `unsuspend`. It moves the connection to the new chat id. |
 
 ```sh
 "$AOT_BIN" --state-dir "$AOT_STATE" unsuspend --client-file "$AOT_STATE/clients/alpha.json"
 "$AOT_BIN" --state-dir "$AOT_STATE" unsuspend --client-file "$AOT_STATE/clients/alpha.json" --topic-open
 ```
 
-Before it clears anything, `unsuspend` calls Telegram `getChatMember` for the bot in the bound chat. It accepts `member`, `administrator`, or `restricted` with both `is_member` and `can_send_messages` true. Any other answer, or a Telegram error, leaves the suspension in place and prints an error code such as `bot_not_in_chat` or `bot_cannot_post`. The Bot API has no read-only call that shows whether one forum topic is open, so `--topic-open` records that the owner checked the topic. It does not post anything to the chat.
+Before it clears anything, `unsuspend` calls Telegram `getChatMember` for the bot in the bound chat. For `group_migrated`, it checks the new chat instead. It accepts `member`, `administrator`, or `restricted` with both `is_member` and `can_send_messages` true. Any other answer, or a Telegram error, leaves the suspension in place and prints an error code such as `bot_not_in_chat` or `bot_cannot_post`. The Bot API has no read-only call that shows whether one forum topic is open, so `--topic-open` records that the owner checked the topic. It does not post anything to the chat.
 
 `unsuspend` does not change queued messages. It prints JSON with the previous reason, the new state, `pending_messages` and `queued_outgoing`. The held inbox messages become available to the agent's next poll, and queued outgoing messages are sent on the next flush. An owner pause stays in place; run `resume` separately. If the collector records any suspension event while the check runs, even one with the same reason, the command fails with `suspension_changed` and keeps the suspension. A new reason never replaces one that needs more owner work: a migration stays a migration, and a closed topic stays `topic_changed` even if the bot is also removed. Clearing `topic_changed` still checks the bot membership.
+
+### Group upgrades to a supergroup
+
+Telegram gives a group a new chat id when it becomes a supergroup. Telegram does this by itself when the owner changes some group settings. Telegram announces the change twice: in the old group (`migrate_to_chat_id`) and in the new supergroup (`migrate_from_chat_id`). When the collector sees either notice, AOT moves every connection of the old group to the new chat id. The client, its allowed senders, its held inbox messages and its queued outgoing messages stay the same. No owner action is needed.
+
+AOT suspends a connection with `group_migrated:<new chat id>` instead of moving it in two cases:
+
+- Another connection already uses the new chat id. `unsuspend` then fails with `destination_already_bound` until that connection is disconnected.
+- An AOT version older than this behavior observed the upgrade. Run `unsuspend`; it moves the connection to the new chat id.
+
+Do not run `disconnect` to fix a migration. `disconnect` revokes the client, so the agent then needs a new client and a new pairing.
 
 Disabling or uninstalling the normal skills plugin leaves the setup-created native project MCP entry configured. To remove that connection from Codex, remove only the owned `[mcp_servers.telegram]` entry from that exact project's `.codex/config.toml`, preserve unrelated settings, and reload/reopen the project chat to stop using the old server configuration. Remove the project's `.aot-profile.json` when retiring its local CLI selection as well. For an advanced rendered plugin, remove/disable that scoped host entry and stop its process. These steps do not revoke the client; use `disconnect` first when revocation is intended. This package installs no service to uninstall. Retain the shared state while any other agents depend on it. Removing plugin files does not delete local state or revoke a bot token. To retire the whole bridge, stop all its processes, reconcile unknown sends, retain any required protected backup, then explicitly remove private state and client files. Token revocation is a separate deliberate owner action that affects all users of that bot, including integrations outside this package.
 

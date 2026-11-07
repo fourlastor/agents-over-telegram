@@ -825,7 +825,7 @@ class Core:
                 state, action = 'suspended', 'review_connection'
                 if row['suspended'].startswith('group_migrated:'):
                     message = ('This group moved to a new chat id. Queued messages are kept. Ask the local owner to '
-                               'disconnect and pair again in the new chat; "aot unsuspend" cannot clear a migration.')
+                               'run "aot unsuspend" on this computer to move the connection to the new chat.')
                 elif row['suspended'] == 'topic_changed':
                     message = ('This topic was closed or changed. Queued messages are kept. After the topic is open, '
                                'ask the local owner to run "aot unsuspend --topic-open" on this computer.')
@@ -939,6 +939,34 @@ class Core:
         db.execute(f'UPDATE bindings SET suspended=?,suspension_seq=suspension_seq+1 WHERE {scope} AND {guard}',
                    (reason, chat_id, thread_id, thread_id))
 
+    def _follow_migration(self, db, old_chat_id, new_chat_id):
+        """Move the bindings of a group that became a supergroup to its new chat id.
+
+        The client, its allowed senders and its queued work stay the same. A
+        binding whose new destination is already taken stays on the old chat
+        and is suspended, so the owner must pair it again.
+        """
+        if old_chat_id == new_chat_id:
+            return
+        for binding in db.execute('SELECT * FROM bindings WHERE chat_id=? AND connected=1', (old_chat_id,)).fetchall():
+            if db.execute('SELECT 1 FROM bindings WHERE chat_id=? AND thread_id=? AND connected=1',
+                          (new_chat_id, binding['thread_id'])).fetchone():
+                self._suspend(db, 'group_migrated:' + str(new_chat_id), old_chat_id, binding['thread_id'])
+                continue
+            self._move_binding(db, binding, new_chat_id)
+
+    def _move_binding(self, db, binding, new_chat_id):
+        client_id, old_chat_id = binding['client_id'], binding['chat_id']
+        # A suspension for this same migration no longer applies. Any other
+        # reason stays. The new seq makes a racing owner clear fail.
+        db.execute('UPDATE bindings SET chat_id=?,suspension_seq=suspension_seq+1,'
+                   'suspended=CASE WHEN suspended=? THEN NULL ELSE suspended END '
+                   'WHERE client_id=? AND connected=1',
+                   (new_chat_id, 'group_migrated:' + str(new_chat_id), client_id))
+        for table in ('outbox', 'reaction_outbox'):
+            db.execute(f"UPDATE {table} SET chat_id=? WHERE client_id=? AND chat_id=? AND status='queued'",
+                       (new_chat_id, client_id, old_chat_id))
+
     def _route_update(self, db, update, account, now):
         update_id = update['update_id']
         membership = update.get('my_chat_member')
@@ -971,8 +999,14 @@ class Core:
         if not _integer(chat_id) or not _integer(thread_id) or thread_id < 0 or chat.get('type') not in ('group', 'supergroup'):
             self._unmatched(db, update_id, None, 'unsupported_destination', now)
             return
+        # Telegram announces a group's upgrade to a supergroup twice: in the old
+        # group (migrate_to_chat_id) and in the new supergroup
+        # (migrate_from_chat_id). Either one moves the bindings.
         if _integer(msg.get('migrate_to_chat_id')):
-            self._suspend(db, 'group_migrated:' + str(msg['migrate_to_chat_id']), chat_id)
+            self._follow_migration(db, chat_id, msg['migrate_to_chat_id'])
+            return
+        if _integer(msg.get('migrate_from_chat_id')):
+            self._follow_migration(db, msg['migrate_from_chat_id'], chat_id)
             return
         if 'forum_topic_closed' in msg or 'forum_topic_edited' in msg:
             self._suspend(db, 'topic_changed', chat_id, thread_id)
@@ -1470,17 +1504,21 @@ class Core:
         reason, seq = binding['suspended'], binding['suspension_seq']
         if not reason:
             raise CoreError('not_suspended')
+        migrated_to = None
         if reason.startswith('group_migrated:'):
-            # The destination itself changed. Clearing would keep sending to a
-            # chat id that no longer exists; the owner must pair again.
-            raise CoreError('group_migrated_pair_again')
-        if reason not in ('bot_removed_or_restricted', 'topic_changed'):
+            # The destination itself changed. Clearing must move the binding to
+            # the new chat id; the old one no longer exists.
+            target = reason.split(':', 1)[1]
+            if not re.fullmatch(r'-?[0-9]+', target):
+                raise CoreError('unknown_suspension')
+            migrated_to = int(target)
+        elif reason not in ('bot_removed_or_restricted', 'topic_changed'):
             raise CoreError('unknown_suspension')
         if reason == 'topic_changed' and not topic_open_confirmed:
             # The Bot API has no read-only call for one forum topic's state.
             raise CoreError('topic_open_confirmation_required')
         try:
-            member = self.transport.get_chat_member(binding['chat_id'], account['bot_id'])
+            member = self.transport.get_chat_member(migrated_to or binding['chat_id'], account['bot_id'])
         except TransportError as error:
             if isinstance(error.code, int) and 400 <= error.code < 500 and error.code != 429:
                 raise CoreError('bot_not_in_chat') from None
@@ -1494,10 +1532,17 @@ class Core:
             # The suspension check also refreshes what reactions can arrive here.
             db.execute('UPDATE bindings SET bot_admin=? WHERE client_id=? AND connected=1',
                        (1 if status == 'administrator' else 0, client_id))
-            cleared = db.execute('UPDATE bindings SET suspended=NULL WHERE client_id=? AND connected=1 AND suspended=? AND suspension_seq=?',
-                                 (client_id, reason, seq)).rowcount
-            if not cleared:
+            current = db.execute('SELECT * FROM bindings WHERE client_id=? AND connected=1 AND suspended=? AND suspension_seq=?',
+                                 (client_id, reason, seq)).fetchone()
+            if current is None:
                 raise CoreError('suspension_changed')
+            if migrated_to is not None:
+                if db.execute('SELECT 1 FROM bindings WHERE chat_id=? AND thread_id=? AND connected=1',
+                              (migrated_to, current['thread_id'])).fetchone():
+                    raise CoreError('destination_already_bound')
+                self._move_binding(db, current, migrated_to)
+            else:
+                db.execute('UPDATE bindings SET suspended=NULL WHERE client_id=? AND connected=1', (client_id,))
         status_after = self.connection_status(client_id)
         return {'client_id': client_id, 'previous_suspension': reason, 'suspended': None,
                 'paused': status_after['paused'], 'state': status_after['state'],

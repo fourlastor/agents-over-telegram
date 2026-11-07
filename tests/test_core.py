@@ -378,7 +378,6 @@ def test_disconnect_revokes_secret_preserves_history_other_agent_works(env):
 
 
 @pytest.mark.parametrize('event,reason', [
-    ({'migrate_to_chat_id': -999}, 'group_migrated:-999'),
     ({'forum_topic_closed': {}}, 'topic_changed'),
     ({'forum_topic_edited': {'name': 'new'}}, 'topic_changed'),
 ])
@@ -393,6 +392,52 @@ def test_migration_topic_change_suspend_preserve_pending(env, event, reason):
     assert core.poll(a)['deliveries'] == []
     with pytest.raises(CoreError, match='connection_suspended'):
         core.pause(a, False)
+
+
+@pytest.mark.parametrize('notice', ['old_group', 'new_supergroup', 'both'])
+def test_group_migration_moves_the_binding_to_the_new_chat(env, notice):
+    core, transport, _ = env
+    a, _ = bind(core, transport)
+    b, _ = bind(core, transport, 'Beta', -200)
+    append(transport, 'pending before the upgrade')
+    if notice in ('old_group', 'both'):
+        append(transport, 'service', migrate_to_chat_id=-1009)
+    if notice in ('new_supergroup', 'both'):
+        append(transport, 'service', chat=-1009, migrate_from_chat_id=-100)
+    append(transport, 'after the upgrade', chat=-1009)
+    core.collect()
+    status = core.connection_status(a)
+    assert status['suspended'] is None
+    assert rows(core, 'SELECT chat_id FROM bindings WHERE client_id=?', (a,))[0][0] == -1009
+    assert [m['text'] for m in core.poll(a)['deliveries']] == ['pending before the upgrade', 'after the upgrade']
+    assert rows(core, 'SELECT chat_id FROM bindings WHERE client_id=?', (b,))[0][0] == -200
+    assert rows(core, 'SELECT count(*) FROM unmatched')[0][0] == 0
+
+
+def test_group_migration_moves_queued_sends_to_the_new_chat(env):
+    core, transport, _ = env
+    a, _ = bind(core, transport)
+    with sqlite3.connect(core.database) as db:
+        db.execute("INSERT INTO outbox(id,client_id,chat_id,thread_id,idempotency_key,request_hash,text,"
+                   "conversation_id,status,created,updated,due) VALUES('out_q',?,-100,0,'k','h','queued text',"
+                   "'conv','queued',0,0,0)", (a,))
+        db.execute("INSERT INTO outbox(id,client_id,chat_id,thread_id,idempotency_key,request_hash,text,"
+                   "conversation_id,status,created,updated,due) VALUES('out_s',?,-100,0,'k2','h','sent text',"
+                   "'conv','sent',0,0,0)", (a,))
+    append(transport, 'service', migrate_to_chat_id=-1009)
+    core.collect()
+    assert dict(rows(core, 'SELECT id,chat_id FROM outbox')) == {'out_q': -1009, 'out_s': -100}
+
+
+def test_group_migration_onto_a_bound_chat_suspends_instead(env):
+    core, transport, _ = env
+    a, _ = bind(core, transport)
+    taken, _ = bind(core, transport, 'Taken', -1009)
+    append(transport, 'service', migrate_to_chat_id=-1009)
+    core.collect()
+    assert core.connection_status(a)['suspended'] == 'group_migrated:-1009'
+    assert rows(core, 'SELECT chat_id FROM bindings WHERE client_id=?', (a,))[0][0] == -100
+    assert core.connection_status(taken)['suspended'] is None
 
 
 def test_bot_removal_suspends_only_affected_group(env):
