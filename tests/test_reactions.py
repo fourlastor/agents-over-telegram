@@ -585,3 +585,34 @@ def test_edit_is_not_matched_to_a_reaction_on_the_same_message(env):
     edit['edited_message'] = dict(edit.pop('message'), message_id=777, edit_date=1001)
     collect_one(core, transport, edit)
     assert core.poll(client)['deliveries'] == []
+
+
+def test_messages_from_before_a_migration_are_not_matched_in_the_supergroup(env):
+    """A supergroup numbers its messages on its own, apart from the old group.
+
+    The old group's messages keep their ids there and are not copied, and the
+    old group is deactivated, so nobody can edit or react to them afterwards.
+    An edit or reaction in the new supergroup with the same message id is
+    about a different message and must not match the captured one.
+    """
+    core, transport, clock = env
+    client = bind(core, transport)
+    core.delivery_settings(client, reaction_wake='all')
+    original = message(next_number(transport), 'before the upgrade')
+    original['message']['chat']['type'] = 'group'
+    collect_one(core, transport, original)
+    old_id = original['message']['message_id']
+    core.delivery_settings(client, delivery_filter='addressed')
+    collect_one(core, transport, message(next_number(transport), 'service', migrate_to_chat_id=-1009))
+    edit = message(next_number(transport), 'a new supergroup message, edited', chat=-1009)
+    edit['edited_message'] = dict(edit.pop('message'), message_id=old_id, edit_date=1001)
+    collect_one(core, transport, edit)
+    collect_one(core, transport, reaction(next_number(transport), old_id, chat=-1009, new=emoji(['👍'])))
+    deliveries = core.poll(client)['deliveries']
+    # The edit is not taken for an edit of the delivered message, so the
+    # addressed filter keeps it as context instead of delivering it.
+    assert [d['kind'] for d in deliveries] == ['message', 'reaction']
+    before, react = deliveries
+    assert react['chat_id'] == -1009
+    assert react['conversation_id'] != before['conversation_id']
+    assert rows(core, "SELECT json_extract(payload,'$.context_reason') FROM inbox WHERE context=1") == [('not_addressed',)]
