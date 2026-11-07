@@ -427,7 +427,7 @@ def test_admin_capability_is_tracked_and_reported(env):
     assert 'not an administrator' in status['reactions']['receive']['note']
     transport.chat_members['-100'] = {str(transport.bot_id): {'status': 'administrator'}}
     with sqlite3.connect(core.database) as db:
-        db.execute('UPDATE bindings SET bot_admin=NULL')
+        db.execute('UPDATE bindings SET bot_admin=NULL,bot_admin_probed=NULL')
     collect_one(core, transport, message(next_number(transport), 'again'))
     assert core.connection_status(client)['reactions']['receive']['available'] is True
     # A later demotion update flips it back without another probe.
@@ -534,6 +534,61 @@ def test_failed_admin_probe_waits_before_retrying(env):
     clock.advance(core.BOT_ADMIN_RETRY)
     collect_one(core, transport, message(next_number(transport), 'four'))
     assert len(calls) == 3
+
+
+def counting_member_lookups(transport):
+    calls = []
+    original = transport.get_chat_member
+
+    def lookup(chat_id, user_id):
+        calls.append(chat_id)
+        return original(chat_id, user_id)
+
+    transport.get_chat_member = lookup
+    return calls
+
+
+def test_missed_promotion_is_found_by_the_hourly_recheck(env):
+    core, transport, clock = env
+    client = bind(core, transport)
+    collect_one(core, transport, message(next_number(transport), 'hello'))
+    assert core.connection_status(client)['reactions']['receive']['bot_admin'] is False
+    # The bot is promoted, but no my_chat_member update reaches this runtime
+    # (an older runtime on the same bot consumed it).
+    transport.chat_members['-100'] = {str(transport.bot_id): {'status': 'administrator'}}
+    calls = counting_member_lookups(transport)
+    collect_one(core, transport, message(next_number(transport), 'soon after'))
+    assert calls == [] and core.connection_status(client)['reactions']['receive']['bot_admin'] is False
+    clock.advance(core.BOT_ADMIN_RECHECK)
+    collect_one(core, transport, message(next_number(transport), 'an hour later'))
+    assert calls == [-100]
+    assert core.connection_status(client)['reactions']['receive']['available'] is True
+
+
+def test_membership_update_counts_as_a_fresh_check(env):
+    core, transport, clock = env
+    client = bind(core, transport)
+    transport.updates.append({'update_id': next_number(transport), 'my_chat_member': {
+        'chat': {'id': -100}, 'new_chat_member': {'user': {'id': transport.bot_id}, 'status': 'administrator'}}})
+    calls = counting_member_lookups(transport)
+    core.collect()
+    collect_one(core, transport, message(next_number(transport), 'later'))
+    assert calls == []
+    assert core.connection_status(client)['reactions']['receive']['available'] is True
+
+
+def test_group_migration_checks_admin_status_in_the_new_supergroup(env):
+    core, transport, clock = env
+    client = bind(core, transport)
+    transport.updates.append({'update_id': next_number(transport), 'my_chat_member': {
+        'chat': {'id': -100}, 'new_chat_member': {'user': {'id': transport.bot_id}, 'status': 'administrator'}}})
+    core.collect()
+    assert core.connection_status(client)['reactions']['receive']['bot_admin'] is True
+    transport.chat_members['-1009'] = {str(transport.bot_id): {'status': 'member'}}
+    calls = counting_member_lookups(transport)
+    collect_one(core, transport, message(next_number(transport), 'service', migrate_to_chat_id=-1009))
+    assert calls == [-1009]
+    assert core.connection_status(client)['reactions']['receive']['bot_admin'] is False
 
 
 def test_reaction_target_is_found_through_the_message_index(env):
