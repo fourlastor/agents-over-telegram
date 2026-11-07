@@ -109,23 +109,38 @@ def _wakes_at_once(payload: dict, binding, exempt: set[str]) -> bool:
             and sender.get('id') == binding['owner_id'])
 
 
-def _held(db, binding, rows, now) -> bool:
-    """Wake batching: hold these deliveries until the connection's interval has passed.
+def last_notice(db, client_id: str) -> float | None:
+    """When this client was last told about new work, by a push notice or a desktop wake."""
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                                           "AND name IN ('push_announcements','relay_notifications')")}
+    times = []
+    if 'push_announcements' in tables:
+        times.append(db.execute('SELECT max(announced) FROM push_announcements WHERE client_id=?',
+                                (client_id,)).fetchone()[0])
+    if 'relay_notifications' in tables:
+        times.append(db.execute("SELECT max(created) FROM relay_notifications WHERE client_id=? "
+                                "AND status='accepted'", (client_id,)).fetchone()[0])
+    times = [value for value in times if value is not None]
+    return max(times) if times else None
 
-    After a notice, the next one waits wake_interval seconds and then covers
-    everything that arrived meanwhile. A delivery that wakes at once takes the
-    held ones along. Deliveries are queued and pollable all the time; only the
-    notice waits.
+
+def held(db, binding, payloads, now) -> bool:
+    """Wake batching: hold a notice for these deliveries until the connection's interval has passed.
+
+    After a notice (a push notice or a desktop wake), the next one waits
+    wake_interval seconds and then covers everything that arrived meanwhile. A
+    delivery that wakes at once takes the held ones along. Deliveries are
+    queued and pollable all the time; only the notice waits. ``binding`` needs
+    client_id, owner_id, wake_interval and wake_exempt.
     """
     interval = binding['wake_interval']
     if not interval:
         return False
-    last = db.execute('SELECT max(announced) FROM push_announcements WHERE client_id=?',
-                      (binding['client_id'],)).fetchone()[0]
+    last = last_notice(db, binding['client_id'])
     if last is None or now - last >= interval:
         return False
     exempt = set() if binding['wake_exempt'] == 'none' else set(binding['wake_exempt'].split(','))
-    return not any(_wakes_at_once(json.loads(row['payload']), binding, exempt) for row in rows)
+    return not any(_wakes_at_once(payload, binding, exempt) for payload in payloads)
 
 
 def claim_new(core, client_id: str, surface: str, *, limit: int = 50) -> dict[str, Any] | None:
@@ -148,7 +163,7 @@ def claim_new(core, client_id: str, surface: str, *, limit: int = 50) -> dict[st
             ORDER BY i.created,i.rowid LIMIT ?''', (client_id, now, limit)).fetchall()
         if not rows:
             return None
-        if _held(db, binding, rows, now):
+        if held(db, binding, [json.loads(row['payload']) for row in rows], now):
             return None
         senders: list[str] = []
         for row in rows:

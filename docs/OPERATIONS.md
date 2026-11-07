@@ -205,10 +205,10 @@ By default, every new delivery is announced at once: an idle agent wakes up for 
 ```
 
 - After a notice, the next one waits `--wake-interval` seconds (here 10 minutes), then covers everything that arrived meanwhile in one notice ("3 new Telegram messages"). `0`, the default, announces each delivery at once.
-- This holds all push notices for the connection: the Claude Code wake waiter and monitor, the busy-turn hooks of Claude Code and Codex, and the Pi and Amp watchers. Deliveries still queue at once, and `messages_poll` returns them at any time.
+- This holds every notice for the connection: the Claude Code wake waiter and monitor, the busy-turn hooks of Claude Code and Codex, the Pi and Amp watchers, and new `relay-desktop` wakes. They share one clock: a hook notice or a desktop wake that went out counts as the last notice for all of them. Deliveries still queue at once, and `messages_poll` returns them at any time.
 - `--wake-exempt` names what is still announced at once. The default `addressed,owner` covers messages that mention the bot, reply to it or address a command to it, and messages from the owner who paired the connection; `addressed` or `owner` keeps one of them, and `none` batches everything. An exempt delivery takes the held ones into the same notice. Messages a peer agent sends to this agent count as addressed. Reactions are never exempt; they are announced with the next notice.
 - Each delivery records whether it addressed the bot in an `addressed` field.
-- The Codex `relay-desktop` listener has its own wake rules and does not use this setting yet.
+- A `relay-desktop` retry of a wake that already started is never held.
 
 ## Launch one scoped MCP client
 

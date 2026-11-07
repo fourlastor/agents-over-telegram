@@ -6,11 +6,13 @@ messages, or starts Codex turns. A notification receipt means host handoff only.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import secrets
 import uuid
 
 from .core import CoreError
+from .push import held
 
 
 WAKE_NOTICE = (
@@ -280,7 +282,7 @@ class RelayStore:
             allowed_client_ids = set(allowed_client_ids)
         now = self.core.clock()
         with self.core._tx() as db:
-            bindings = db.execute('''SELECT r.* FROM relay_bindings r
+            bindings = db.execute('''SELECT r.*,b.owner_id,b.wake_interval,b.wake_exempt FROM relay_bindings r
                 JOIN clients c ON c.id=r.client_id JOIN bindings b ON b.client_id=r.client_id
                 WHERE r.enabled=1 AND c.active=1 AND b.connected=1
                 AND b.paused=0 AND b.suspended IS NULL''').fetchall()
@@ -296,7 +298,7 @@ class RelayStore:
                 if not self._project_available(binding['project_dir']) or not self._profile_valid(binding):
                     continue
                 prior_id = previous['id'] if previous else None
-                rows = db.execute('''SELECT i.id,i.created FROM inbox i
+                rows = db.execute('''SELECT i.id,i.created,i.payload FROM inbox i
                     LEFT JOIN relay_deliveries d ON d.inbox_id=i.id
                     WHERE i.client_id=? AND i.acknowledged=0
                     AND (i.lease_until IS NULL OR i.lease_until<=?)
@@ -308,6 +310,9 @@ class RelayStore:
                         AND i.acknowledged=0 LIMIT 1''', (prior_id,)).fetchone():
                         db.execute("UPDATE relay_notifications SET status='cancelled',updated=?,next_attempt_at=NULL WHERE id=?",
                                    (now, prior_id))
+                    continue
+                # Wake batching holds a new wake; a retry continues one already sent.
+                if previous is None and held(db, binding, [json.loads(row['payload']) for row in rows], now):
                     continue
                 candidates.append((rows[0]['created'], client_id, binding, previous, rows))
             if not candidates:
