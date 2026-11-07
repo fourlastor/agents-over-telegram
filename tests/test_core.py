@@ -429,6 +429,29 @@ def test_group_migration_moves_queued_sends_to_the_new_chat(env):
     assert dict(rows(core, 'SELECT id,chat_id FROM outbox')) == {'out_q': -1009, 'out_s': -100}
 
 
+def test_group_migration_drops_reply_links_and_rejects_queued_reactions(env):
+    # The supergroup numbers its own messages; ids from the old group would
+    # point at unrelated messages there.
+    core, transport, _ = env
+    a, _ = bind(core, transport)
+    with sqlite3.connect(core.database) as db:
+        db.execute("INSERT INTO outbox(id,client_id,chat_id,thread_id,idempotency_key,request_hash,text,reply_to,"
+                   "conversation_id,status,created,updated,due) VALUES('out_r',?,-100,0,'k','h','a reply',5,"
+                   "'conv','queued',0,0,0)", (a,))
+        db.execute("INSERT INTO outbox(id,client_id,chat_id,thread_id,idempotency_key,request_hash,text,reply_to,"
+                   "conversation_id,status,created,updated,due) VALUES('out_s',?,-100,0,'k2','h','sent reply',5,"
+                   "'conv','sent',0,0,0)", (a,))
+        for status in ('queued', 'sent'):
+            db.execute("INSERT INTO reaction_outbox(id,client_id,chat_id,thread_id,message_id,emoji,idempotency_key,"
+                       "request_hash,status,created,updated,due) VALUES(?,?,-100,0,5,'👍',?,'h',?,0,0,0)",
+                       ('react_' + status, a, status, status))
+    append(transport, 'service', migrate_to_chat_id=-1009)
+    core.collect()
+    assert rows(core, 'SELECT id,chat_id,reply_to FROM outbox ORDER BY id') == [('out_r', -1009, None), ('out_s', -100, 5)]
+    assert rows(core, 'SELECT id,chat_id,status,error FROM reaction_outbox ORDER BY id') == [
+        ('react_queued', -100, 'rejected', 'group_migrated'), ('react_sent', -100, 'sent', None)]
+
+
 def test_group_migration_onto_a_bound_chat_suspends_instead(env):
     core, transport, _ = env
     a, _ = bind(core, transport)
@@ -464,13 +487,13 @@ def test_send_refused_by_a_migration_follows_a_binding_already_moved(env):
     a, _ = bind(core, transport)
     with sqlite3.connect(core.database) as db:
         # A send that was in flight while the collector moved the binding.
-        db.execute("INSERT INTO outbox(id,client_id,chat_id,thread_id,idempotency_key,request_hash,text,"
-                   "conversation_id,status,created,updated,due) VALUES('out_q',?,-100,0,'k','h','late text',"
+        db.execute("INSERT INTO outbox(id,client_id,chat_id,thread_id,idempotency_key,request_hash,text,reply_to,"
+                   "conversation_id,status,created,updated,due) VALUES('out_q',?,-100,0,'k','h','late text',5,"
                    "'conv','queued',0,0,0)", (a,))
         db.execute('UPDATE bindings SET chat_id=-1009 WHERE client_id=?', (a,))
     transport.outcomes = [migrated(-1009)]
     core.flush()
-    assert rows(core, "SELECT status,error,chat_id FROM outbox WHERE id='out_q'") == [('queued', 'group_migrated', -1009)]
+    assert rows(core, "SELECT status,error,chat_id,reply_to FROM outbox WHERE id='out_q'") == [('queued', 'group_migrated', -1009, None)]
     clock.advance()
     core.flush()
     assert [m['chat']['id'] for m in transport.sent] == [-1009]
