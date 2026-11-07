@@ -903,3 +903,19 @@ def test_relay_serves_the_real_runtime(tmp_path):
         assert status['ok'] and status['result']['connected'] is True
     finally:
         assert session.close() == 0
+
+
+def test_setup_from_a_newer_runtime_moves_a_paired_project_to_it(tmp_path, monkeypatch):
+    """The update path: the new runtime's setup --prepare-only repoints the project and keeps its pairing."""
+    result = connected(tmp_path)
+    project = Path(result['project_dir'])
+    newer = tmp_path / 'newer' / 'bin'
+    newer.mkdir(parents=True)
+    (newer / 'aot').write_text('#!/bin/sh\n')
+    os.chmod(newer / 'aot', 0o700)
+    monkeypatch.setattr(sys, 'executable', str(newer / 'python'))
+    again = invoke('--state-dir', tmp_path / 'state', '--fake', 'setup', '--label', 'Alpha',
+                   '--project-dir', project, '--prepare-only', '--host', 'claude')
+    assert read_runtime_pointer(project) == newer / 'aot'
+    assert again['connected'] and 'pairing_command' not in again
+    assert again['client_id'] == result['client_id']

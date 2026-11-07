@@ -36,3 +36,15 @@ If this skill's installed package includes a root `mcp.json` or `.mcp.json`, it 
 An existing active bot receiver requires a deliberate owner-coordinated handoff; do not stop it, replace webhooks, or start a competing consumer as routine onboarding. `--receiver-handoff-confirmed` is the human's assertion that the selected bot has no competing receiver, not a bypass for uncertainty.
 
 Setup alone does not authorize Telegram publications or ongoing agent coordination. For status, pause/resume, recent context or explicitly authorized communication, use [telegram-coordinate](../telegram-coordinate/SKILL.md). Intake is on demand; setup does not install a daemon or start listening. If the user explicitly asks to listen, follow the normal-launch listener in [telegram-coordinate](../telegram-coordinate/SKILL.md) and [desktop listening](../../docs/DIRECT_DISPATCH.md). ChatGPT opens from the app list as usual; do not configure a custom launcher, `CODEX_CLI_PATH`, a WebSocket backend override or a protocol wrapper for ordinary setup or listening. Use the exact authorized local chat and the requested lifecycle. A continuous or restart-after-login request is not a request for the default 55-second check; follow the coordinate skill’s continuous-listening procedure.
+
+## Update a Claude Code project to a newer version
+
+Use this only when the user asks to update Agents over Telegram. Ordinary onboarding never moves a configured project to another runtime.
+
+1. Update the plugin with `claude plugin update agents-over-telegram@agents-over-telegram`, adding `--scope` to match the scope `claude plugin list` shows for it.
+2. Run `scripts/bootstrap_runtime.py` from the newest installed plugin version with a Python 3.11+ interpreter, as in first setup, and take the returned `executable`.
+3. Read `state_dir` and `label` from the project's `.aot-profile.json`. Never read the client file. Run `"<executable>" --state-dir "<state_dir>" setup --label "<label>" --project-dir "<project>" --host claude --prepare-only`. This rewrites `.aot-runtime.json` to the new runtime and keeps the client, its pairing and its allowed senders. It must report the project as connected, with no pairing command. If it reports anything else, stop and tell the user.
+4. Hooks and the wake waiter use the new runtime from their next event. With a plugin version that relays MCP, the `telegram` MCP server moves to the new runtime before its next tool call, and Claude Code refetches the tools. Changed hooks, skills or monitors in the plugin itself need `/reload-plugins` in the terminal CLI, or a new session in the desktop app. A session that started on a plugin version without the relay needs `/reload-plugins` (terminal CLI) or a new session once, to start the relay.
+5. Call `connection_status` and report the new version, if it shows one, and the connection state.
+
+This path is for Claude Code. Codex, Pi and Amp store the runtime command in their own project configuration, and setup refuses to replace a different `telegram` entry there.
