@@ -756,3 +756,19 @@ def test_failed_start_answer_is_never_retried_and_never_fails_collection(env):
     sent = len(transport.sent)
     core.collect()
     assert len(transport.sent) == sent
+
+
+def test_collect_without_a_queued_answer_leaves_the_sender_lock_free(env, monkeypatch):
+    core, transport, _ = env
+    bind(core, transport)
+    taken = []
+    original = core._lock
+
+    def spy(name):
+        taken.append(name)
+        return original(name)
+
+    monkeypatch.setattr(core, '_lock', spy)
+    private(transport, 'hello')
+    core.collect()
+    assert 'sender' not in taken

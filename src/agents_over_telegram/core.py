@@ -1571,6 +1571,7 @@ class Core:
         if db.execute('SELECT 1 FROM start_replies WHERE owner_id=? AND created>? LIMIT 1',
                       (sender_id, now - self.START_REPLY_INTERVAL)).fetchone():
             return
+        db.execute('DELETE FROM start_replies WHERE created<?', (now - 86400,))
         db.execute("INSERT OR IGNORE INTO start_replies(update_id,owner_id,status,created,updated) VALUES(?,?,'queued',?,?)",
                    (update_id, sender_id, now, now))
 
@@ -1594,8 +1595,12 @@ class Core:
         Each answer is tried at most once: the row is marked 'sending' before
         the request, so a crash or an unclear outcome never sends it twice.
         It runs under the sender lock, and waits for the next collection when
-        a sender is busy.
+        a sender is busy. With nothing queued it only reads, and takes no lock,
+        so it never makes flush() or resolve_unknown() report busy.
         """
+        with self._db() as db:
+            if not db.execute("SELECT 1 FROM start_replies WHERE status='queued' LIMIT 1").fetchone():
+                return
         with self._lock('sender') as acquired:
             if not acquired:
                 return
@@ -1617,8 +1622,6 @@ class Core:
                     status = 'unknown'
                 with self._tx() as db:
                     db.execute('UPDATE start_replies SET status=?,updated=? WHERE update_id=?', (status, self.clock(), update_id))
-            with self._tx() as db:
-                db.execute('DELETE FROM start_replies WHERE created<?', (self.clock() - 86400,))
 
     def collect(self, *, timeout=0):
         if not _integer(timeout) or not 0 <= timeout <= 20:
