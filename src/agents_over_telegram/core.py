@@ -283,6 +283,8 @@ class Core:
     # a looping agent.
     OWNER_REPLY_LIMITS = ((30, 3600),)
     OWNER_NOTIFY_INTERVAL = 1.0
+    # The bot answers an owner's private /start at most once in this window.
+    START_REPLY_INTERVAL = 60.0
     OWNER_NOTIFY_FOOTER = 'Reply to this message to answer the agent.'
     REACTION_WAKE_MODES = ('own_messages', 'all', 'none')
     WAKE_EXEMPT_MODES = ('addressed,owner', 'addressed', 'owner', 'none')
@@ -396,6 +398,10 @@ class Core:
                     UNIQUE(client_id,idempotency_key)
                 );
                 CREATE INDEX IF NOT EXISTS owner_outbox_window ON owner_outbox(client_id,created);
+                CREATE TABLE IF NOT EXISTS start_replies (
+                    update_id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL,
+                    status TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS rate_limits (
                     scope TEXT PRIMARY KEY, next_at REAL NOT NULL
                 );
@@ -1162,6 +1168,7 @@ class Core:
             # own reason, so it does not look like a bug.
             if not self._route_owner_reply(db, update_id, msg, kind, account, now):
                 self._unmatched(db, update_id, None, 'private_chat', now)
+                self._queue_start_reply(db, update_id, msg, kind, now)
             return
         if not _integer(chat_id) or not _integer(thread_id) or thread_id < 0 or chat.get('type') not in ('group', 'supergroup'):
             self._unmatched(db, update_id, None, 'unsupported_destination', now)
@@ -1544,6 +1551,78 @@ class Core:
                     db.execute(f'DELETE FROM {table} WHERE inbox_id IN ({marks})', chunk)
             db.execute(f'DELETE FROM inbox WHERE context=1 AND id IN ({marks})', chunk)
 
+    def _queue_start_reply(self, db, update_id, msg, kind, now):
+        """Queue one short answer to the owner's private /start.
+
+        Only a person who owns a connected agent on this bot gets an answer, so
+        a stranger cannot make the bot write to anyone. An owner who sends
+        /start again within START_REPLY_INTERVAL gets no second answer.
+        """
+        sender = _mapping(msg.get('from'))
+        sender_id = sender.get('id')
+        text = msg.get('text') if isinstance(msg.get('text'), str) else ''
+        if (kind != 'message' or sender.get('is_bot') is not False or msg.get('sender_chat')
+                or not _integer(sender_id) or _mapping(msg.get('chat')).get('id') != sender_id
+                or re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?(?: .*)?', text, re.DOTALL) is None):
+            return
+        if not db.execute('SELECT 1 FROM bindings b JOIN clients c ON c.id=b.client_id '
+                          'WHERE b.owner_id=? AND b.connected=1 AND c.active=1 LIMIT 1', (sender_id,)).fetchone():
+            return
+        if db.execute('SELECT 1 FROM start_replies WHERE owner_id=? AND created>? LIMIT 1',
+                      (sender_id, now - self.START_REPLY_INTERVAL)).fetchone():
+            return
+        db.execute('DELETE FROM start_replies WHERE created<?', (now - 86400,))
+        db.execute("INSERT OR IGNORE INTO start_replies(update_id,owner_id,status,created,updated) VALUES(?,?,'queued',?,?)",
+                   (update_id, sender_id, now, now))
+
+    def _start_reply_text(self, db, owner_id):
+        rows = db.execute('SELECT b.owner_notify FROM bindings b JOIN clients c ON c.id=b.client_id '
+                          'WHERE b.owner_id=? AND b.connected=1 AND c.active=1', (owner_id,)).fetchall()
+        enabled = sum(1 for row in rows if row['owner_notify'])
+        agents = '1 connected agent' if len(rows) == 1 else f'{len(rows)} connected agents'
+        if enabled == 0:
+            notices = 'None of them can send you private notices yet. Ask an agent to turn them on if you want them.'
+        elif enabled == len(rows):
+            notices = ('It can' if len(rows) == 1 else 'All of them can') + ' send you private notices here.'
+        else:
+            notices = f'{enabled} of them can send you private notices here.'
+        return (f'Ready. You have {agents} on this bot. {notices} '
+                'Reply to a notice to answer the agent that sent it.')
+
+    def _send_start_replies(self):
+        """Answer queued /start messages; never fails collection.
+
+        Each answer is tried at most once: the row is marked 'sending' before
+        the request, so a crash or an unclear outcome never sends it twice.
+        It runs under the sender lock, and waits for the next collection when
+        a sender is busy. With nothing queued it only reads, and takes no lock,
+        so it never makes flush() or resolve_unknown() report busy.
+        """
+        with self._db() as db:
+            if not db.execute("SELECT 1 FROM start_replies WHERE status='queued' LIMIT 1").fetchone():
+                return
+        with self._lock('sender') as acquired:
+            if not acquired:
+                return
+            with self._tx() as db:
+                # An answer that waited too long for the sender lock is dropped.
+                db.execute("UPDATE start_replies SET status='expired',updated=? WHERE status='queued' AND created<?",
+                           (self.clock(), self.clock() - 600))
+                rows = db.execute("SELECT update_id,owner_id FROM start_replies WHERE status='queued' ORDER BY update_id").fetchall()
+                pending = [(row['update_id'], row['owner_id'], self._start_reply_text(db, row['owner_id'])) for row in rows]
+                for update_id, _, _ in pending:
+                    db.execute("UPDATE start_replies SET status='sending',updated=? WHERE update_id=?", (self.clock(), update_id))
+            for update_id, owner_id, text in pending:
+                try:
+                    response = self.transport.send_message(chat_id=owner_id, text=text)
+                    status = 'sent' if isinstance(response, dict) and _integer(response.get('message_id')) else 'unknown'
+                except TransportError as error:
+                    status = 'rejected' if isinstance(error.code, int) and 400 <= error.code < 500 else 'unknown'
+                except Exception:
+                    status = 'unknown'
+                with self._tx() as db:
+                    db.execute('UPDATE start_replies SET status=?,updated=? WHERE update_id=?', (status, self.clock(), update_id))
+
     def collect(self, *, timeout=0):
         if not _integer(timeout) or not 0 <= timeout <= 20:
             raise CoreError('invalid_collect_timeout')
@@ -1575,6 +1654,11 @@ class Core:
                     self._prune_context(db, self.clock())
                     db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL WHERE singleton=1', (cursor, self.clock(), self.clock(), self.clock(), self.clock()))
                 self._probe_bot_admin(account)
+                try:
+                    self._send_start_replies()
+                except Exception:
+                    # A courtesy answer must never turn a good intake into a failure.
+                    pass
                 return {'status': 'ok', 'updates': accepted, 'cursor': cursor}
             except (TransportError, CoreError) as error:
                 code = error.code if isinstance(error, CoreError) else 'telegram_intake_failed'

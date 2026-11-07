@@ -648,3 +648,127 @@ def test_edit_of_a_routed_reply_follows_the_original(env):
     assert delivery['kind'] == 'edited' and delivery['text'] == 'Yes.' and delivery['message_id'] == reply_id
     assert delivery['owner_notice'] is True and delivery['conversation_id'] == original['conversation_id']
     assert private_reasons(core)[:2] == ['private_chat', 'private_chat']
+
+
+def start_replies(core):
+    with sqlite3.connect(core.database) as db:
+        return db.execute('SELECT owner_id,status FROM start_replies ORDER BY update_id').fetchall()
+
+
+def test_owner_start_gets_one_short_answer(env):
+    core, transport, _ = env
+    bind(core, transport)
+    private(transport, '/start')
+    assert core.collect()['status'] == 'ok'
+    answers = owner_messages(transport)
+    assert [m['text'] for m in answers] == [
+        'Ready. You have 1 connected agent on this bot. It can send you private notices here. '
+        'Reply to a notice to answer the agent that sent it.']
+    assert start_replies(core) == [(OWNER, 'sent')]
+    # The /start itself still reaches no agent and keeps its own reason.
+    assert [row['reason'] for row in core.unassigned()['updates']].count('private_chat') == 1
+
+
+def test_start_answer_counts_agents_with_notices_on(env):
+    core, transport, clock = env
+    bind(core, transport, 'Alpha', enable=False)
+    private(transport, '/start@aot_test_bot')
+    core.collect()
+    assert 'None of them can send you private notices yet.' in owner_messages(transport)[-1]['text']
+    clock.advance(120)
+    bind(core, transport, 'Beta', chat=-200)
+    private(transport, '/start deep-link-payload')
+    core.collect()
+    assert owner_messages(transport)[-1]['text'].startswith(
+        'Ready. You have 2 connected agents on this bot. 1 of them can send you private notices here.')
+
+
+def test_start_from_a_stranger_or_a_non_command_gets_no_answer(env):
+    core, transport, _ = env
+    bind(core, transport)
+    private(transport, '/start', sender=555)
+    private(transport, 'hello')
+    private(transport, '/started')
+    core.collect()
+    assert all(m["chat"]["id"] != 555 for m in transport.sent)
+    assert owner_messages(transport) == []
+    assert start_replies(core) == []
+
+
+def test_start_without_a_connected_agent_gets_no_answer(env):
+    core, transport, _ = env
+    client = bind(core, transport)
+    core.disconnect(client)
+    private(transport, '/start')
+    core.collect()
+    assert owner_messages(transport) == []
+
+
+def test_repeated_start_is_answered_once_per_minute(env):
+    core, transport, clock = env
+    bind(core, transport)
+    private(transport, '/start')
+    private(transport, '/start')
+    core.collect()
+    clock.advance(30)
+    private(transport, '/start')
+    core.collect()
+    assert len(owner_messages(transport)) == 1
+    clock.advance(31)
+    private(transport, '/start')
+    core.collect()
+    assert len(owner_messages(transport)) == 2
+
+
+def test_start_answer_waits_for_a_busy_sender_and_then_expires(env):
+    core, transport, clock = env
+    bind(core, transport)
+    private(transport, '/start')
+    with core._lock('sender') as acquired:
+        assert acquired
+        core.collect()
+    assert owner_messages(transport) == []
+    assert start_replies(core) == [(OWNER, 'queued')]
+    core.collect()
+    assert len(owner_messages(transport)) == 1
+    clock.advance(120)
+    private(transport, '/start')
+    with core._lock('sender'):
+        core.collect()
+    clock.advance(601)
+    core.collect()
+    assert len(owner_messages(transport)) == 1
+    assert start_replies(core)[-1] == (OWNER, 'expired')
+
+
+def test_failed_start_answer_is_never_retried_and_never_fails_collection(env):
+    core, transport, clock = env
+    bind(core, transport)
+    transport.outcomes = ['reject']
+    private(transport, '/start')
+    assert core.collect()['status'] == 'ok'
+    assert start_replies(core) == [(OWNER, 'rejected')]
+    transport.outcomes = ['unknown']
+    clock.advance(61)
+    private(transport, '/start')
+    assert core.collect()['status'] == 'ok'
+    assert start_replies(core)[-1] == (OWNER, 'unknown')
+    sent = len(transport.sent)
+    core.collect()
+    assert len(transport.sent) == sent
+
+
+def test_collect_without_a_queued_answer_leaves_the_sender_lock_free(env, monkeypatch):
+    core, transport, _ = env
+    bind(core, transport)
+    taken = []
+    original = core._lock
+
+    def spy(name):
+        taken.append(name)
+        return original(name)
+
+    monkeypatch.setattr(core, '_lock', spy)
+    private(transport, 'hello')
+    core.collect()
+    assert 'sender' not in taken

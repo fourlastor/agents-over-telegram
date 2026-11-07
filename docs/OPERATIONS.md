@@ -319,7 +319,7 @@ AOT enforces the volume, not the agent. Each agent can send at most 3 notices in
 
 `connection_status` shows the setting as `routing.owner_notify`.
 
-The owner must also do one thing once: open a private chat with the bot and send `/start`. Telegram does not let a bot start a private chat by itself. A paused or suspended connection refuses `owner_notify`, as for `message_send`.
+The owner must also do one thing once: open a private chat with the bot and send `/start`. Telegram does not let a bot start a private chat by itself. The bot answers the `/start` with one short message. It says how many connected agents the owner has on this bot, and how many of them can send notices. Only the owner of at least one connected agent on the bot gets this answer, at most once a minute. Anyone else gets no answer. A paused or suspended connection refuses `owner_notify`, as for `message_send`.
 
 Only Telegram replies reach an agent. To answer, the owner uses Reply on a notice (swipe left on the message, or long-press and choose Reply). A plain message typed into the private chat is not delivered to any agent. Several agents can share one bot, so a plain message has no single agent to go to. A Telegram reply names one message, and AOT knows which agent it belongs to. Each notice therefore ends with "Reply to this message to answer the agent."
 
