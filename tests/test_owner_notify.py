@@ -546,10 +546,13 @@ def test_owner_notify_reply_to_answers_in_the_private_chat(env):
         with pytest.raises(CoreError) as error:
             core.owner_notify(other, 'x', f'o{target}', reply_to=target)
         assert error.value.code == 'unknown_owner_reply'
-    # The same 3-per-hour limit applies to replies.
+    # The answer to the owner did not count; the reply to the own notice did.
+    assert answer['answers_owner'] is True
+    clock.advance()
+    assert core.owner_notify(sender, 'Third notice.', 'n4')['status'] == 'sent'
     clock.advance()
     with pytest.raises(CoreError, match='owner_notify_limit'):
-        core.owner_notify(sender, 'One more.', 'n4', reply_to=reply_id)
+        core.owner_notify(sender, 'Fourth notice.', 'n5', reply_to=notice['message_id'])
     assert _error_body('unknown_owner_reply')['error']['message'].startswith('reply_to is not')
     assert call_tool(core, sender, 'owner_notify', {'text': 'x', 'idempotency_key': 'k',
                                                     'reply_to': 0})['error']['code'] == 'invalid_arguments'
@@ -581,3 +584,67 @@ def test_owner_reply_wakes_at_once_while_batching(env, exempt, announced):
     private_reply(transport, 'Yes', notice['message_id'])
     core.collect()
     assert (push.claim_new(core, sender, 'watch') is not None) == announced
+
+
+
+def test_answers_to_the_owner_have_their_own_cap(env):
+    core, transport, clock = env
+    sender = bind(core, transport)
+    notice = core.owner_notify(sender, 'Approve?', 'n1')
+    reply_id = private_reply(transport, 'Tell me more.', notice['message_id'])
+    core.collect()
+    for index in range(30):
+        clock.advance()
+        assert core.owner_notify(sender, f'Answer {index}', f'a{index}', reply_to=reply_id)['status'] == 'sent'
+    clock.advance()
+    with pytest.raises(CoreError) as error:
+        core.owner_notify(sender, 'Answer 30', 'a30', reply_to=reply_id)
+    assert error.value.code == 'owner_reply_limit'
+    assert error.value.details['limit'] == 30 and error.value.details['window_seconds'] == 3600
+    body = _error_body('owner_reply_limit', error.value.details)['error']
+    assert body['code'] == 'owner_reply_limit' and 'separate from the notice limits' in body['message']
+    # The notice limits are untouched: two more notices still fit this hour.
+    for index in range(2):
+        clock.advance()
+        assert core.owner_notify(sender, f'Notice {index}', f'n-more{index}')['status'] == 'sent'
+    clock.advance()
+    with pytest.raises(CoreError, match='owner_notify_limit'):
+        core.owner_notify(sender, 'Notice 3', 'n-more3')
+
+
+def test_owner_can_reply_to_their_own_routed_message(env):
+    core, transport, _ = env
+    sender = bind(core, transport)
+    notice = core.owner_notify(sender, 'Approve?', 'n1')
+    first = private_reply(transport, 'Yes.', notice['message_id'])
+    core.collect()
+    private_reply(transport, 'And ship it today.', first)
+    core.collect()
+    deliveries = core.poll(sender)['deliveries']
+    assert [d['text'] for d in deliveries] == ['Yes.', 'And ship it today.']
+    assert len({d['conversation_id'] for d in deliveries}) == 1
+
+
+def test_edit_of_a_routed_reply_follows_the_original(env):
+    core, transport, _ = env
+    sender = bind(core, transport)
+    notice = core.owner_notify(sender, 'Approve?', 'n1')
+    reply_id = private_reply(transport, 'Yse.', notice['message_id'])
+    core.collect()
+    [original] = core.poll(sender)['deliveries']
+    number = max(u['update_id'] for u in transport.updates) + 1
+    edited = {'message_id': reply_id, 'date': 1000, 'edit_date': 1001,
+              'chat': {'id': OWNER, 'type': 'private'}, 'from': {'id': OWNER, 'is_bot': False, 'username': 'owner'},
+              'text': 'Yes.', 'reply_to_message': {'message_id': notice['message_id'], 'chat': {'id': OWNER, 'type': 'private'},
+                                                    'from': {'id': transport.bot_id, 'is_bot': True}, 'text': 'Approve?'}}
+    transport.updates.append({'update_id': number, 'edited_message': edited})
+    # An edit of a private message that was never routed stays private_chat.
+    plain = private_reply(transport, 'hello', None)
+    transport.updates.append({'update_id': number + 2, 'edited_message': {
+        'message_id': plain, 'date': 1000, 'edit_date': 1001, 'chat': {'id': OWNER, 'type': 'private'},
+        'from': {'id': OWNER, 'is_bot': False}, 'text': 'hello again'}})
+    core.collect()
+    [delivery] = core.poll(sender, lease_seconds=10)['deliveries']
+    assert delivery['kind'] == 'edited' and delivery['text'] == 'Yes.' and delivery['message_id'] == reply_id
+    assert delivery['owner_notice'] is True and delivery['conversation_id'] == original['conversation_id']
+    assert private_reasons(core)[:2] == ['private_chat', 'private_chat']

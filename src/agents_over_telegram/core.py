@@ -278,6 +278,10 @@ class Core:
     # owner_notify interrupts the owner personally, so it stays low volume by
     # rule: (limit, window seconds) pairs, each a rolling window per agent.
     OWNER_NOTIFY_LIMITS = ((3, 3600), (10, 86400))
+    # An answer to a message the owner sent the agent continues a conversation
+    # the owner started. It does not use the limits above; this cap only stops
+    # a looping agent.
+    OWNER_REPLY_LIMITS = ((30, 3600),)
     OWNER_NOTIFY_INTERVAL = 1.0
     OWNER_NOTIFY_FOOTER = 'Reply to this message to answer the agent.'
     REACTION_WAKE_MODES = ('own_messages', 'all', 'none')
@@ -481,8 +485,12 @@ class Core:
             if 'wake_exempt' not in binding_columns:
                 db.execute("ALTER TABLE bindings ADD COLUMN wake_exempt TEXT NOT NULL DEFAULT 'addressed,owner'")
             # A notice can answer the owner's reply in the private chat.
-            if 'reply_to' not in {row['name'] for row in db.execute('PRAGMA table_info(owner_outbox)')}:
+            owner_columns = {row['name'] for row in db.execute('PRAGMA table_info(owner_outbox)')}
+            if 'reply_to' not in owner_columns:
                 db.execute('ALTER TABLE owner_outbox ADD COLUMN reply_to INTEGER')
+            # 1 when the notice answers a message the owner sent this agent.
+            if 'answers_owner' not in owner_columns:
+                db.execute('ALTER TABLE owner_outbox ADD COLUMN answers_owner INTEGER NOT NULL DEFAULT 0')
             # owner_notify is the first tool that writes outside the bound
             # destination, so the owner switches it on knowingly per connection.
             if 'owner_notify' not in binding_columns:
@@ -1152,7 +1160,7 @@ class Core:
             # single agent to go to, unless it is the owner's Telegram reply to
             # one agent's notice. Everything else, including /start, gets its
             # own reason, so it does not look like a bug.
-            if kind != 'message' or not self._route_owner_reply(db, update_id, msg, account, now):
+            if not self._route_owner_reply(db, update_id, msg, kind, account, now):
                 self._unmatched(db, update_id, None, 'private_chat', now)
             return
         if not _integer(chat_id) or not _integer(thread_id) or thread_id < 0 or chat.get('type') not in ('group', 'supergroup'):
@@ -1404,14 +1412,30 @@ class Core:
                              (row['client_id'], sender_id)).fetchone()
         return (binding, row['id']) if binding is not None else None
 
-    def _route_owner_reply(self, db, update_id, msg, account, now):
-        """Deliver the owner's private reply to an owner notice; False when it is not one.
+    def _routed_owner_message(self, db, chat_id, sender_id, message_id):
+        """(binding, conversation) of the owner's private message that was routed to an agent, or None."""
+        if not _integer(chat_id) or chat_id != sender_id or not _integer(message_id):
+            return None
+        for row in db.execute('SELECT client_id,payload,conversation_id FROM inbox WHERE tg_chat_id=? AND tg_message_id=? '
+                              'ORDER BY created,rowid', (chat_id, message_id)):
+            payload = json.loads(row['payload'])
+            if payload.get('owner_notice') is True and _mapping(payload.get('sender')).get('id') == sender_id:
+                binding = db.execute('SELECT b.* FROM bindings b JOIN clients c ON c.id=b.client_id '
+                                     'WHERE b.client_id=? AND b.owner_id=? AND b.connected=1 AND c.active=1',
+                                     (row['client_id'], sender_id)).fetchone()
+                return (binding, row['conversation_id']) if binding is not None else None
+        return None
 
-        The reply names one notice (or its forward) through reply_to_message, and
-        owner_outbox records which agent sent it. The delivery is a normal
-        message from the owner, with the private chat as chat_id, marked
-        owner_notice and addressed, so wake batching announces it at once.
-        Media follows the connection's accept_media setting, as in the group.
+    def _route_owner_reply(self, db, update_id, msg, kind, account, now):
+        """Deliver the owner's private reply to an agent; False when it is not one.
+
+        Only a Telegram reply can be routed. It names one message through
+        reply_to_message: a notice or forward that owner_outbox records, or the
+        owner's own earlier message that was routed to an agent. An edit follows
+        its original when that was routed. The delivery is a normal message
+        from the owner, with the private chat as chat_id, marked owner_notice
+        and addressed, so wake batching announces it at once. Media follows the
+        connection's accept_media setting, as in the group.
         """
         chat_id = _mapping(msg.get('chat')).get('id')
         sender = _mapping(msg.get('from'))
@@ -1419,18 +1443,25 @@ class Core:
         if sender.get('is_bot') is not False or msg.get('sender_chat'):
             return False
         reply_to = _mapping(msg.get('reply_to_message')).get('message_id')
-        notice = self._owner_notice(db, chat_id, sender_id, reply_to)
         text, attachments = _message_content(msg)
-        if notice is None or text is None or not _integer(msg.get('message_id')):
+        if text is None or not _integer(msg.get('message_id')):
             return False
-        binding, notify_id = notice
+        if kind == 'edited_message':
+            target = self._routed_owner_message(db, chat_id, sender_id, msg['message_id'])
+        else:
+            notice = self._owner_notice(db, chat_id, sender_id, reply_to)
+            target = ((notice[0], f'owner:{notice[0]["client_id"]}:{notice[1]}') if notice is not None
+                      else self._routed_owner_message(db, chat_id, sender_id, reply_to))
+        if target is None:
+            return False
+        binding, conversation = target
         if not db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=0',
                           (binding['client_id'], sender_id)).fetchone():
             return False
-        payload = {'origin': 'telegram', 'kind': 'message', 'update_id': update_id, 'message_id': msg['message_id'],
-                   'chat_id': chat_id, 'thread_id': None,
+        payload = {'origin': 'telegram', 'kind': 'edited' if kind == 'edited_message' else 'message',
+                   'update_id': update_id, 'message_id': msg['message_id'], 'chat_id': chat_id, 'thread_id': None,
                    'sender': {'id': sender_id, 'is_bot': False, 'username': _bounded(sender.get('username', ''), 64)},
-                   'text': text, 'reply_to': reply_to, 'addressed': True,
+                   'text': text, 'reply_to': reply_to if _integer(reply_to) else None, 'addressed': True,
                    # The owner answering an owner_notify notice in the private chat.
                    'owner_notice': True}
         if attachments and binding['accept_media']:
@@ -1441,9 +1472,8 @@ class Core:
         quoted = _quoted_message(msg, binding['accept_media'], lambda quoted_id, quoted_bot: quoted_id == account['bot_id'])
         if quoted is not None:
             payload['reply_to_message'] = quoted
-        stamp = msg.get('date')
+        stamp = msg.get('edit_date' if kind == 'edited_message' else 'date')
         event_at = stamp if _integer(stamp) and 0 < stamp <= now else now
-        conversation = f'owner:{binding["client_id"]}:{notify_id}'
         db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
         self._enqueue(db, binding['client_id'], f'tg:{update_id}', payload, conversation, now, event_at=event_at)
         return True
@@ -2204,7 +2234,7 @@ class Core:
         self.flush(client_id=client_id, limit=20)
         return self.delivery_status(client_id, reaction_id)
 
-    def _owner_notify_usage(self, db, client_id, now):
+    def _owner_notify_usage(self, db, client_id, now, answers_owner=False):
         """The fullest owner_notify window as (used, limit, window, retry_at), or None.
 
         Every request that was not refused counts, including queued and unknown
@@ -2212,10 +2242,10 @@ class Core:
         A refused one never reached the owner, so it does not count.
         """
         full = []
-        for limit, window in self.OWNER_NOTIFY_LIMITS:
+        for limit, window in self.OWNER_REPLY_LIMITS if answers_owner else self.OWNER_NOTIFY_LIMITS:
             stamps = [r[0] for r in db.execute(
                 "SELECT created FROM owner_outbox WHERE client_id=? AND created>? AND status!='rejected' "
-                'ORDER BY created DESC', (client_id, now - window))]
+                'AND answers_owner=? ORDER BY created DESC', (client_id, now - window, int(answers_owner)))]
             used, retry_at = self._window_usage(stamps, limit, window)
             if retry_at is not None:
                 full.append((retry_at, used, limit, window))
@@ -2226,17 +2256,21 @@ class Core:
         return used, limit, window, retry_at
 
     def _owner_reply_target(self, db, binding, reply_to):
-        """True when reply_to is in this owner's private chat and belongs to this agent.
+        """What reply_to is in this owner's private chat for this agent: 'owner', 'notice' or None.
 
-        That is a notice or forward this agent sent, or an owner reply that was
-        routed to this agent.
+        'owner' is a message of the owner that was routed to this agent;
+        'notice' is a notice or forward this agent sent. In one chat Telegram
+        numbers both people's messages in one sequence, so the two never share
+        an id.
         """
         owner = binding['owner_id']
+        if db.execute('SELECT 1 FROM inbox WHERE client_id=? AND tg_chat_id=? AND tg_message_id=? LIMIT 1',
+                      (binding['client_id'], owner, reply_to)).fetchone():
+            return 'owner'
         if db.execute('SELECT 1 FROM owner_outbox WHERE client_id=? AND owner_id=? AND (message_id=? OR forwarded_message_id=?) LIMIT 1',
                       (binding['client_id'], owner, reply_to, reply_to)).fetchone():
-            return True
-        return db.execute('SELECT 1 FROM inbox WHERE client_id=? AND tg_chat_id=? AND tg_message_id=? LIMIT 1',
-                          (binding['client_id'], owner, reply_to)).fetchone() is not None
+            return 'notice'
+        return None
 
     def owner_notify(self, client_id, text, idempotency_key, forward_message_id=None, reply_to=None):
         """Queue one low-volume notification to the owner's private chat with the bot.
@@ -2276,12 +2310,17 @@ class Core:
                     raise CoreError('owner_notify_disabled')
                 if forward_message_id is not None and not self._known_reaction_target(db, binding, forward_message_id):
                     raise CoreError('unknown_forward_target')
-                if reply_to is not None and not self._owner_reply_target(db, binding, reply_to):
+                target = self._owner_reply_target(db, binding, reply_to) if reply_to is not None else None
+                if reply_to is not None and target is None:
                     raise CoreError('unknown_owner_reply')
-                usage = self._owner_notify_usage(db, client_id, now)
+                # Answering the owner continues a conversation the owner started,
+                # so it has its own generous cap instead of the notice limits.
+                answers_owner = target == 'owner'
+                usage = self._owner_notify_usage(db, client_id, now, answers_owner)
                 if usage is not None:
                     used, limit, window, retry_at = usage
-                    raise self._limit_error('owner_notify_limit', used, limit, window, retry_at, now)
+                    raise self._limit_error('owner_reply_limit' if answers_owner else 'owner_notify_limit',
+                                            used, limit, window, retry_at, now)
                 notify_id = 'owner_' + secrets.token_hex(12)
                 # The owner reads this away from the group, so the label names
                 # the group instead of the bot, which is the private chat itself.
@@ -2291,11 +2330,11 @@ class Core:
                 title = ' '.join(str(binding['title']).split())
                 labelled = f'[Agent: {client["label"]} | {title}]\n{text}\n{self.OWNER_NOTIFY_FOOTER}'
                 db.execute("INSERT INTO owner_outbox(id,client_id,owner_id,text,from_chat_id,forward_message_id,reply_to,"
-                           'idempotency_key,request_hash,status,created,updated,due) '
-                           "VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                           'answers_owner,idempotency_key,request_hash,status,created,updated,due) '
+                           "VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
                            (notify_id, client_id, binding['owner_id'], labelled,
                             binding['chat_id'] if forward_message_id is not None else None, forward_message_id,
-                            reply_to, idempotency_key, request_hash, now, now, now))
+                            reply_to, int(answers_owner), idempotency_key, request_hash, now, now, now))
             username = self._account(db)['username']
         self.flush(client_id=client_id, limit=20)
         status = self.delivery_status(client_id, notify_id)
@@ -2310,6 +2349,7 @@ class Core:
                 'error': row['error'], 'message_id': row['message_id'],
                 'forward_message_id': row['forward_message_id'],
                 'forwarded_message_id': row['forwarded_message_id'], 'reply_to': row['reply_to'],
+                'answers_owner': bool(row['answers_owner']),
                 'created_at': row['created'], 'updated_at': row['updated'],
                 'retry_at': row['due'] if row['status'] == 'queued' else None}
 
