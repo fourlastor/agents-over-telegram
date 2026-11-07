@@ -277,6 +277,15 @@ def test_notice_text_never_includes_more_than_counts_and_labels():
     assert 'From: @a (human), a peer agent.' in push.notice_text(2, 2, ['@a (human)', 'a peer agent'])
 
 
+def test_notice_names_this_runtimes_shell_fallback():
+    import sys
+    from pathlib import Path
+    executable = Path(sys.executable).absolute().parent / 'aot'
+    text = push.notice_text(1, 1, [])
+    assert text.endswith(push.shell_fallback())
+    assert f'"{executable}" tool messages_poll' in text and 'JSON arguments on stdin' in text
+
+
 # ------------------------------------------------------------ pending_summary
 
 def test_pending_summary_counts_without_announcing(env):

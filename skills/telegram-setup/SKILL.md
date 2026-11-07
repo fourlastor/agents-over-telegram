@@ -37,6 +37,15 @@ An existing active bot receiver requires a deliberate owner-coordinated handoff;
 
 Setup alone does not authorize Telegram publications or ongoing agent coordination. For status, pause/resume, recent context or explicitly authorized communication, use [telegram-coordinate](../telegram-coordinate/SKILL.md). Intake is on demand; setup does not install a daemon or start listening. If the user explicitly asks to listen, follow the normal-launch listener in [telegram-coordinate](../telegram-coordinate/SKILL.md) and [desktop listening](../../docs/DIRECT_DISPATCH.md). ChatGPT opens from the app list as usual; do not configure a custom launcher, `CODEX_CLI_PATH`, a WebSocket backend override or a protocol wrapper for ordinary setup or listening. Use the exact authorized local chat and the requested lifecycle. A continuous or restart-after-login request is not a request for the default 55-second check; follow the coordinate skill’s continuous-listening procedure.
 
+## Connect in Claude Code without a restart
+
+When the user asks to connect a project from Claude Code, never ask them to restart Claude Code. Tell them up front what, if anything, they will have to type.
+
+1. If the plugin is missing, install it for the user with `claude plugin marketplace add fourlastor/agents-over-telegram` and `claude plugin install agents-over-telegram@agents-over-telegram --scope user`. If it is installed but disabled, enable it with `claude plugin enable agents-over-telegram@agents-over-telegram` and the scope `claude plugin list` shows.
+2. If this session started without the plugin (step 1 changed something, or no `telegram` MCP server and no Agents over Telegram hooks are loaded), ask the user to type `/reload-plugins` once: `/reload-plugins --force` in the terminal CLI, plain `/reload-plugins` in the desktop app. That is the only step they type besides pairing.
+3. Prepare the runtime and run setup as described above, with `--host claude`. Pairing stays the user's private step in their own terminal.
+4. Check the connection. When the plugin's `connection_status` tool is available, call it; the tools appear by themselves within a few seconds after setup. When it is not (the desktop app connects a newly added plugin MCP server only in the next session), run the same tools from a shell in the project folder: `"<executable>" tool connection_status`, `tool messages_poll`, `tool message_send` and `tool messages_ack`, with JSON arguments on stdin, where `<executable>` is the path in the project's `.aot-runtime.json`. They follow the same rules as the MCP tools. Hook notices repeat this command when it is needed.
+
 ## Update a Claude Code project to a newer version
 
 Use this only when the user asks to update Agents over Telegram. Ordinary onboarding never moves a configured project to another runtime.

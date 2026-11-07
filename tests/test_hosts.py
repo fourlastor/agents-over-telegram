@@ -1078,3 +1078,49 @@ def test_waiting_instructions_carry_the_runtime_guidance():
     spec.loader.exec_module(launcher)
     assert launcher.RUNTIME_INSTRUCTIONS == INSTRUCTIONS
     assert launcher.WAITING_INSTRUCTIONS.endswith(INSTRUCTIONS)
+
+# ------------------------------------------------------------ inbox tools from a shell
+
+def run_tool(project, name, arguments=None, raw=None):
+    stdin = raw if raw is not None else ('' if arguments is None else json.dumps(arguments))
+    result = subprocess.run([str(RUNTIME), 'tool', name], input=stdin, capture_output=True, text=True,
+                            cwd=project, env=clean_env(), timeout=60)
+    return result.returncode, (json.loads(result.stdout) if result.stdout else None), result.stderr
+
+
+def test_tool_command_handles_the_inbox_like_the_mcp_server(tmp_path):
+    result = connected(tmp_path)
+    project = Path(result['project_dir'])
+    code, status, _ = run_tool(project, 'connection_status')
+    assert code == 0 and status['ok'] and status['result']['connected']
+    fake_message(result['state_dir'], 'hello from the group', sender=123)
+    code, page, _ = run_tool(project, 'messages_poll')
+    assert code == 0 and page['result']['message_content_trust'] == 'untrusted'
+    [delivery] = page['result']['deliveries']
+    assert delivery['text'] == 'hello from the group'
+    code, sent, _ = run_tool(project, 'message_send', {'text': 'it\'s "quoted"\nand multi-line',
+                                                         'idempotency_key': 'k1', 'reply_to': delivery['message_id']})
+    assert code == 0 and sent['result']['status'] == 'sent'
+    fake = read_private_json(Path(result['state_dir']) / 'fake-transport.json')
+    assert fake['sent'][-1]['text'].endswith('it\'s "quoted"\nand multi-line')
+    code, acked, _ = run_tool(project, 'messages_ack', {'delivery_ids': [delivery['delivery_id']],
+                                                        'lease_token': page['result']['lease_token']})
+    assert code == 0 and acked['result']['acknowledged'] == [delivery['delivery_id']]
+
+
+def test_tool_command_refuses_bad_input_without_echoing_it(tmp_path):
+    project = Path(connected(tmp_path)['project_dir'])
+    for name, raw, error in [('no_such_tool', '', 'unknown_tool'), ('message_send', '{not json', 'invalid_arguments'),
+                             ('message_send', '["a list"]', 'invalid_arguments'),
+                             ('message_send', '{"text": "missing key"}', 'invalid_arguments')]:
+        code, body, stderr = run_tool(project, name, raw=raw)
+        assert code == 1 and body == {'ok': False, 'error': body['error']} and body['error']['code'] == error
+        assert 'not json' not in stderr and 'missing key' not in json.dumps(body)
+
+
+def test_tool_command_needs_the_project_folder(tmp_path):
+    connected(tmp_path)
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    code, body, stderr = run_tool(elsewhere, 'messages_poll')
+    assert (code, body) == (1, None) and 'client_file_required' in stderr
