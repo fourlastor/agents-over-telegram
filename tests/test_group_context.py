@@ -33,7 +33,7 @@ def test_defaults_deliver_everything_from_allowed_senders_with_media(group):
     core, transport, clock, client = group
     assert core.connection_status(client)['routing'] == {
         'delivery_filter': 'all', 'capture_context': False, 'accept_media': True,
-        'wake_interval': 0, 'wake_exempt': 'addressed,owner'}
+        'wake_interval': 0, 'wake_exempt': 'addressed,owner', 'owner_notify': False}
     append(transport, 'plain owner message')
     append(transport, 'stranger message', sender=303)
     core.collect()
@@ -244,7 +244,7 @@ def test_existing_state_migrates_with_original_defaults(group):
     core = Core(core.state_dir, transport, clock=clock)
     assert core.connection_status(client)['routing'] == {
         'delivery_filter': 'all', 'capture_context': False, 'accept_media': False,
-        'wake_interval': 0, 'wake_exempt': 'addressed,owner'}
+        'wake_interval': 0, 'wake_exempt': 'addressed,owner', 'owner_notify': False}
     assert [d['text'] for d in deliveries(core, client)] == ['before upgrade']
 
 

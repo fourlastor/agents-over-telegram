@@ -162,6 +162,11 @@ class TelegramTransport:
         body, content_type = _multipart(fields, [(field, filename, mime, bytes(data))])
         return self._post(method, body, content_type, sending=True)
 
+    def forward_message(self, chat_id, from_chat_id, message_id):
+        """Forward one message, for example from a group to the owner's private chat."""
+        return self._call("forwardMessage", {"chat_id": chat_id, "from_chat_id": from_chat_id,
+                                             "message_id": message_id}, sending=True)
+
     def set_message_reaction(self, chat_id, message_id, emoji):
         """Set the bot's one standard-emoji reaction, or remove it when emoji is empty.
 
@@ -259,6 +264,7 @@ class FakeTransport:
         self.outcomes = list(outcomes or [])
         self.sent = []
         self.reactions = []
+        self.forwards = []
         self.poll_offsets = []
         self.chat_members = {}  # {str(chat_id): {str(user_id): ChatMember dict}}
         self.files = {}  # {file_id: {"content": bytes}}
@@ -336,6 +342,27 @@ class FakeTransport:
             if outcome == "crash":
                 raise SystemExit("fake crash after acceptance")
             return True
+
+    def forward_message(self, chat_id, from_chat_id, message_id):
+        with self._lock:
+            outcome = self.outcomes.pop(0) if self.outcomes else "sent"
+            if isinstance(outcome, BaseException):
+                raise outcome
+            if outcome == "reject":
+                raise TransportError(403)
+            if outcome == "not_found":
+                raise TransportError(400)
+            if outcome == "rate_limit":
+                raise TransportError(429, 30)
+            message = {"message_id": len(self.sent)+1, "chat": {"id": chat_id},
+                       "forwarded_from": {"chat_id": from_chat_id, "message_id": message_id}}
+            self.sent.append(message)
+            self.forwards.append({"chat_id": chat_id, "from_chat_id": from_chat_id, "message_id": message_id})
+            if outcome == "unknown":
+                raise UnknownSend()
+            if outcome == "crash":
+                raise SystemExit("fake crash after acceptance")
+            return copy.deepcopy(message)
 
     def get_chat_member(self, chat_id, user_id):
         with self._lock:
@@ -437,6 +464,23 @@ class FileFakeTransport:
         if outcome == "crash":
             raise SystemExit("fake crash after acceptance")
         return True
+
+    def forward_message(self, chat_id, from_chat_id, message_id):
+        with self._data() as data:
+            outcome = data["outcomes"].pop(0) if data["outcomes"] else "sent"
+            result = {"message_id": len(data["sent"])+1, "chat": {"id": chat_id},
+                      "forwarded_from": {"chat_id": from_chat_id, "message_id": message_id}}
+            if outcome not in ("reject", "rate_limit"):
+                data["sent"].append(result)
+        if outcome == "reject":
+            raise TransportError(403)
+        if outcome == "rate_limit":
+            raise TransportError(429, 30)
+        if outcome == "unknown":
+            raise UnknownSend()
+        if outcome == "crash":
+            raise SystemExit("fake crash after acceptance")
+        return result
 
     def get_chat_member(self, chat_id, user_id):
         with self._data() as data:
