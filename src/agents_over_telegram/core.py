@@ -965,7 +965,7 @@ class Core:
         message waits there like every other queued send.
         """
         self._follow_migration(db, row['chat_id'], new_chat_id)
-        db.execute("UPDATE outbox SET chat_id=? WHERE id=? AND status='queued' AND EXISTS("
+        db.execute("UPDATE outbox SET chat_id=?,reply_to=NULL WHERE id=? AND status='queued' AND EXISTS("
                    "SELECT 1 FROM bindings WHERE client_id=? AND chat_id=? AND connected=1)",
                    (new_chat_id, row['id'], row['client_id'], new_chat_id))
 
@@ -977,9 +977,14 @@ class Core:
                    'suspended=CASE WHEN suspended=? THEN NULL ELSE suspended END '
                    'WHERE client_id=? AND connected=1',
                    (new_chat_id, 'group_migrated:' + str(new_chat_id), client_id))
-        for table in ('outbox', 'reaction_outbox'):
-            db.execute(f"UPDATE {table} SET chat_id=? WHERE client_id=? AND chat_id=? AND status='queued'",
-                       (new_chat_id, client_id, old_chat_id))
+        # Message ids are per chat: the supergroup numbers its own messages, and
+        # the old group's messages stay behind in the closed group. A queued send
+        # moves without its reply link, and a queued reaction cannot move at all;
+        # in the new chat both would hit an unrelated message with the same id.
+        db.execute("UPDATE outbox SET chat_id=?,reply_to=NULL WHERE client_id=? AND chat_id=? AND status='queued'",
+                   (new_chat_id, client_id, old_chat_id))
+        db.execute("UPDATE reaction_outbox SET status='rejected',error='group_migrated',updated=? "
+                   "WHERE client_id=? AND chat_id=? AND status='queued'", (self.clock(), client_id, old_chat_id))
 
     def _route_update(self, db, update, account, now):
         update_id = update['update_id']
