@@ -9,4 +9,5 @@ outputs/
 .env
 .env.*
 .aot-profile.json
+.aot-runtime.json
 .codex/config.toml
