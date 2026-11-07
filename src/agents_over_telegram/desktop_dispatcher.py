@@ -371,6 +371,8 @@ class NativeDesktopQueue:
                     (thread_id,)).fetchone()
         except (OSError, sqlite3.Error, ValueError):
             return False
+        # thread_turns.started_at is in seconds and thread_items.created_at_ms in
+        # milliseconds (checked against a live desktop database).
         if row is None or row[0] != 'inProgress':
             return False
         activity = [value for value in (row[1], row[2] / 1000 if isinstance(row[2], (int, float)) else None)
