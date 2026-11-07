@@ -72,7 +72,7 @@ def test_reply_carries_the_quoted_message_and_its_media(group):
     assert delivery['reply_to'] == 59
     assert delivery['reply_to_message'] == {
         'message_id': 59, 'text': 'the screenshot',
-        'sender': {'id': 303, 'is_bot': False, 'username': 'someone'},
+        'sender': {'id': 303, 'is_bot': False, 'username': 'someone', 'allowed': False},
         'attachments': [{'kind': 'photo', 'file_id': 'Q', 'file_unique_id': 'uQ', 'file_size': 12}]}
     assert core.fetch_attachment(client, delivery['delivery_id'], 'uQ')['size'] == 12
 
@@ -371,3 +371,37 @@ def test_pruning_uses_the_partial_context_index(group):
     plan = rows(core, """EXPLAIN QUERY PLAN SELECT id FROM inbox WHERE context=1 AND COALESCE(event_at,created)<?
         AND rowid<(SELECT MAX(rowid) FROM inbox)""", (0,))
     assert any('inbox_context_expiry' in str(step) for step in plan)
+
+
+def test_quoted_text_is_bounded_and_marks_allowed_senders(group):
+    core, transport, clock, client = group
+    long_text = 'x' * 4096
+    append(transport, 'replying to myself', reply_to_message={
+        'message_id': 7, 'from': {'id': 101, 'is_bot': False}, 'text': long_text})
+    core.collect()
+    [delivery] = deliveries(core, client)
+    quoted = delivery['reply_to_message']
+    assert len(quoted['text']) == 1024 and quoted['truncated'] is True
+    assert quoted['sender']['allowed'] is True
+
+
+def test_forum_topic_root_is_not_quoted(group):
+    core, transport, clock, client = group
+    # In a forum, Telegram sets reply_to_message to the topic's creation message.
+    append(transport, 'in a topic', reply_to_message={
+        'message_id': 3, 'from': {'id': 101, 'is_bot': False},
+        'forum_topic_created': {'name': 'Topic', 'icon_color': 1}})
+    core.collect()
+    [delivery] = deliveries(core, client)
+    assert 'reply_to_message' not in delivery and delivery['reply_to'] == 3
+
+
+def test_a_full_page_of_long_quoted_replies_fits_the_result_cap(group):
+    from agents_over_telegram.mcp_server import _result_body
+    core, transport, clock, client = group
+    wide = '\U0001F600' * 4096
+    for _ in range(50):
+        append(transport, wide, reply_to_message={'message_id': 7, 'from': {'id': 303, 'is_bot': False}, 'text': wide})
+    core.collect()
+    body = _result_body(core.poll(client, limit=50))
+    assert body['ok'] is True and len(body['result']['deliveries']) == 50

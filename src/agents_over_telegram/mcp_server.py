@@ -296,8 +296,9 @@ def _result_body(value: Any) -> dict[str, Any]:
     # Core methods return dictionaries; preserve compatibility for a list result.
     body = {"ok": True, "result": value if isinstance(value, dict) else {"items": value}}
     encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    # A maximum page may contain 50 texts of 4096 four-byte UTF-8 characters.
-    if len(encoded.encode("utf-8")) > 1024 * 1024:
+    # A maximum page may contain 50 texts of 4096 four-byte UTF-8 characters,
+    # each with a quoted reply of up to 1024 more (about 1 MB), plus metadata.
+    if len(encoded.encode("utf-8")) > 2 * 1024 * 1024:
         return _error_body("internal_error")
     return body
 

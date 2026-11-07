@@ -163,12 +163,21 @@ def _forward_origin(msg):
     return found
 
 
-def _quoted_message(msg, accept_media):
+QUOTED_TEXT_LIMIT = 1024
+
+
+def _quoted_message(msg, accept_media, allowed_sender):
     """The message a reply quotes, so an agent can read what was replied to.
 
     Telegram includes the replied-to message in the update. Its text and media
     are kept like a delivered message's: media only when the connection accepts
-    it, otherwise only the media kinds. None when nothing readable is quoted.
+    it, otherwise only the media kinds. None when nothing readable is quoted, for
+    example a forum topic's creation message, which Telegram sets as the replied
+    message of every message in that topic. The text is cut to
+    QUOTED_TEXT_LIMIT characters, so a full poll page stays under the result
+    cap. ``allowed_sender`` tells whether the quoted sender is on the allow
+    list: an allowed sender quoting someone else passes that content on, like
+    a forward.
     """
     quoted = _mapping(msg.get('reply_to_message'))
     if not _integer(quoted.get('message_id')):
@@ -177,11 +186,15 @@ def _quoted_message(msg, accept_media):
     if text is None:
         return None
     sender = _mapping(quoted.get('from'))
-    item = {'message_id': quoted['message_id'], 'text': text,
-            'sender': {'id': sender['id'] if _integer(sender.get('id')) else None,
-                       'is_bot': sender.get('is_bot') is True,
+    sender_id = sender['id'] if _integer(sender.get('id')) else None
+    is_bot = sender.get('is_bot') is True
+    item = {'message_id': quoted['message_id'], 'text': text[:QUOTED_TEXT_LIMIT],
+            'sender': {'id': sender_id, 'is_bot': is_bot,
                        'username': _bounded(sender.get('username', ''), 64)
-                       if isinstance(sender.get('username'), str) else ''}}
+                       if isinstance(sender.get('username'), str) else '',
+                       'allowed': bool(sender_id is not None and allowed_sender(sender_id, is_bot))}}
+    if len(text) > QUOTED_TEXT_LIMIT:
+        item['truncated'] = True
     if attachments and accept_media:
         item['attachments'] = attachments
     elif attachments:
@@ -1171,7 +1184,9 @@ class Core:
             payload['attachments'] = attachments
         if media_refused:
             payload['media_refused'] = media_refused
-        quoted = _quoted_message(msg, binding['accept_media'])
+        quoted = _quoted_message(msg, binding['accept_media'], lambda quoted_id, quoted_bot: db.execute(
+            'SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?',
+            (binding['client_id'], quoted_id, int(quoted_bot))).fetchone() is not None)
         if quoted is not None:
             payload['reply_to_message'] = quoted
         forwarded = _forward_origin(msg)
