@@ -116,9 +116,11 @@ The relay never expires an unresolved wake by itself. It settles one case on its
 | What the records show | Outcome |
 | --- | --- |
 | The wake notice still waits in `queue_1.sqlite` for that chat. | The listener keeps that queue ID and retries the wake URL, as for `wait_for_desktop_wake`. |
-| The chat in `thread_history_1.sqlite` holds the notice as a user message created after the enqueue started. | `accepted`. |
+| The chat in `thread_history_1.sqlite` holds the notice as a user message. | `accepted`. |
 | Neither database has it. | `failed`. The notice never landed, so the next pass enqueues it again. |
 | Either database cannot be read. | Nothing changes. The listener writes `desktop_unknown_enqueue_unsettled`, and the warning above stays. |
+
+Only a notice created after this wake's notification counts. The Telegram message that caused the wake was collected before that time, so a turn started by such a notice reads it. A notice from an earlier wake could have been read before the message arrived, so it never counts. If the desktop moves the notice from the queue into the chat between the two reads, the listener finds neither and enqueues the notice again. The agent then gets the same fixed notice twice, which does no harm. The check assumes that only `relay-desktop` writes this notice text into a desktop chat.
 
 Each settled case writes a `desktop_unknown_enqueue_settled` record. A Codex app restart during an enqueue is the usual cause of this case.
 

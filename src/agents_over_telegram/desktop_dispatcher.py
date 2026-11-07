@@ -50,8 +50,6 @@ STUCK_WAKE_CHECK_SECONDS = 60
 # An enqueue whose outcome is unknown is checked against the desktop's own
 # records once its child process has surely ended (it is killed after 30 s).
 UNKNOWN_ENQUEUE_CHECK_AFTER_SECONDS = 120
-# Allow for clock differences between the handoff record and desktop records.
-UNKNOWN_ENQUEUE_CLOCK_SLACK_SECONDS = 5
 STUCK_WAKE_WARNING_REPEAT_SECONDS = 3600
 STUCK_WAKE_MESSAGES = {
     'review_uncertain_wake': (
@@ -318,10 +316,22 @@ class NativeDesktopQueue:
         ('absent', None) when neither database has it since ``since``. Raises
         DesktopQueueError when either database cannot be read, so an unreadable
         record never counts as absent.
+
+        ``since`` is the creation time of the notification being settled. Its
+        Telegram message was already collected then, so any turn that a notice
+        from after that time started will see it. A notice from an earlier
+        notification may have polled before the message arrived, so it must not
+        match. Both clocks are this machine's, so no slack is added.
+
+        The two databases are read one after the other. If the desktop moves the
+        item from the queue to the chat between the reads, both miss it and the
+        wake is enqueued again: the agent gets a second, identical notice, which
+        is the accepted cost. The check assumes only ``relay-desktop`` writes
+        WAKE_NOTICE into a desktop chat.
         """
         if not _uuid(thread_id):
             raise DesktopQueueError('desktop_queue_target_mismatch')
-        since_ms = int((since - UNKNOWN_ENQUEUE_CLOCK_SLACK_SECONDS) * 1000)
+        since_ms = math.floor(since * 1000)
         try:
             with sqlite3.connect((self.home / 'queue_1.sqlite').as_uri() + '?mode=ro', uri=True) as db:
                 row = db.execute('SELECT id FROM queued_items WHERE thread_id=? AND created_at_ms>=? '
@@ -385,7 +395,7 @@ class DesktopHandoffs:
         """Handoffs whose enqueue outcome was unknown and that still have no receipt."""
         with self.core._db() as db:
             return [dict(row) for row in db.execute('''SELECT n.id AS notification_id,
-                n.client_id,n.thread_id,n.project_dir,h.updated AS started
+                n.client_id,n.thread_id,n.project_dir,n.created AS since
                 FROM relay_desktop_handoffs h JOIN relay_notifications n ON n.id=h.notification_id
                 WHERE h.phase='enqueuing' AND h.queue_id IS NULL AND n.status='uncertain'
                 AND h.updated<=? ORDER BY n.created,n.id''', (older_than,))]
@@ -463,7 +473,7 @@ def run_desktop_dispatcher(core, store, *, codex_binary=None, codex_home=None,
         older_than = core.clock() - UNKNOWN_ENQUEUE_CHECK_AFTER_SECONDS
         for event in handoffs.unknown_enqueues(older_than):
             try:
-                found, queue_id = transport.notice_outcome(event['thread_id'], event['started'])
+                found, queue_id = transport.notice_outcome(event['thread_id'], event['since'])
                 if found == 'queued':
                     handoffs.queued(event, queue_id)
                     outcome, receipt = 'queued', {'queue_id': queue_id}

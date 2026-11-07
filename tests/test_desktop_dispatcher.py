@@ -571,6 +571,8 @@ def records_reader(home):
     ('queued', ('queued', QUEUE_ID)),
     ('delivered', ('delivered', None)),
     ('older_notice', ('absent', None)),
+    ('previous_wake_just_before', ('absent', None)),
+    ('same_millisecond', ('delivered', None)),
     ('other_thread', ('absent', None)),
     ('agent_echo', ('absent', None)),
 ])
@@ -584,6 +586,13 @@ def test_notice_outcome_reads_the_desktop_records(tmp_path, case, expected):
         chat.append((ALPHA_THREAD, 'userMessage', desktop.WAKE_NOTICE, now))
     elif case == 'older_notice':
         chat.append((ALPHA_THREAD, 'userMessage', desktop.WAKE_NOTICE, int(since * 1000) - 60_000))
+    elif case == 'previous_wake_just_before':
+        # The previous wake's notice, 3 s earlier: its turn may have polled
+        # before this wake's message arrived, so it must not count.
+        chat.append((ALPHA_THREAD, 'userMessage', desktop.WAKE_NOTICE, int(since * 1000) - 3_000))
+        queued.append((QUEUE_ID, ALPHA_THREAD, desktop.WAKE_NOTICE, int(since * 1000) - 3_000))
+    elif case == 'same_millisecond':
+        chat.append((ALPHA_THREAD, 'userMessage', desktop.WAKE_NOTICE, int(since * 1000)))
     elif case == 'other_thread':
         queued.append((QUEUE_ID, other, desktop.WAKE_NOTICE, now))
         chat.append((other, 'userMessage', desktop.WAKE_NOTICE, now))
