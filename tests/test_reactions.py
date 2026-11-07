@@ -24,6 +24,8 @@ def message(number, text, chat=-100, topic=None, sender=101, bot=False, **fields
                'from': {'id': sender, 'is_bot': bot, 'username': 'participant'}, 'text': text}
     if topic is not None:
         payload['message_thread_id'] = topic
+        payload['chat']['is_forum'] = True
+        payload['is_topic_message'] = True
     payload.update(fields)
     return {'update_id': number, 'message': payload}
 

@@ -30,6 +30,8 @@ def update(number, text, chat=-100, topic=None, sender=101, **fields):
                'from': {'id': sender, 'is_bot': False, 'username': 'owner'}, 'text': text}
     if topic is not None:
         message['message_thread_id'] = topic
+        message['chat']['is_forum'] = True
+        message['is_topic_message'] = True
     message.update(fields)
     return {'update_id': number, 'message': message}
 

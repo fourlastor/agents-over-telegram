@@ -28,6 +28,8 @@ def update(number, text, chat=-100, topic=None, sender=101, bot=False, **fields)
                'from': {'id': sender, 'is_bot': bot, 'username': 'participant'}, 'text': text}
     if topic is not None:
         message['message_thread_id'] = topic
+        message['chat']['is_forum'] = True
+        message['is_topic_message'] = True
     message.update(fields)
     return {'update_id': number, 'message': message}
 
@@ -162,6 +164,28 @@ def test_interleaved_topics_replay_restart_and_pagination(env):
     assert [m['text'] for m in restarted.poll(b)['deliveries']] == ['b1']
     assert transport.poll_offsets[-1] == result['cursor']
     assert rows(core, 'SELECT count(*) FROM inbox')[0][0] == 3
+
+
+def test_reply_in_a_supergroup_without_topics_reaches_the_group_binding(env):
+    # Telegram sets message_thread_id on every reply in a supergroup, even
+    # without forum topics: it names the first message of the reply chain.
+    core, transport, _ = env
+    client, _ = bind(core, transport)
+    append(transport, 'plain reply', message_thread_id=10,
+           reply_to_message={'message_id': 10, 'chat': {'id': -100, 'type': 'supergroup'}})
+    assert core.collect()['updates'] == 1
+    assert [m['text'] for m in core.poll(client)['deliveries']] == ['plain reply']
+    assert rows(core, 'SELECT count(*) FROM unmatched')[0][0] == 0
+
+
+def test_pairing_by_reply_in_a_supergroup_without_topics_binds_the_whole_group(env):
+    core, transport, _ = env
+    credentials = core.create_client('Alpha')
+    pairing = core.connection_begin(credentials['client_id'])
+    append(transport, pairing['command'], message_thread_id=10)
+    core.collect()
+    core.confirm_pairing(pairing['pairing_id'])
+    assert rows(core, 'SELECT thread_id FROM bindings')[0][0] == 0
 
 
 def test_leases_expiry_ack_idempotency_and_cross_client_isolation(env):

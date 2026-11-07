@@ -964,7 +964,10 @@ class Core:
             return
         chat = _mapping(msg.get('chat'))
         chat_id = chat.get('id')
-        thread_id = msg.get('message_thread_id', 0)
+        # Telegram also sets message_thread_id on replies in a supergroup that is
+        # not a forum: it is the first message of the reply chain, not a topic.
+        # Only a forum has topics, so only a forum's thread id selects a binding.
+        thread_id = msg.get('message_thread_id', 0) if chat.get('is_forum') is True else 0
         if not _integer(chat_id) or not _integer(thread_id) or thread_id < 0 or chat.get('type') not in ('group', 'supergroup'):
             self._unmatched(db, update_id, None, 'unsupported_destination', now)
             return

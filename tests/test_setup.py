@@ -37,6 +37,8 @@ def append_pair(result, *, sender=123, chat=-100, thread=None):
                'from': {'id': sender, 'is_bot': False}, 'text': result['pairing_command']}
     if thread is not None:
         message['message_thread_id'] = thread
+        message['chat']['is_forum'] = True
+        message['is_topic_message'] = True
     fake['updates'].append({'update_id': index, 'message': message})
     write_private_json(path, fake, overwrite=True)
 
