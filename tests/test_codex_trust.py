@@ -112,6 +112,10 @@ def test_poll_and_instructions_warn_only_for_a_codex_project_needing_approval(tm
     assert mcp_server._codex_hooks_warning(client) == codex_trust.approve_hint('cli')
     assert mcp_server._codex_hooks_warning(tmp_path / 'other.json') is None
     assert mcp_server._codex_hooks_warning(None) is None
+    monkeypatch.setattr(mcp_server, '_codex_host', lambda: 'none')
+    assert mcp_server._codex_hooks_warning(client) is None
+    monkeypatch.setattr(mcp_server, '_codex_host', lambda: None)
+    assert mcp_server._codex_hooks_warning(client) == codex_trust.approve_hint(None)
     monkeypatch.setattr(codex_trust, 'status', lambda: {'status': 'approved'})
     assert mcp_server._codex_hooks_warning(client) is None
 
@@ -124,7 +128,10 @@ def test_the_hint_names_the_codex_host_that_started_the_server():
     other = {10: (9, '/usr/bin/python3'), 9: (1, '/Applications/Claude.app/Contents/MacOS/claude')}
     assert codex_trust.codex_host(10, desktop.get) == 'desktop'
     assert codex_trust.codex_host(10, cli.get) == 'cli'
-    assert codex_trust.codex_host(10, other.get) is None
+    assert codex_trust.codex_host(10, other.get) == 'none'
+    assert codex_trust.codex_host(10, {}.get) is None  # unreadable processes
+    linux = {10: (9, '/usr/bin/python3'), 9: (1, 'codex-x86_64-u')}  # comm cut to 15 characters
+    assert codex_trust.codex_host(10, linux.get) == 'cli'
     assert '/hooks' in codex_trust.approve_hint('cli') and 'desktop' not in codex_trust.approve_hint('cli')
     assert 'desktop app' in codex_trust.approve_hint('desktop') and '/hooks' not in codex_trust.approve_hint('desktop')
     generic = codex_trust.approve_hint(None)

@@ -440,9 +440,12 @@ def _codex_hooks_warning(client_file: Any) -> str | None:
     try:
         if client_file is None or not codex_trust.codex_project_uses(Path(client_file)):
             return None
-        if codex_trust.status()['status'] != 'needs_approval':
+        host = _codex_host()
+        # A server started by another host (for example Claude Code in a project
+        # set up for both) has nothing to approve in Codex.
+        if host == 'none' or codex_trust.status()['status'] != 'needs_approval':
             return None
-        return codex_trust.approve_hint(_codex_host())
+        return codex_trust.approve_hint(host)
     except Exception:
         return None
 

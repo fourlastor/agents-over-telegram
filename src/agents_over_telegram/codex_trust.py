@@ -175,7 +175,11 @@ def _process(pid: int) -> tuple[int, str] | None:
 
 
 def codex_host(pid: int | None = None, process=_process) -> str | None:
-    """'desktop' or 'cli' for the Codex that started this process, or None when unclear.
+    """'desktop' or 'cli' for the Codex that started this process.
+
+    'none' means the walk reached the top without any Codex process, so this
+    server does not run under Codex (for example under Claude Code in a project
+    set up for both). None means the processes could not be read.
 
     Walks the parent processes. The desktop app runs its bundled Codex inside an
     application bundle (for example ChatGPT.app or Codex.app); the CLI runs a
@@ -185,13 +189,13 @@ def codex_host(pid: int | None = None, process=_process) -> str | None:
     saw_codex = False
     for _ in range(12):
         if current <= 1:
-            break
+            return 'cli' if saw_codex else 'none'
         found = process(current)
         if found is None:
             break
         parent, command = found
         name = os.path.basename(command)
-        if name.lower() == 'codex':
+        if name.lower().startswith('codex'):
             saw_codex = True
             if '.app/Contents/' in command and any(
                     bundle in command for bundle in ('/ChatGPT.app/', '/Codex.app/')):
