@@ -159,6 +159,17 @@ def parser():
     register = sub.add_parser("account-register", help="Prompt privately for one bot token, validate without polling")
     register.add_argument("--receiver-handoff-confirmed", action="store_true", help="Assert other receivers are stopped; webhooks are never changed")
     sub.add_parser("account-status")
+    judge_config = sub.add_parser("judge-config", help="Owner only: configure, show or remove the decision model "
+                                                       "for the optional model-judged wake decision "
+                                                       "(delivery-settings --model-judge)")
+    judge_config.add_argument("action", choices=["set", "status", "clear"])
+    judge_config.add_argument("--endpoint", help="System One decision endpoint: Jev, Cloudflare Clef or a "
+                                                 "self-hosted Clef; https, or http to this computer only")
+    judge_config.add_argument("--model", help="Model name the endpoint expects, for example jev-latest or clef-flash")
+    judge_config.add_argument("--threshold", type=float, default=0.5,
+                              help="Deliver when the model's probability for yes is at least this (0.5 to 0.99)")
+    judge_config.add_argument("--key", action="store_true",
+                              help="Ask for an API key in a hidden prompt; leave it out for a local model")
     tool = sub.add_parser("tool", help="Run one Telegram tool for this project's agent, as the MCP server does; "
                                        "JSON arguments on stdin")
     tool.add_argument("name", help="Tool name, for example messages_poll, message_send or messages_ack")
@@ -217,6 +228,10 @@ def parser():
             command.add_argument("--owner-notify", dest="owner_notify", choices=["on", "off"],
                                  help="on: let this agent send private notices to the owner with owner_notify "
                                       "(at most 3 per hour and 10 per day; off by default)")
+            command.add_argument("--model-judge", dest="model_judge", choices=["on", "off"],
+                                 help="on: with --filter addressed, ask a decision model whether a person's message "
+                                      "kept as context is meant for this agent, and deliver it if so; sends recent "
+                                      "group messages to the model; needs judge-config set (off by default)")
         if name == "bot-exchange-policy":
             command.add_argument("--sender-id", type=int, required=True)
             change = command.add_mutually_exclusive_group()
@@ -324,6 +339,26 @@ def register_account(core, state_dir, fake, receiver_handoff_confirmed):
     return {"registered": True, "bot_id": bot["id"], "username": bot["username"], "mode": "fake" if fake else "live"}
 
 
+def judge_config(state_dir, args):
+    """Configure, show or remove the decision model; the key is never printed."""
+    from . import judge
+    if args.action != "set":
+        if args.endpoint or args.model or args.key or args.threshold != judge.DEFAULT_THRESHOLD:
+            raise CredentialError("judge_options_only_with_set")
+        return judge.config_status(state_dir) if args.action == "status" else {"cleared": judge.clear_config(state_dir)}
+    if not args.endpoint or not args.model:
+        raise CredentialError("judge_endpoint_and_model_required")
+    api_key = ""
+    if args.key:
+        if not sys.stdin.isatty():
+            raise CredentialError("private_terminal_required")
+        api_key = getpass.getpass("Decision model API key (hidden, stored locally): ")
+        if not api_key.strip():
+            raise CredentialError("invalid_judge_key")
+    judge.store_config(state_dir, args.endpoint, args.model, api_key, args.threshold)
+    return judge.config_status(state_dir)
+
+
 def _confirm_operator(summary):
     """Ask the human at a terminal before raising or changing send limits.
 
@@ -357,7 +392,7 @@ def run(args):
     state_dir = private_directory(args.state_dir)
     _mode(state_dir, args.fake)
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
-                and args.command not in {"history", "status", "account-status", "bot-exchange-policy", "delivery-settings", "watch",
+                and args.command not in {"history", "status", "account-status", "judge-config", "bot-exchange-policy", "delivery-settings", "watch",
                                          "conversation-budget", "exchange-limits"}))
     if args.command.startswith("relay-"):
         from .relay import RelayStore
@@ -403,6 +438,8 @@ def run(args):
                               include_pending=args.include_pending)
     if args.command == "account-register":
         return register_account(core, state_dir, args.fake, args.receiver_handoff_confirmed)
+    if args.command == "judge-config":
+        return judge_config(state_dir, args)
     if args.command == "client-create":
         if args.client_file.exists():
             raise CredentialError("client_file_exists")
@@ -462,12 +499,17 @@ def run(args):
     if args.command == "bot-exchange-policy":
         return core.bot_exchange_policy(client_id, args.sender_id, enabled=args.exchange_enabled)
     if args.command == "delivery-settings":
+        if args.model_judge == "on":
+            _confirm_operator("With the addressed filter, recent messages from this group or topic will be sent "
+                              "to the configured decision model (aot judge-config status) to decide whether a "
+                              "person's message is meant for this agent.")
         return core.delivery_settings(client_id, delivery_filter=args.delivery_filter,
                                       capture_context=None if args.capture_context is None else args.capture_context == "on",
                                       accept_media=None if args.accept_media is None else args.accept_media == "on",
                                       reaction_wake=args.reaction_wake, wake_interval=args.wake_interval,
                                       wake_exempt=args.wake_exempt,
-                                      owner_notify=None if args.owner_notify is None else args.owner_notify == "on")
+                                      owner_notify=None if args.owner_notify is None else args.owner_notify == "on",
+                                      model_judge=None if args.model_judge is None else args.model_judge == "on")
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command == "conversation-budget":
