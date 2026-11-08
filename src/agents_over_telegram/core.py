@@ -166,6 +166,11 @@ def _forward_origin(msg):
 
 QUOTED_TEXT_LIMIT = 1024
 
+# A person's message that continues their own addressed message counts as
+# addressed when it comes at most this many seconds later.
+FOLLOW_UP_WINDOW = 120.0
+_MENTION = re.compile(r'@([A-Za-z0-9_]{3,32})(?!\w)')
+
 
 def _quoted_message(msg, accept_media, allowed_sender):
     """The message a reply quotes, so an agent can read what was replied to.
@@ -1263,10 +1268,17 @@ class Core:
                 (binding['client_id'], sender_id)).fetchone():
             db.execute('INSERT OR IGNORE INTO bot_exchange_members VALUES(?,?,?)',
                        (conversation, binding['client_id'], sender_id))
+        addressed = _addressed(msg, text, account)
+        follow_up = (not addressed and allowed is not None and kind == 'message' and not sender['is_bot']
+                     and self._follows_up(db, binding['client_id'], msg, text, account, sender_id,
+                                          chat_id, thread_id, update_id))
         payload = {'origin': 'telegram', 'kind': 'edited' if kind == 'edited_message' else 'message', 'update_id': update_id, 'message_id': msg['message_id'], 'chat_id': chat_id, 'thread_id': thread_id or None, 'sender': {'id': sender_id, 'is_bot': sender['is_bot'], 'username': _bounded(sender.get('username', ''), 64)}, 'text': text, 'reply_to': reply_to if _integer(reply_to) else None,
-                   # Mentions the bot, replies to it or addresses a command to it;
-                   # wake batching announces these at once.
-                   'addressed': _addressed(msg, text, account)}
+                   # Mentions the bot, replies to it, addresses a command to it or
+                   # is a person's follow-up to such a message; wake batching
+                   # announces these at once.
+                   'addressed': addressed or follow_up}
+        if follow_up:
+            payload['follow_up'] = True
         if attachments:
             payload['attachments'] = attachments
         if media_refused:
@@ -1300,6 +1312,46 @@ class Core:
             return
         self._keep_context(db, binding['client_id'], f'tg:{update_id}', {**payload, 'context_reason': reason},
                            conversation, now, event_at)
+
+    def _follows_up(self, db, client_id, msg, text, account, sender_id, chat_id, thread_id, update_id):
+        """True when a person's message continues their own message to this agent.
+
+        A person often replies to an agent and then adds a message or two to
+        expand the answer. Such a message counts as addressed when it mentions no
+        other @username and either replies to the person's own message that was
+        delivered as addressed, or comes at most FOLLOW_UP_WINDOW seconds after
+        the person's previous message in this chat or topic, and that message
+        was delivered as addressed. A reply to anyone else's message never counts.
+        """
+        own = account['username'].lower()
+        if any(name.lower() != own for name in _MENTION.findall(text)):
+            return False
+
+        def delivered_addressed(row):
+            return row is not None and not row['context'] and json.loads(row['payload']).get('addressed') is True
+
+        replied = _mapping(msg.get('reply_to_message'))
+        # In a forum topic, Telegram marks a plain message as a reply to the
+        # topic's first message; that is not a reply to anyone.
+        if replied and 'forum_topic_created' not in replied and not (thread_id and replied.get('message_id') == thread_id):
+            if _mapping(replied.get('from')).get('id') != sender_id or not _integer(replied.get('message_id')):
+                return False
+            return delivered_addressed(db.execute(
+                'SELECT context,payload FROM inbox WHERE client_id=? AND tg_chat_id=? AND tg_message_id=? '
+                "AND json_extract(payload,'$.kind')='message' ORDER BY created DESC,rowid DESC LIMIT 1",
+                (client_id, chat_id, replied['message_id'])).fetchone())
+        date = msg.get('date')
+        if not _integer(date) or not 0 < date < 2 ** 62:
+            return False
+        previous = db.execute(
+            'SELECT context,payload FROM inbox WHERE client_id=? AND tg_chat_id=? AND event_key<>? '
+            "AND json_extract(payload,'$.kind')='message' AND json_extract(payload,'$.sender.id')=? "
+            "AND COALESCE(json_extract(payload,'$.thread_id'),0)=? "
+            'AND COALESCE(event_at,created) BETWEEN ? AND ? '
+            'ORDER BY COALESCE(event_at,created) DESC,rowid DESC LIMIT 1',
+            (client_id, chat_id, f'tg:{update_id}', sender_id, thread_id or 0,
+             date - FOLLOW_UP_WINDOW, date)).fetchone()
+        return delivered_addressed(previous)
 
     def _route_reaction(self, db, update_id, reaction, account, now):
         """Deliver one message_reaction update under the same rules as messages.
