@@ -446,3 +446,19 @@ def test_judge_skips_while_another_collector_runs(judged):
     assert judge.calls == [] and queue(core) == [('queued', None)]
     core.judge()
     assert queue(core) == [('yes', None)]
+
+
+def test_a_model_yes_does_not_open_the_follow_up_window(judged):
+    core, transport, clock, client = judged
+    clock.advance(5000)
+    now = int(clock.now) - 100  # Telegram dates in the past
+    core._judge = FakeJudge(True, False)
+    append(transport, 'yes, put it back afterwards', date=now)
+    core.collect(judge=True)
+    append(transport, 'Daniele, climbing on Thursday?', date=now + 20)
+    core.collect(judge=True)
+    # The second message is judged on its own, not delivered as a follow-up.
+    assert len(core._judge.calls) == 2
+    assert [(d['text'], d.get('follow_up')) for d in deliveries(core, client)] == [
+        ('yes, put it back afterwards', None)]
+    assert queue(core) == [('yes', None), ('no', None)]
