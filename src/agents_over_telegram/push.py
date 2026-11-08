@@ -242,7 +242,7 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
     while True:
         if keep_running is not None and not keep_running():
             return {'events': events, 'reason': 'parent_exited'}
-        waited = False
+        waited = collected = False
         if collect and clock() >= next_collect:
             timeout = poll_timeout
             if deadline is not None:
@@ -250,7 +250,9 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
                 timeout = max(0, min(timeout, int(deadline - clock())))
             started = clock()
             try:
-                result = core.collect(timeout=timeout, judge=True)
+                # Judged after the announcement below, so a message that addresses
+                # the agent never waits on the optional model judge.
+                result = core.collect(timeout=timeout)
             except (CoreError, CredentialError, TransportError):
                 # The core records intake errors; queued local work stays usable.
                 # Back off so a broken connection is not retried every interval.
@@ -258,19 +260,24 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
                 next_collect = clock() + min(COLLECT_BACKOFF_MAX, COLLECT_BACKOFF * 2 ** min(failures - 1, 16))
             else:
                 if result.get('status') == 'ok':
-                    failures = 0
+                    failures, collected = 0, True
                     # Only a poll that really blocked replaces the pacing sleep.
                     # Fake transports and immediate answers return at once.
                     waited = clock() - started >= interval
-        try:
-            event = claim_new(core, client_id, 'watch')
-        except CoreError as error:
-            if error.code in FATAL_CODES:
-                return stopped(error.code)
-            event = None
-        if event is not None:
-            emit(event)
-            events += 1
+        for judging in (False, True):
+            if judging:
+                if not collected:
+                    break
+                core.judge()  # a "yes" becomes a delivery, announced right after
+            try:
+                event = claim_new(core, client_id, 'watch')
+            except CoreError as error:
+                if error.code in FATAL_CODES:
+                    return stopped(error.code)
+                event = None
+            if event is not None:
+                emit(event)
+                events += 1
         if deadline is not None and clock() >= deadline:
             return {'events': events, 'reason': 'duration_elapsed'}
         if not waited:

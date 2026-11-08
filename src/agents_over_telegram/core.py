@@ -1770,6 +1770,21 @@ class Core:
                 'history': [entry for _, _, entry in earlier[-self.JUDGE_HISTORY:]],
                 'candidate': {'sender': person(payload.get('sender')), 'text': payload.get('text')}}
 
+    def judge(self):
+        """Run the optional model judge once, outside a collection.
+
+        A single-threaded listener collects without judging, announces what
+        arrived, then calls this, so a message that addresses the agent never
+        waits on a model call. It skips when another collector holds the lock.
+        """
+        with self._lock('collector') as acquired:
+            if not acquired:
+                return
+            try:
+                self._judge_pending()
+            except Exception:
+                pass
+
     def _judge_pending(self):
         """Ask the model about queued context messages; never fails collection.
 

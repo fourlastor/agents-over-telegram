@@ -409,3 +409,40 @@ def test_turning_the_judge_on_needs_the_owner_at_a_terminal(env, monkeypatch):
     with pytest.raises(CredentialError, match='operator_confirmation_required'):
         run(args)
     assert core.delivery_settings(client)['model_judge'] is False
+
+
+def test_the_watch_loop_announces_before_judging_and_right_after_a_yes(judged):
+    from agents_over_telegram import push
+    from test_push import LoopClock
+    core, transport, clock, client = judged
+    events = []
+
+    class OrderJudge(FakeJudge):
+        def __call__(self, **context):
+            # The direct mention was already announced when the model is asked.
+            assert [event['new'] for event in events] == [1]
+            return super().__call__(**context)
+
+    core._judge = judge = OrderJudge(True)
+    append(transport, f'@{transport.username} please look')
+    append(transport, 'and the second part')
+    loop = LoopClock()
+    push.watch(core, client, events.append, collect=True, duration=1, interval=2, poll_timeout=0,
+               clock=loop, sleep=loop.sleep)
+    assert len(judge.calls) == 1
+    assert [event['new'] for event in events] == [1, 1]
+    texts = [d['text'] for d in deliveries(core, client)]
+    assert texts == [f'@{transport.username} please look', 'and the second part']
+
+
+def test_judge_skips_while_another_collector_runs(judged):
+    core, transport, clock, client = judged
+    core._judge = judge = FakeJudge(True)
+    append(transport, 'plain message')
+    core.collect()
+    with core._lock('collector') as acquired:
+        assert acquired
+        core.judge()
+    assert judge.calls == [] and queue(core) == [('queued', None)]
+    core.judge()
+    assert queue(core) == [('yes', None)]
