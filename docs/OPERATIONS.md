@@ -193,6 +193,7 @@ In a busy shared group, the owner can deliver only messages addressed to this ag
 - `--filter addressed` delivers an allowed sender's message only when it mentions the shared bot (`@YourBotUsername`), replies to one of the bot's messages, or carries a command addressed to it (`/review@YourBotUsername`). An edit of a delivered message is still delivered. Other messages from allowed senders are kept as context. `--filter all` restores the default.
 - A person often replies to an agent and then adds a message to expand the answer. A person's message (not a bot's) also counts as addressed when it mentions no other `@username` and either replies to their own message that was delivered as addressed, or comes at most 2 minutes after their last message that directly addressed the agent in the same chat or topic, and their previous message there was delivered as addressed. Follow-ups do not extend the 2 minutes. A reply to anyone else's message never counts. Such a delivery has `follow_up: true`.
 - Agents in a group should therefore @-mention another agent's bot, or reply to one of its messages, to reach it. Writing the agent's name as plain text does not reach it. The MCP server tells agents this.
+- `--model-judge on` adds an optional [model-judged wake decision](#model-judged-wake-decision) for the messages these rules keep as context.
 - `--context on` also keeps messages from senders that are **not** allowed, as context only. It never allows those senders: their messages are not delivered, cannot pause the connection and cannot pair. `--context off` stops capturing; context already captured stays until it expires.
 - `--reaction-wake own_messages|all|none` decides which incoming reactions from allowed senders are delivered and can wake this agent. The default `own_messages` delivers only reactions on messages this agent published; the others are kept as context. See [message reactions](REACTIONS.md#wake-policy).
 
@@ -369,11 +370,26 @@ These are alternatives, not a sequence. `accepted` records a verified publicatio
 
 The owner may omit `--client-file` to flush due sends across all clients. Flush attempts up to 20 due queued records; it never retries records still marked `unknown`. `collect` only takes in updates and does not flush the outbox. There is no timer: without a later poll/send/flush call, a delayed queued send remains queued. Neither a timeout nor an absent recent update proves Telegram rejected a publication. There is no exactly-once Telegram guarantee.
 
+### Model-judged wake decision
+
+The rules above cannot catch every message meant for an agent, for example a person who answers the agent's question after a pause, without replying or mentioning the bot. With `--filter addressed`, the owner can let a small model judge those messages:
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" judge-key set
+"$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --model-judge on
+```
+
+- `judge-key set` asks for an Anthropic API key in a hidden terminal prompt and stores it in `judge.json` in the private state directory, like the bot token. It never appears in tool arguments, tool results or status. `--model` chooses another model; the default is `claude-haiku-5-5`. `judge-key status` shows whether a key is stored and for which model, and `judge-key clear` deletes it. One key serves every connection on this computer that turns the judge on.
+- `--model-judge on` is off by default and set per connection. It asks you to type `yes` at a terminal, because it sends group text to Anthropic's API: the agent's label and bot username, up to 8 earlier messages from the same chat or topic (this agent's own posts included, each cut to 600 characters), and the message itself. `--model-judge off` stops it.
+- Only a person's new message with text that the addressed filter kept as context is judged. Bot messages, edits, messages from senders who are not allowed, and messages that already count as addressed are never sent.
+- When the model answers yes, the message becomes a normal delivery with `addressed: true` and `addressed_by: "model"`, so wake batching announces it at once. Otherwise it stays context. A timeout (8 seconds), an API error, a missing key or an unclear answer also keeps it as context; AOT never retries a judgment.
+- The collector judges at most 3 messages per collection, each within 5 minutes of its arrival, and at most 60 per connection in any rolling hour and 300 in any rolling day. Messages over a limit stay context. Message text is untrusted for the model as for the agent: a message that talks the model into a yes only wakes the agent, and its text is still collaboration data.
+
 ## Credentials and stored data
 
 This MVP uses a protected-file fallback, not a system keyring. The state directory and client-file parent directories are owned by the current OS user and restricted to mode `0700`; credentials and client files are mode `0600`. Reads reject unsafe owners/modes, symlinks, hard links and malformed or oversized JSON. Diagnostic messages use fixed codes and do not include token-bearing request URLs or raw response bodies.
 
-The bot token lives in `credentials.json` under the private state root. Each client capability lives in its own private JSON file. The database contains routing records, message text, queues and outbox history, so protect it and its backups as private data too. Do not place any of these files in a repository, share them as plugin resources, or inspect their contents through a model. At-rest encryption and OS-keyring integration are not implemented. A malicious process running as the same OS user is outside this isolation boundary.
+The bot token lives in `credentials.json` under the private state root. The optional [model judge](#model-judged-wake-decision) key lives in `judge.json` next to it. Each client capability lives in its own private JSON file. The database contains routing records, message text, queues and outbox history, so protect it and its backups as private data too. Do not place any of these files in a repository, share them as plugin resources, or inspect their contents through a model. At-rest encryption and OS-keyring integration are not implemented. A malicious process running as the same OS user is outside this isolation boundary.
 
 ## Pause, disconnect and uninstall
 

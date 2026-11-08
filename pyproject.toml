@@ -4,12 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agents-over-telegram"
-version = "0.9.12"
+version = "0.9.13"
 description = "One human-owned Telegram bot, multiple isolated logical agent conversations"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-dependencies = ["mcp==1.30.0", "jsonschema==4.26.0", "anyio==4.15.1", "websockets==15.0.1"]
+dependencies = [
+    "mcp==1.30.0",
+    "jsonschema==4.26.0",
+    "anyio==4.15.1",
+    "websockets==15.0.1",
+    "anthropic==2.6.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/fourlastor/agents-over-telegram"
