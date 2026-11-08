@@ -1404,7 +1404,7 @@ class Core:
             'SELECT 1 FROM inbox WHERE client_id=? AND tg_chat_id=? AND context=0 '
             "AND json_extract(payload,'$.kind')='message' AND json_extract(payload,'$.sender.id')=? "
             "AND COALESCE(json_extract(payload,'$.thread_id'),0)=? "
-            "AND json_extract(payload,'$.addressed')=1 AND json_extract(payload,'$.follow_up') IS NULL "
+            "AND json_extract(payload,'$.addressed')=1 AND json_extract(payload,'$.follow_up') IS NULL AND json_extract(payload,'$.addressed_by') IS NULL "
             'AND COALESCE(event_at,created) BETWEEN ? AND ? LIMIT 1',
             (client_id, chat_id, sender_id, thread_id or 0, date - FOLLOW_UP_WINDOW, date)).fetchone() is not None
 
