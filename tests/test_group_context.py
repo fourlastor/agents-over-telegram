@@ -417,13 +417,20 @@ def test_a_persons_quick_follow_up_to_an_addressed_message_is_delivered(group):
     bot_message = {'message_id': 1, 'from': {'id': transport.bot_id, 'is_bot': True}}
     append(transport, 'yes, do that', reply_to_message=bot_message, date=now)
     append(transport, 'and also the docs', date=now + 30)
-    append(transport, 'one more thing', date=now + 140)
-    append(transport, 'much later', date=now + 400)
+    append(transport, 'one more thing', date=now + 90)
+    append(transport, 'still talking', date=now + 140)
+    append(transport, 'mail ops@example.com', date=now + 150)
     core.collect()
     got = deliveries(core, client)
     assert [(d['text'], d['addressed'], d.get('follow_up')) for d in got] == [
         ('yes, do that', True, None), ('and also the docs', True, True), ('one more thing', True, True)]
-    assert [m['text'] for m in history(core, client) if m['status'] == 'context'] == ['much later']
+    # The window runs from the direct message only: follow-ups do not extend it.
+    assert [m['text'] for m in history(core, client) if m['status'] == 'context'] == [
+        'mail ops@example.com', 'still talking']
+    append(transport, f'@{transport.username} new topic', date=now + 200)
+    append(transport, 'mail ops@example.com', date=now + 210)
+    core.collect()
+    assert [d['text'] for d in deliveries(core, client)][-1] == 'mail ops@example.com'
 
 
 def test_a_follow_up_aimed_elsewhere_or_from_someone_else_stays_context(group):

@@ -169,7 +169,7 @@ QUOTED_TEXT_LIMIT = 1024
 # A person's message that continues their own addressed message counts as
 # addressed when it comes at most this many seconds later.
 FOLLOW_UP_WINDOW = 120.0
-_MENTION = re.compile(r'@([A-Za-z0-9_]{3,32})(?!\w)')
+_MENTION = re.compile(r'(?<![\w@])@([A-Za-z0-9_]{3,32})(?!\w)')
 
 
 def _quoted_message(msg, accept_media, allowed_sender):
@@ -1320,8 +1320,9 @@ class Core:
         expand the answer. Such a message counts as addressed when it mentions no
         other @username and either replies to the person's own message that was
         delivered as addressed, or comes at most FOLLOW_UP_WINDOW seconds after
-        the person's previous message in this chat or topic, and that message
-        was delivered as addressed. A reply to anyone else's message never counts.
+        the person's last directly addressed message in this chat or topic, with
+        their previous message there delivered as addressed. A reply to anyone
+        else's message never counts.
         """
         own = account['username'].lower()
         if any(name.lower() != own for name in _MENTION.findall(text)):
@@ -1351,7 +1352,17 @@ class Core:
             'ORDER BY COALESCE(event_at,created) DESC,rowid DESC LIMIT 1',
             (client_id, chat_id, f'tg:{update_id}', sender_id, thread_id or 0,
              date - FOLLOW_UP_WINDOW, date)).fetchone()
-        return delivered_addressed(previous)
+        if not delivered_addressed(previous):
+            return False
+        # The window runs from the person's last directly addressed message, so
+        # follow-ups never extend it.
+        return db.execute(
+            'SELECT 1 FROM inbox WHERE client_id=? AND tg_chat_id=? AND context=0 '
+            "AND json_extract(payload,'$.kind')='message' AND json_extract(payload,'$.sender.id')=? "
+            "AND COALESCE(json_extract(payload,'$.thread_id'),0)=? "
+            "AND json_extract(payload,'$.addressed')=1 AND json_extract(payload,'$.follow_up') IS NULL "
+            'AND COALESCE(event_at,created) BETWEEN ? AND ? LIMIT 1',
+            (client_id, chat_id, sender_id, thread_id or 0, date - FOLLOW_UP_WINDOW, date)).fetchone() is not None
 
     def _route_reaction(self, db, update_id, reaction, account, now):
         """Deliver one message_reaction update under the same rules as messages.
