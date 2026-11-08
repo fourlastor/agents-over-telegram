@@ -26,8 +26,8 @@ _SKIPPED_NAMES = ('__pycache__', '.venv')
 _SKIPPED_SUFFIXES = ('.pyc', '.egg-info')
 
 APPROVE_HINT = ("Codex is not running AOT's plugin hooks: they changed with the last plugin update "
-                "and need approval again. Ask the user to open the Codex CLI in this project and "
-                "approve them with /hooks. Until then, Telegram messages reach this chat only when "
+                "and need approval again. Ask the user to approve them in the ChatGPT desktop app, "
+                "or with /hooks in the Codex CLI in this project. Until then, Telegram messages reach this chat only when "
                 "it is idle.")
 
 

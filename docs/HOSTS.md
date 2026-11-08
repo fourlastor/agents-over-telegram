@@ -76,12 +76,12 @@ In `-p` (non-interactive) mode, Claude Code cancels background hooks when the ru
 
 ### Codex
 
-The Codex plugin ships hooks for `SessionStart`, `UserPromptSubmit`, `PostToolUse` and `Stop`. Codex runs them only after you review and approve them. Open the Codex CLI in the project and run `/hooks`. The desktop app may not show `/hooks`.
+The Codex plugin ships hooks for `SessionStart`, `UserPromptSubmit`, `PostToolUse` and `Stop`. Codex runs them only after you review and approve them. Approve them in the ChatGPT desktop app, or open the Codex CLI in the project and run `/hooks`.
 
 **Codex asks again after every plugin update.** Codex stores two hashes for each approved plugin hook in `~/.codex/config.toml`: `trusted_hash` for the hook definition and `trusted_content_hash` for the whole plugin folder. It runs the hook only while both still match. Every AOT release changes the plugin folder, so after each update Codex stops running the hooks until you approve them again. This was read in the Codex source (`codex-rs/hooks/src/engine/discovery.rs`, `plugin_trust.rs` and `plugin_fingerprint.rs`). AOT computes the folder hash the same way. For the installed 0.9.14 plugin it gave exactly the value Codex had stored.
 
 - `aot codex-hooks` reports `approved`, `needs_approval` (with a reason), `not_installed` or `unknown`. It only reads files.
-- When the MCP server runs for a project whose `.codex/config.toml` starts it with this client, and the hooks need approval, the server adds a warning to its instructions and a `host_warning` field to `messages_poll` results. The agent then asks you to run `/hooks`. The text is fixed by AOT.
+- When the MCP server runs for a project whose `.codex/config.toml` starts it with this client, and the hooks need approval, the server adds a warning to its instructions and a `host_warning` field to `messages_poll` results. The agent then asks you to approve the hooks again. The text is fixed by AOT.
 
 **Version 0.8.0 shipped these hooks, but Codex did not load them.** The 0.8.0 package had two manifests: a root `plugin.json` in the Agent Plugins format and `.codex-plugin/plugin.json`. Codex uses the root `plugin.json` when it exists, and Codex loads no hooks for an Agent Plugins package. So Codex reported no plugin hooks and never asked to trust them. The package now has only `.codex-plugin/plugin.json`, and Codex loads the four hooks as plugin hooks. See [how this was checked](#how-the-codex-plugin-hooks-were-checked).
 

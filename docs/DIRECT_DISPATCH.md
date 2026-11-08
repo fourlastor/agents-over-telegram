@@ -67,7 +67,7 @@ The shipped hooks follow the rules learned from the earlier operator-installed h
 - They announce each delivery once, shared with every other push surface, and stay quiet after Telegram tool calls. A `Stop` hook continues a turn at most once in a row.
 - They collect from Telegram at most every 10 seconds, because Codex has no background monitor. The shared collector lock prevents competition with a running `relay-desktop --collect`. The earlier operator hook did not collect; it relied on the listener for intake.
 - They run through `scripts/aot_host_launch.py`, which only reads the project's `.aot-runtime.json` and then starts the prepared runtime. The runtime, not the system `python3`, reads the SQLite state. (An Apple Python 3.9 failed to read the live SQLite database in an earlier check.)
-- The human reviews and trusts the hook definitions. `/hooks` is a **CLI** command; it was unavailable in the tested desktop UI. Do not edit trust hashes or bypass hook trust.
+- The human reviews and trusts the hook definitions, in the ChatGPT desktop app or with `/hooks` in the Codex CLI. Codex asks again after every plugin update. Do not edit trust hashes or bypass hook trust.
 
 The earlier local macOS workaround passed a new Telegram test during an active work turn: one reply, one acknowledgment, zero pending messages, and 24.603 seconds from intake to sent receipt. That evidence applies to the operator-installed hook. The shipped hooks were tested offline against Codex's documented hook input and output, but not yet in a live Codex run; see [what was tested](HOSTS.md#what-was-tested) and the [evidence boundary](COMPATIBILITY.md#macos-follow-up-idle-and-busy-tests).
 
