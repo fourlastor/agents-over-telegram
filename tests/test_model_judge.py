@@ -409,3 +409,19 @@ def test_turning_the_judge_on_needs_the_owner_at_a_terminal(env, monkeypatch):
     with pytest.raises(CredentialError, match='operator_confirmation_required'):
         run(args)
     assert core.delivery_settings(client)['model_judge'] is False
+
+
+def test_a_model_yes_does_not_open_the_follow_up_window(judged):
+    core, transport, clock, client = judged
+    clock.advance(5000)
+    now = int(clock.now) - 100  # Telegram dates in the past
+    core._judge = FakeJudge(True, False)
+    append(transport, 'yes, put it back afterwards', date=now)
+    core.collect(judge=True)
+    append(transport, 'Daniele, climbing on Thursday?', date=now + 20)
+    core.collect(judge=True)
+    # The second message is judged on its own, not delivered as a follow-up.
+    assert len(core._judge.calls) == 2
+    assert [(d['text'], d.get('follow_up')) for d in deliveries(core, client)] == [
+        ('yes, put it back afterwards', None)]
+    assert queue(core) == [('yes', None), ('no', None)]
