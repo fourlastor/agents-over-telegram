@@ -91,7 +91,7 @@ def run_dispatcher(core, store, endpoint, *, token_file=None, collect=False,
         last_error = None
         while not stop.is_set():
             try:
-                core.collect(timeout=10)
+                core.collect(timeout=10, judge=True)
                 backoff, last_error = interval, None
             except Exception as error:
                 code = _error_code(error)

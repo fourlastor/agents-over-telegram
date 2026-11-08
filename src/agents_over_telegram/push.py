@@ -250,7 +250,7 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
                 timeout = max(0, min(timeout, int(deadline - clock())))
             started = clock()
             try:
-                result = core.collect(timeout=timeout)
+                result = core.collect(timeout=timeout, judge=True)
             except (CoreError, CredentialError, TransportError):
                 # The core records intake errors; queued local work stays usable.
                 # Back off so a broken connection is not retried every interval.

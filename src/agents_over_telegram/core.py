@@ -301,10 +301,12 @@ class Core:
     WAKE_INTERVAL_MAX = 86400
     # Model-judged wake decision (judge.py): a person's message that the
     # addressed rules kept as context is judged at most this long after it
-    # arrived, a few per collection, within rolling (limit, seconds) caps per
+    # arrived, by long-running collectors only, a few per collection within a
+    # total time budget (seconds), and within rolling (limit, seconds) caps per
     # agent. It sees this many earlier messages from the same chat or topic.
     JUDGE_MAX_AGE = 300.0
     JUDGE_PER_COLLECT = 3
+    JUDGE_BUDGET = 20.0
     JUDGE_LIMITS = ((60, 3600), (300, 86400))
     JUDGE_HISTORY = 8
 
@@ -795,11 +797,11 @@ class Core:
         that address the bot and messages from the owner, 'addressed', 'owner'
         or 'none'. ``owner_notify`` lets the agent send private notices to
         the owner with the owner_notify tool; it is off until the owner turns
-        it on. ``model_judge`` asks a small model whether a person's message
+        it on. ``model_judge`` asks a decision model whether a person's message
         that the addressed filter kept as context is meant for this agent, and
-        delivers it when the model says yes. It needs a stored API key
-        (``aot judge-key set``), applies only with the addressed filter, and is
-        off until the owner turns it on. The other settings default to the
+        delivers it when the model says yes. It needs a configured model
+        (``aot judge-config set``), applies only with the addressed filter, and
+        is off until the owner turns it on. The other settings default to the
         original behavior.
         """
         if delivery_filter is not None and delivery_filter not in self.DELIVERY_FILTERS:
@@ -1732,7 +1734,7 @@ class Core:
                     db.execute('UPDATE start_replies SET status=?,updated=? WHERE update_id=?', (status, self.clock(), update_id))
 
     def _judge_ready(self):
-        """The judge callable, or None when no usable key is stored."""
+        """The judge callable, or None when no usable model is configured."""
         if self._judge is _LOAD_JUDGE:
             return judge_module.load(self.state_dir)
         return self._judge
@@ -1771,9 +1773,13 @@ class Core:
     def _judge_pending(self):
         """Ask the model about queued context messages; never fails collection.
 
-        A message is judged once at most. A "yes" delivers it as addressed with
-        ``addressed_by: 'model'``; "no", an error, an expired wait, a missing key
-        or a reached cap keep it as context. Runs under the collector lock.
+        Only long-running collectors call this (``collect(judge=True)``), so a
+        hook or a tool call never waits on the model. One message is claimed at
+        a time, at most JUDGE_PER_COLLECT per collection, and no call starts
+        unless it can finish within JUDGE_BUDGET seconds of the first. A message
+        is judged once at most. A "yes" delivers it as addressed with
+        ``addressed_by: 'model'``; "no", an error, an expired wait, a missing
+        model or a reached cap keep it as context. Runs under the collector lock.
         """
         with self._db() as db:
             if not db.execute("SELECT 1 FROM judge_queue WHERE status='queued' LIMIT 1").fetchone():
@@ -1781,38 +1787,24 @@ class Core:
         now = self.clock()
         judge = self._judge_ready()
         with self._tx() as db:
-            account = self._account(db)
             db.execute("UPDATE judge_queue SET status='expired',updated=? WHERE status IN ('queued','judging') AND created<?",
                        (now, now - self.JUDGE_MAX_AGE))
-            if judge is None:
-                db.execute("UPDATE judge_queue SET status='no_key',updated=? WHERE status='queued'", (now,))
-                return
-            work = []
-            for row in db.execute(
-                    "SELECT q.inbox_id,i.rowid AS inbox_rowid,i.id,i.client_id,i.payload,i.created,i.event_at,i.tg_chat_id,i.context,"
-                    "b.model_judge,b.delivery_filter,c.label "
-                    "FROM judge_queue q JOIN inbox i ON i.id=q.inbox_id "
-                    "JOIN bindings b ON b.client_id=q.client_id AND b.connected=1 "
-                    "JOIN clients c ON c.id=q.client_id AND c.active=1 "
-                    "WHERE q.status='queued' ORDER BY q.created LIMIT ?", (self.JUDGE_PER_COLLECT * 4,)).fetchall():
-                if len(work) >= self.JUDGE_PER_COLLECT:
-                    break
-                if not row['model_judge'] or row['delivery_filter'] != 'addressed' or not row['context']:
-                    status = 'skipped'
-                elif any(db.execute("SELECT count(*) FROM judge_queue WHERE client_id=? AND status IN ('yes','no','failed') "
-                                    "AND updated>?", (row['client_id'], now - window)).fetchone()[0] >= limit
-                         for limit, window in self.JUDGE_LIMITS):
-                    status = 'limited'
-                else:
-                    status = 'judging'
-                    work.append((row['inbox_id'], row['client_id'], self._judge_context(db, row, account)))
-                db.execute('UPDATE judge_queue SET status=?,updated=? WHERE inbox_id=?', (status, now, row['inbox_id']))
             # Rows whose inbox entry or connection is gone can never be judged.
             db.execute("UPDATE judge_queue SET status='skipped',updated=? WHERE status='queued' AND (inbox_id NOT IN "
                        "(SELECT id FROM inbox) OR client_id NOT IN (SELECT client_id FROM bindings WHERE connected=1))",
                        (now,))
             db.execute('DELETE FROM judge_queue WHERE updated<?', (now - 86400,))
-        for inbox_id, client_id, context in work:
+            if judge is None:
+                db.execute("UPDATE judge_queue SET status='no_model',updated=? WHERE status='queued'", (now,))
+                return
+        deadline = time.monotonic() + self.JUDGE_BUDGET
+        for _ in range(self.JUDGE_PER_COLLECT):
+            if time.monotonic() + judge_module.TIMEOUT_SECONDS > deadline:
+                return
+            claimed = self._claim_judgment()
+            if claimed is None:
+                return
+            inbox_id, client_id, context = claimed
             error = None
             try:
                 verdict = judge(**context)
@@ -1828,6 +1820,30 @@ class Core:
                     status, error = self._promote_judged(db, inbox_id, client_id)
                 db.execute('UPDATE judge_queue SET status=?,error=?,updated=? WHERE inbox_id=?',
                            (status, error, self.clock(), inbox_id))
+
+    def _claim_judgment(self):
+        """Mark the oldest judgeable queued message as judging; its context, or None."""
+        now = self.clock()
+        with self._tx() as db:
+            account = self._account(db)
+            for row in db.execute(
+                    "SELECT q.inbox_id,i.rowid AS inbox_rowid,i.id,i.client_id,i.payload,i.created,i.event_at,i.tg_chat_id,i.context,"
+                    "b.model_judge,b.delivery_filter,c.label "
+                    "FROM judge_queue q JOIN inbox i ON i.id=q.inbox_id "
+                    "JOIN bindings b ON b.client_id=q.client_id AND b.connected=1 "
+                    "JOIN clients c ON c.id=q.client_id AND c.active=1 "
+                    "WHERE q.status='queued' ORDER BY q.created,q.rowid").fetchall():
+                if not row['model_judge'] or row['delivery_filter'] != 'addressed' or not row['context']:
+                    status = 'skipped'
+                elif any(db.execute("SELECT count(*) FROM judge_queue WHERE client_id=? AND status IN ('yes','no','failed') "
+                                    "AND updated>?", (row['client_id'], now - window)).fetchone()[0] >= limit
+                         for limit, window in self.JUDGE_LIMITS):
+                    status = 'limited'
+                else:
+                    db.execute("UPDATE judge_queue SET status='judging',updated=? WHERE inbox_id=?", (now, row['inbox_id']))
+                    return row['inbox_id'], row['client_id'], self._judge_context(db, row, account)
+                db.execute('UPDATE judge_queue SET status=?,updated=? WHERE inbox_id=?', (status, now, row['inbox_id']))
+        return None
 
     def _promote_judged(self, db, inbox_id, client_id):
         """Turn a context entry the model judged as addressed into a delivery."""
@@ -1846,7 +1862,13 @@ class Core:
                    (json.dumps(payload, ensure_ascii=False), self.clock(), inbox_id))
         return 'yes', None
 
-    def collect(self, *, timeout=0):
+    def collect(self, *, timeout=0, judge=False):
+        """Fetch and route one page of Telegram updates.
+
+        ``judge`` also runs the optional model judge afterwards. Only
+        long-running collectors pass it, so hooks and tool calls never wait on
+        a model call.
+        """
         if not _integer(timeout) or not 0 <= timeout <= 20:
             raise CoreError('invalid_collect_timeout')
         with self._lock('collector') as acquired:
@@ -1883,7 +1905,8 @@ class Core:
                     # A courtesy answer must never turn a good intake into a failure.
                     pass
                 try:
-                    self._judge_pending()
+                    if judge:
+                        self._judge_pending()
                 except Exception:
                     # Neither may the optional model judge.
                     pass

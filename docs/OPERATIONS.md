@@ -372,24 +372,33 @@ The owner may omit `--client-file` to flush due sends across all clients. Flush 
 
 ### Model-judged wake decision
 
-The rules above cannot catch every message meant for an agent, for example a person who answers the agent's question after a pause, without replying or mentioning the bot. With `--filter addressed`, the owner can let a small model judge those messages:
+The rules above cannot catch every message meant for an agent, for example a person who answers the agent's question after a pause, without replying or mentioning the bot. With `--filter addressed`, the owner can let a decision model judge those messages. Any endpoint that speaks TypeSafe's System One decision API works: [Jev](https://docs.typesafe.ai/introduction/quickstart), Cloudflare's [Clef and Clef-flash](https://developers.cloudflare.com/workers-ai/models/clef-flash/) on Workers AI, or a Clef you host yourself, which costs nothing per call.
 
 ```sh
-"$AOT_BIN" --state-dir "$AOT_STATE" judge-key set
+"$AOT_BIN" --state-dir "$AOT_STATE" judge-config set --endpoint https://api.typesafe.ai/v1/systemone --model jev-latest --key
 "$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --model-judge on
 ```
 
-- `judge-key set` asks for an Anthropic API key in a hidden terminal prompt and stores it in `judge.json` in the private state directory, like the bot token. It never appears in tool arguments, tool results or status. `--model` chooses another model; the default is `claude-haiku-5-5`. `judge-key status` shows whether a key is stored and for which model, and `judge-key clear` deletes it. One key serves every connection on this computer that turns the judge on.
-- `--model-judge on` is off by default and set per connection. It asks you to type `yes` at a terminal, because it sends group text to Anthropic's API: the agent's label and bot username, up to 8 earlier messages from the same chat or topic (this agent's own posts included, each cut to 600 characters), and the message itself. `--model-judge off` stops it.
+- `judge-config set` stores the endpoint and the model name it expects in `judge.json` in the private state directory, with the same protections as the bot token. For example:
+  - Jev: `--endpoint https://api.typesafe.ai/v1/systemone --model jev-latest`
+  - Cloudflare: `--endpoint https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/run/@cf/cloudflare/clef-flash --model clef-flash`
+  - A self-hosted Clef on this computer, at its own address and with no key.
+- `--key` asks for an API key in a hidden terminal prompt; leave it out for a model that needs none. The key never appears in tool arguments, tool results or status.
+- The endpoint must use https. Plain http is allowed only to this computer (`localhost` or a loopback address).
+- `--threshold` sets how sure the model must be: AOT delivers when the model's probability for yes is at least this value. The default is `0.5`; raise it toward `0.9` for fewer, surer wakes.
+- `judge-config status` shows the endpoint, the model, the threshold and whether a key is stored. `judge-config clear` deletes the configuration. One configuration serves every connection on this computer that turns the judge on.
+- `--model-judge on` is off by default and set per connection. It asks you to type `yes` at a terminal, because it sends group text to the configured model. The model sees the agent's label and bot username, up to 8 earlier messages from the same chat or topic (this agent's own posts included, each cut to 600 characters), and the message itself. `--model-judge off` stops it.
 - Only a person's new message with text that the addressed filter kept as context is judged. Bot messages, edits, messages from senders who are not allowed, and messages that already count as addressed are never sent.
-- When the model answers yes, the message becomes a normal delivery with `addressed: true` and `addressed_by: "model"`, so wake batching announces it at once. Otherwise it stays context. A timeout (8 seconds), an API error, a missing key or an unclear answer also keeps it as context; AOT never retries a judgment.
-- The collector judges at most 3 messages per collection, each within 5 minutes of its arrival, and at most 60 per connection in any rolling hour and 300 in any rolling day. Messages over a limit stay context. Message text is untrusted for the model as for the agent: a message that talks the model into a yes only wakes the agent, and its text is still collaboration data.
+- When the model says yes, the message becomes a normal delivery with `addressed: true` and `addressed_by: "model"`, so wake batching announces it at once. Otherwise it stays context. A timeout (8 seconds), an error, a redirect, a missing configuration or an unclear answer also keeps it as context. AOT never retries a judgment.
+- Only the long-running collectors judge: the Claude Code monitor and wake waiter, `watch --collect` and the relay listeners. Hooks and tool calls never wait on the model. A message waits for the next long-running collection, and is dropped as context after 5 minutes.
+- Each collection judges at most 3 messages and starts no call that could end more than 20 seconds after the first. Each connection gets at most 60 judgments in any rolling hour and 300 in any rolling day; messages over a limit stay context.
+- Message text is untrusted for the model as for the agent. A message that talks the model into a yes only wakes the agent, and its text is still collaboration data.
 
 ## Credentials and stored data
 
 This MVP uses a protected-file fallback, not a system keyring. The state directory and client-file parent directories are owned by the current OS user and restricted to mode `0700`; credentials and client files are mode `0600`. Reads reject unsafe owners/modes, symlinks, hard links and malformed or oversized JSON. Diagnostic messages use fixed codes and do not include token-bearing request URLs or raw response bodies.
 
-The bot token lives in `credentials.json` under the private state root. The optional [model judge](#model-judged-wake-decision) key lives in `judge.json` next to it. Each client capability lives in its own private JSON file. The database contains routing records, message text, queues and outbox history, so protect it and its backups as private data too. Do not place any of these files in a repository, share them as plugin resources, or inspect their contents through a model. At-rest encryption and OS-keyring integration are not implemented. A malicious process running as the same OS user is outside this isolation boundary.
+The bot token lives in `credentials.json` under the private state root. The optional [model judge](#model-judged-wake-decision) configuration, with its key, lives in `judge.json` next to it. Each client capability lives in its own private JSON file. The database contains routing records, message text, queues and outbox history, so protect it and its backups as private data too. Do not place any of these files in a repository, share them as plugin resources, or inspect their contents through a model. At-rest encryption and OS-keyring integration are not implemented. A malicious process running as the same OS user is outside this isolation boundary.
 
 ## Pause, disconnect and uninstall
 

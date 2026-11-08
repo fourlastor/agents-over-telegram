@@ -546,7 +546,7 @@ def run_desktop_dispatcher(core, store, *, codex_binary=None, codex_home=None,
         backoff = interval
         while not stop.is_set():
             try:
-                core.collect(timeout=10)
+                core.collect(timeout=10, judge=True)
                 backoff = interval
             except Exception as error:
                 try:

@@ -60,7 +60,7 @@ def watch(core, store, *, once=False, duration=55, interval=1.5, collect=False,
         last_error = None
         while not stop.is_set():
             try:
-                core.collect(timeout=10)
+                core.collect(timeout=10, judge=True)
                 backoff, last_error = interval, None
             except Exception as error:
                 code = _code(error)
