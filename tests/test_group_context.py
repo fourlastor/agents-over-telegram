@@ -407,3 +407,79 @@ def test_a_full_page_of_long_quoted_replies_fits_the_result_cap(group):
     core.collect()
     body = _result_body(core.poll(client, limit=50))
     assert body['ok'] is True and len(body['result']['deliveries']) == 50
+
+
+def test_a_persons_quick_follow_up_to_an_addressed_message_is_delivered(group):
+    core, transport, clock, client = group
+    core.delivery_settings(client, delivery_filter='addressed')
+    clock.advance(5000)
+    now = int(clock.now) - 2000  # Telegram dates in the past
+    bot_message = {'message_id': 1, 'from': {'id': transport.bot_id, 'is_bot': True}}
+    append(transport, 'yes, do that', reply_to_message=bot_message, date=now)
+    append(transport, 'and also the docs', date=now + 30)
+    append(transport, 'one more thing', date=now + 90)
+    append(transport, 'still talking', date=now + 140)
+    append(transport, 'mail ops@example.com', date=now + 150)
+    core.collect()
+    got = deliveries(core, client)
+    assert [(d['text'], d['addressed'], d.get('follow_up')) for d in got] == [
+        ('yes, do that', True, None), ('and also the docs', True, True), ('one more thing', True, True)]
+    # The window runs from the direct message only: follow-ups do not extend it.
+    assert [m['text'] for m in history(core, client) if m['status'] == 'context'] == [
+        'mail ops@example.com', 'still talking']
+    append(transport, f'@{transport.username} new topic', date=now + 200)
+    append(transport, 'mail ops@example.com', date=now + 210)
+    core.collect()
+    assert [d['text'] for d in deliveries(core, client)][-1] == 'mail ops@example.com'
+
+
+def test_a_follow_up_aimed_elsewhere_or_from_someone_else_stays_context(group):
+    core, transport, clock, client = group
+    core.delivery_settings(client, delivery_filter='addressed')
+    core.allow_sender(client, 404)
+    clock.advance(5000)
+    now = int(clock.now) - 2000  # Telegram dates in the past
+    bot = transport.username
+    append(transport, f'@{bot} please check', date=now)
+    append(transport, 'other person chatting', sender=404, date=now + 5)
+    append(transport, '@otherbot over to you', date=now + 10)
+    append(transport, 'continuing for otherbot', date=now + 15)
+    append(transport, f'@{bot} again', date=now + 20)
+    append(transport, 'answering someone', date=now + 25,
+           reply_to_message={'message_id': 77, 'from': {'id': 404, 'is_bot': False}})
+    append(transport, f'@{bot} third', date=now + 30)
+    append(transport, 'bot chatter', sender=202, bot=True, date=now + 31)
+    core.collect()
+    assert [d['text'] for d in deliveries(core, client)] == [
+        f'@{bot} please check', f'@{bot} again', f'@{bot} third']
+
+
+def test_replying_to_your_own_addressed_message_counts_at_any_time(group):
+    core, transport, clock, client = group
+    core.delivery_settings(client, delivery_filter='addressed')
+    clock.advance(5000)
+    now = int(clock.now) - 2000  # Telegram dates in the past
+    first = append(transport, f'@{transport.username} plan A', date=now)
+    aside = append(transport, 'unrelated aside', date=now + 500)
+    own = {'message_id': first['message']['message_id'], 'from': {'id': 101, 'is_bot': False}}
+    append(transport, 'actually, plan B', reply_to_message=own, date=now + 1000)
+    append(transport, 'not this one', date=now + 1001,
+           reply_to_message={'message_id': aside['message']['message_id'], 'from': {'id': 101, 'is_bot': False}})
+    core.collect()
+    got = deliveries(core, client)
+    assert [(d['text'], d.get('follow_up')) for d in got] == [
+        (f'@{transport.username} plan A', None), ('actually, plan B', True)]
+
+
+def test_follow_ups_stay_inside_their_forum_topic(env):
+    core, transport, clock = env
+    client, _ = bind(core, transport, topic=7)
+    core.delivery_settings(client, delivery_filter='addressed')
+    clock.advance(5000)
+    now = int(clock.now) - 2000  # Telegram dates in the past
+    topic_root = {'message_id': 7, 'forum_topic_created': {'name': 'Work'}}
+    append(transport, f'@{transport.username} in the topic', topic=7, date=now, reply_to_message=topic_root)
+    append(transport, 'more in the topic', topic=7, date=now + 10, reply_to_message=topic_root)
+    core.collect()
+    assert [(d['text'], d.get('follow_up')) for d in deliveries(core, client)] == [
+        (f'@{transport.username} in the topic', None), ('more in the topic', True)]

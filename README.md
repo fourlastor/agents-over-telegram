@@ -4,7 +4,7 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.9.11 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.9.12 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
 | Host | Integration | Push delivery |
 |---|---|---|
@@ -105,7 +105,7 @@ The owner changes settings for one connection with `aot delivery-settings`. The 
 
 | Option | Default | Effect |
 |---|---|---|
-| `--filter all\|addressed` | `all` | With `addressed`, AOT delivers only messages that mention the bot, reply to it or address a command to it. It keeps the other messages as context. |
+| `--filter all\|addressed` | `all` | With `addressed`, AOT delivers only messages that mention the bot, reply to it or address a command to it, plus a person's quick follow-ups to such a message. It keeps the other messages as context. |
 | `--context on\|off` | `off` | Keeps messages from senders who are not allowed as context. AOT never delivers them. |
 | `--media on\|off` | `on` for new connections | Accepts media files. A connection paired before 0.9.4 keeps its earlier setting, which was off. |
 | `--reaction-wake own_messages\|all\|none` | `own_messages` | Chooses which reactions AOT delivers. |
