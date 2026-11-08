@@ -108,8 +108,24 @@ def test_poll_and_instructions_warn_only_for_a_codex_project_needing_approval(tm
     client = tmp_path / 'client.json'
     monkeypatch.setattr(codex_trust, 'codex_project_uses', lambda path: path == client)
     monkeypatch.setattr(codex_trust, 'status', lambda: {'status': 'needs_approval'})
-    assert mcp_server._codex_hooks_warning(client) == codex_trust.APPROVE_HINT
+    monkeypatch.setattr(mcp_server, '_codex_host', lambda: 'cli')
+    assert mcp_server._codex_hooks_warning(client) == codex_trust.approve_hint('cli')
     assert mcp_server._codex_hooks_warning(tmp_path / 'other.json') is None
     assert mcp_server._codex_hooks_warning(None) is None
     monkeypatch.setattr(codex_trust, 'status', lambda: {'status': 'approved'})
     assert mcp_server._codex_hooks_warning(client) is None
+
+
+def test_the_hint_names_the_codex_host_that_started_the_server():
+    desktop = {10: (9, '/usr/bin/python3'), 9: (8, '/Applications/ChatGPT.app/Contents/Resources/codex-cli/'
+                                                  'CodexCLI.app/Contents/MacOS/codex'),
+               8: (1, '/Applications/ChatGPT.app/Contents/MacOS/ChatGPT')}
+    cli = {10: (9, '/usr/bin/python3'), 9: (8, '/opt/homebrew/bin/codex'), 8: (1, '/bin/zsh')}
+    other = {10: (9, '/usr/bin/python3'), 9: (1, '/Applications/Claude.app/Contents/MacOS/claude')}
+    assert codex_trust.codex_host(10, desktop.get) == 'desktop'
+    assert codex_trust.codex_host(10, cli.get) == 'cli'
+    assert codex_trust.codex_host(10, other.get) is None
+    assert '/hooks' in codex_trust.approve_hint('cli') and 'desktop' not in codex_trust.approve_hint('cli')
+    assert 'desktop app' in codex_trust.approve_hint('desktop') and '/hooks' not in codex_trust.approve_hint('desktop')
+    generic = codex_trust.approve_hint(None)
+    assert 'desktop app' in generic and '/hooks' in generic

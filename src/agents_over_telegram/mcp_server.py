@@ -420,13 +420,29 @@ class SanitizedServer(Server):
                 tasks.cancel_scope.cancel()
 
 
+_HOST_CACHE: list = []
+
+
+def _codex_host() -> str | None:
+    """Which Codex started this server; the parent processes do not change while it runs."""
+    from . import codex_trust
+    if not _HOST_CACHE:
+        try:
+            _HOST_CACHE.append(codex_trust.codex_host())
+        except Exception:
+            _HOST_CACHE.append(None)
+    return _HOST_CACHE[0]
+
+
 def _codex_hooks_warning(client_file: Any) -> str | None:
     """The approve hint when this project's Codex runs AOT and wants its hooks approved again."""
     from . import codex_trust
     try:
         if client_file is None or not codex_trust.codex_project_uses(Path(client_file)):
             return None
-        return codex_trust.APPROVE_HINT if codex_trust.status()['status'] == 'needs_approval' else None
+        if codex_trust.status()['status'] != 'needs_approval':
+            return None
+        return codex_trust.approve_hint(_codex_host())
     except Exception:
         return None
 
