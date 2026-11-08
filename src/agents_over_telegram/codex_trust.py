@@ -25,10 +25,23 @@ EVENTS = ('session_start', 'user_prompt_submit', 'post_tool_use', 'stop')
 _SKIPPED_NAMES = ('__pycache__', '.venv')
 _SKIPPED_SUFFIXES = ('.pyc', '.egg-info')
 
-APPROVE_HINT = ("Codex is not running AOT's plugin hooks: they changed with the last plugin update "
-                "and need approval again. Ask the user to approve them in the ChatGPT desktop app, "
-                "or with /hooks in the Codex CLI in this project. Until then, Telegram messages reach this chat only when "
-                "it is idle.")
+_HINT_START = ("Codex is not running AOT's plugin hooks: they changed with the last plugin update "
+               "and need approval again. ")
+_HINT_END = " Until then, Telegram messages reach this chat only when it is idle."
+_HOW_TO_APPROVE = {
+    'desktop': "Ask the user to approve them in the Codex desktop app's hook review.",
+    'cli': "Ask the user to run /hooks in the Codex CLI in this project and approve them.",
+    None: ("Ask the user to approve them in Codex: in the desktop app's hook review, or with "
+           "/hooks in the Codex CLI."),
+}
+
+
+def approve_hint(host: str | None = None) -> str:
+    """The fixed warning for the agent, with approval steps for the Codex host that runs it."""
+    return _HINT_START + _HOW_TO_APPROVE.get(host, _HOW_TO_APPROVE[None]) + _HINT_END
+
+
+APPROVE_HINT = approve_hint()
 
 
 def plugin_content_hash(root: Path) -> str:
@@ -147,3 +160,47 @@ def codex_project_uses(client_file: Path, project: Path | None = None) -> bool:
         if isinstance(args, list) and wanted in [str(arg) for arg in args]:
             return True
     return False
+
+
+def _process(pid: int) -> tuple[int, str] | None:
+    """(parent pid, executable path) of a process, read with ps; None when unknown."""
+    import subprocess
+    try:
+        out = subprocess.run(['ps', '-o', 'ppid=,comm=', '-p', str(pid)], capture_output=True,
+                             text=True, timeout=2, check=False).stdout.strip()
+        parent, _, command = out.partition(' ')
+        return int(parent), command.strip()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def codex_host(pid: int | None = None, process=_process) -> str | None:
+    """'desktop' or 'cli' for the Codex that started this process.
+
+    'none' means the walk reached the top without any Codex process, so this
+    server does not run under Codex (for example under Claude Code in a project
+    set up for both). None means the processes could not be read.
+
+    Walks the parent processes. The desktop app runs its bundled Codex inside an
+    application bundle (for example ChatGPT.app or Codex.app); the CLI runs a
+    plain ``codex`` executable.
+    """
+    current = os.getppid() if pid is None else pid
+    saw_codex = False
+    for _ in range(12):
+        if current <= 1:
+            return 'cli' if saw_codex else 'none'
+        found = process(current)
+        if found is None:
+            break
+        parent, command = found
+        name = os.path.basename(command)
+        if name.lower().startswith('codex'):
+            saw_codex = True
+            if '.app/Contents/' in command and any(
+                    bundle in command for bundle in ('/ChatGPT.app/', '/Codex.app/')):
+                return 'desktop'
+        elif command.endswith(('/ChatGPT.app/Contents/MacOS/ChatGPT', '/Codex.app/Contents/MacOS/Codex')):
+            return 'desktop'
+        current = parent
+    return 'cli' if saw_codex else None
