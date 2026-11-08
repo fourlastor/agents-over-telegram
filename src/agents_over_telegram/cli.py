@@ -159,6 +159,8 @@ def parser():
     register = sub.add_parser("account-register", help="Prompt privately for one bot token, validate without polling")
     register.add_argument("--receiver-handoff-confirmed", action="store_true", help="Assert other receivers are stopped; webhooks are never changed")
     sub.add_parser("account-status")
+    sub.add_parser("codex-hooks", help="Show whether Codex still runs AOT's plugin hooks or wants them "
+                                        "approved again with /hooks (read-only)")
     judge_config = sub.add_parser("judge-config", help="Owner only: configure, show or remove the decision model "
                                                        "for the optional model-judged wake decision "
                                                        "(delivery-settings --model-judge)")
@@ -389,6 +391,9 @@ def run(args):
         return run_wake(args)
     from .onboarding import resolve_args
     args = resolve_args(args)
+    if args.command == "codex-hooks":
+        from . import codex_trust
+        return codex_trust.status()
     state_dir = private_directory(args.state_dir)
     _mode(state_dir, args.fake)
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
