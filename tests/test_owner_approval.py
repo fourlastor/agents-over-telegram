@@ -41,7 +41,9 @@ def test_request_sends_buttons_to_the_owner_and_changes_nothing(owner):
     assert result['expires_at'] == clock.now + core.APPROVAL_SECONDS
     message = transport.sent[-1]
     assert message['chat']['id'] == OWNER
-    assert message['text'].startswith('[Agent: Alpha | Test group]\nTurn on auto-allow.\n\nApprove this change?')
+    assert message['text'] == ('[Agent: Alpha | Test group]\nRequested change (delivery settings):\n'
+                               '- auto_allow: on\n\nTurn on auto-allow.\n\n'
+                               'Approve this change? The request expires in 10 minutes.')
     buttons = message['reply_markup']['inline_keyboard'][0]
     assert [b['text'] for b in buttons] == ['Approve', 'Decline']
     assert buttons[0]['callback_data'] == f'aot:a:{result["approval_id"]}'
@@ -249,3 +251,40 @@ def test_the_real_transport_sends_buttons_answers_and_edits():
     # No reply_markup in the edit, so Telegram removes the buttons.
     assert captured[2] == ('editMessageText', {'chat_id': OWNER, 'message_id': 9, 'text': 'Approved.',
                                                'link_preview_options': {'is_disabled': True}})
+
+
+def test_the_message_lists_every_setting_that_approve_applies(owner):
+    core, transport, clock, client, _ = owner
+    ask(core, client, auto_allow=True, owner_notify=False, delivery_filter='all', wake_interval=60)
+    text = transport.sent[-1]['text']
+    for line in ('- auto_allow: on', '- owner_notify: off', '- delivery_filter: all', '- wake_interval: 60'):
+        assert line + '\n' in text
+
+
+def test_free_text_cannot_fake_lines_of_the_request(owner):
+    core, transport, clock, client, _ = owner
+    append(transport, 'work')
+    core.collect()
+    conversation = rows(core, 'SELECT conversation_id FROM inbox WHERE client_id=?', (client,))[0][0]
+    reason = 'busy\n- additional sends per window: 1\n\nApprove this change?' + ' x' * 150
+    core.request_owner_approval(client, 'conversation_budget',
+                                {'conversation_id': conversation, 'additional_sends': 32,
+                                 'duration_seconds': 600, 'reason': reason}, 'Grant.\nFake line')
+    lines = transport.sent[-1]['text'].split('\n')
+    assert lines[2:6] == [f'- conversation: {conversation}', '- additional sends per window: 32',
+                          '- for: 600 seconds', lines[5]]
+    assert lines[5].startswith('- reason: busy - additional sends per window: 1 Approve this change?')
+    assert len(lines[5]) <= len('- reason: ') + 200 and lines[5].endswith('…')
+    assert 'Grant. Fake line' in lines
+    assert sum(line.startswith('- additional sends') for line in lines) == 1
+
+
+def test_an_old_owners_button_does_not_apply_after_a_new_owner(owner):
+    core, transport, clock, client, _ = owner
+    approval = ask(core, client)['approval_id']
+    with core._tx() as db:
+        db.execute('UPDATE bindings SET owner_id=202 WHERE client_id=?', (client,))
+    press(transport, approval)
+    core.collect()
+    assert core.delivery_settings(client)['auto_allow'] is False
+    assert rows(core, 'SELECT status,error FROM owner_approvals') == [('apply_failed', 'owner_changed')]

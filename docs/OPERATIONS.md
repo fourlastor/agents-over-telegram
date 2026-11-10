@@ -195,9 +195,9 @@ The command asks the owner to type `yes` at a terminal first, or, with no termin
 Some changes need the owner's say-so: `delivery-settings --auto-allow on`, `delivery-settings --model-judge on`, and a `conversation-budget` grant. At a terminal, the command asks the owner to type `yes`. When no terminal is attached, which is how agents run commands, AOT asks the owner in Telegram instead:
 
 - The command changes nothing yet. It returns `status: "owner_approval_pending"` with an `approval_id` and `expires_at`.
-- The shared bot sends the owner a private message. The message names the agent and the group, says what will change, and has **Approve** and **Decline** buttons.
+- The shared bot sends the owner a private message. It names the agent and the group, lists every value the command will set (one per line, including settings that need no approval), repeats the warning, and has **Approve** and **Decline** buttons. Free text such as a budget reason is shown on one line and shortened.
 - **Approve** applies the whole command at once, including any other settings in it. **Decline** drops it. After either, the message shows the outcome and its buttons go away.
-- Only a press from the owner's own Telegram account, in the private chat with the bot, counts. Presses by anyone else, from a forwarded copy, or on a request that expired are refused.
+- Only a press from the owner's own Telegram account, in the private chat with the bot, counts. Presses by anyone else, from a forwarded copy, on a request that expired, or after the connection was paired again with a new owner are refused.
 - A request expires after 10 minutes. Each connection can have at most 3 waiting at a time.
 - The owner must have sent `/start` to the bot in a private chat once, as for [owner notices](#notify-the-owner-privately). Otherwise the command fails with `owner_chat_not_started`.
 - `aot status` lists the last few requests under `owner_approvals`, with their status: `pending`, `approved`, `declined`, `expired`, `failed` (the message could not be sent) or `apply_failed` (approved, but the change no longer applied, for example after a disconnect).

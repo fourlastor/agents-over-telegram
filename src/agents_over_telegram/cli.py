@@ -556,7 +556,7 @@ def run(args):
             pending = _confirm_or_ask_owner(
                 core, client_id,
                 f"Allow {args.additional_sends} more sends per rolling window in conversation "
-                f"{args.conversation_id!r} for {args.duration_seconds} seconds. Reason: {args.reason}",
+                f"{args.conversation_id!r} for {args.duration_seconds} seconds.",
                 "conversation_budget",
                 {"conversation_id": args.conversation_id, "additional_sends": args.additional_sends,
                  "duration_seconds": args.duration_seconds, "reason": args.reason})

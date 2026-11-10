@@ -2763,11 +2763,7 @@ class Core:
                                  (client_id,)).fetchone()[0]
             if pending >= self.APPROVAL_PENDING_LIMIT:
                 raise CoreError('owner_approval_limit')
-            # Collapse whitespace in the group title, as owner_notify does, so it
-            # cannot fake a line of the request.
-            title = ' '.join(str(binding['title']).split())
-            text = (f'[Agent: {client["label"]} | {title}]\n{summary}\n\n'
-                    f'Approve this change? The request expires in {self.APPROVAL_SECONDS // 60} minutes.')
+            text = self._approval_text(client['label'], binding['title'], action, params, summary)
             db.execute("INSERT INTO owner_approvals(id,client_id,owner_id,action,params,text,status,created,expires) "
                        "VALUES(?,?,?,?,?,?,'pending',?,?)",
                        (approval_id, client_id, binding['owner_id'], action, json.dumps(params), text,
@@ -2793,6 +2789,30 @@ class Core:
                 'delivery': delivery, 'expires_at': now + self.APPROVAL_SECONDS,
                 'next_action': 'The owner approves or declines with the buttons in their private chat with the bot.'}
 
+    def _approval_text(self, label, title, action, params, summary):
+        """The owner's view of a request: every change on its own line, then the warning.
+
+        Approve applies exactly these values, so all of them are listed, not
+        only the ones that need approval. Every free-text part is collapsed to
+        one line and capped, so it cannot fake a line of the request.
+        """
+        def line(value, limit=200):
+            text = ' '.join(str(value).split())
+            return text if len(text) <= limit else text[:limit - 1] + '…'
+
+        if action == 'delivery_settings':
+            changes = [f'- {name}: {("on" if value else "off") if type(value) is bool else line(value)}'
+                       for name, value in params.items()]
+        else:
+            changes = [f'- conversation: {line(params["conversation_id"])}',
+                       f'- additional sends per window: {params["additional_sends"]}',
+                       f'- for: {params["duration_seconds"]} seconds',
+                       f'- reason: {line(params["reason"])}']
+        return (f'[Agent: {line(label, 64)} | {line(title, 128)}]\n'
+                f'Requested change ({action.replace("_", " ")}):\n' + '\n'.join(changes) + '\n\n'
+                f'{line(summary, 1000)}\n\n'
+                f'Approve this change? The request expires in {self.APPROVAL_SECONDS // 60} minutes.')
+
     def _route_callback(self, db, update_id, callback, now):
         """Handle one inline button press; only the owner's press on a live request counts."""
         callback_id = callback.get('id')
@@ -2808,13 +2828,16 @@ class Core:
                    and chat.get('id') == sender.get('id') and _integer(message.get('message_id')))
 
         def answer(text, edit=None):
+            # The private chat id is kept only until the answer goes out, so the
+            # message can be edited; _answer_callbacks deletes the row first.
             db.execute('INSERT OR IGNORE INTO callback_answers(callback_id,text,chat_id,message_id,edit_text,created) '
                        'VALUES(?,?,?,?,?,?)', (callback_id, text, chat.get('id') if private else None,
                                                message.get('message_id') if private else None, edit, now))
 
         row = db.execute('SELECT * FROM owner_approvals WHERE id=?', (match.group(2),)).fetchone() if match else None
         if not private or row is None or row['owner_id'] != sender.get('id'):
-            # A private chat id is a person's user id: never stored.
+            # The refusal record never keeps the chat id: in a private chat it is
+            # the person's user id.
             self._unmatched(db, update_id, None, 'private_chat' if chat.get('type') == 'private' else 'unsupported_update', now)
             answer('This button does not belong to a request of yours.')
             return
@@ -2845,6 +2868,9 @@ class Core:
 
     def _apply_approval(self, db, row, now):
         params = json.loads(row['params'])
+        # A re-paired connection has a new owner; the old owner's buttons no longer count.
+        if self._binding(db, row['client_id'])['owner_id'] != row['owner_id']:
+            raise CoreError('owner_changed')
         if row['action'] == 'delivery_settings':
             self._check_delivery_settings(params)
             self._binding(db, row['client_id'])
