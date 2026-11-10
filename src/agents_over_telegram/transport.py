@@ -126,18 +126,30 @@ class TelegramTransport:
         result = self._call("getUpdates", {"offset": offset, "timeout": timeout, "limit": 100,
             # message_reaction must be named explicitly; Telegram never sends it by
             # default, and only while the bot is an administrator in the chat.
-            "allowed_updates": ["message", "edited_message", "my_chat_member", "message_reaction"]}, timeout=timeout + 15)
+            # callback_query carries the owner's Approve or Decline button presses.
+            "allowed_updates": ["message", "edited_message", "my_chat_member", "message_reaction",
+                                "callback_query"]}, timeout=timeout + 15)
         if not isinstance(result, list):
             raise TransportError("invalid_updates")
         return result
 
-    def send_message(self, chat_id, text, thread_id=None, reply_to=None):
+    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None):
         params = {"chat_id": chat_id, "text": text, "link_preview_options": {"is_disabled": True}}
         if thread_id is not None:
             params["message_thread_id"] = thread_id
         if reply_to is not None:
             params["reply_parameters"] = {"message_id": reply_to}
+        if reply_markup is not None:
+            params["reply_markup"] = reply_markup
         return self._call("sendMessage", params, sending=True)
+
+    def answer_callback_query(self, callback_query_id, text):
+        return self._call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text[:200]})
+
+    def edit_message_text(self, chat_id, message_id, text):
+        # Without reply_markup, Telegram removes the message's inline buttons.
+        return self._call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text,
+                                              "link_preview_options": {"is_disabled": True}})
 
     def send_photo(self, chat_id, data, *, caption=None, filename="photo.png",
                    mime="image/png", thread_id=None, reply_to=None):
@@ -268,6 +280,8 @@ class FakeTransport:
         self.poll_offsets = []
         self.chat_members = {}  # {str(chat_id): {str(user_id): ChatMember dict}}
         self.files = {}  # {file_id: {"content": bytes}}
+        self.callback_answers = []
+        self.edits = []
         self._lock = threading.RLock()
 
     def get_me(self):
@@ -281,7 +295,7 @@ class FakeTransport:
             self.poll_offsets.append(offset)
             return copy.deepcopy(sorted((u for u in self.updates if u["update_id"] >= offset), key=lambda x:x["update_id"])[:100])
 
-    def send_message(self, chat_id, text, thread_id=None, reply_to=None):
+    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None):
         with self._lock:
             outcome = self.outcomes.pop(0) if self.outcomes else "sent"
             if isinstance(outcome, BaseException):
@@ -292,6 +306,8 @@ class FakeTransport:
                 raise TransportError(429, 30)
             message = {"message_id": len(self.sent)+1, "chat": {"id": chat_id}, "text": text,
                        "message_thread_id": thread_id, "reply_to_message_id": reply_to}
+            if reply_markup is not None:
+                message["reply_markup"] = copy.deepcopy(reply_markup)
             self.sent.append(message)
             if outcome == "unknown":
                 raise UnknownSend()
@@ -326,6 +342,16 @@ class FakeTransport:
             if outcome == "crash":
                 raise SystemExit("fake crash after acceptance")
             return copy.deepcopy(message)
+
+    def answer_callback_query(self, callback_query_id, text):
+        with self._lock:
+            self.callback_answers.append({"id": callback_query_id, "text": text})
+            return True
+
+    def edit_message_text(self, chat_id, message_id, text):
+        with self._lock:
+            self.edits.append({"chat_id": chat_id, "message_id": message_id, "text": text})
+            return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
 
     def set_message_reaction(self, chat_id, message_id, emoji):
         with self._lock:
@@ -405,11 +431,13 @@ class FileFakeTransport:
             data["poll_offsets"].append(offset)
             return sorted([u for u in data["updates"] if u["update_id"] >= offset], key=lambda x:x["update_id"])[:100]
 
-    def send_message(self, chat_id, text, thread_id=None, reply_to=None):
+    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None):
         with self._data() as data:
             outcome = data["outcomes"].pop(0) if data["outcomes"] else "sent"
             result = {"message_id": len(data["sent"])+1, "chat": {"id": chat_id}, "text": text,
                       "message_thread_id": thread_id, "reply_to_message_id": reply_to}
+            if reply_markup is not None:
+                result["reply_markup"] = reply_markup
             if outcome not in ("reject", "rate_limit"):
                 data["sent"].append(result)
         if outcome == "reject":
@@ -449,6 +477,16 @@ class FileFakeTransport:
         if outcome == "crash":
             raise SystemExit("fake crash after acceptance")
         return result
+
+    def answer_callback_query(self, callback_query_id, text):
+        with self._data() as data:
+            data.setdefault("callback_answers", []).append({"id": callback_query_id, "text": text})
+        return True
+
+    def edit_message_text(self, chat_id, message_id, text):
+        with self._data() as data:
+            data.setdefault("edits", []).append({"chat_id": chat_id, "message_id": message_id, "text": text})
+        return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
 
     def set_message_reaction(self, chat_id, message_id, emoji):
         with self._data() as data:

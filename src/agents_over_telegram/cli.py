@@ -19,7 +19,7 @@ from .transport import FakeTransport, TelegramTransport, TransportError, make_tr
 # which Core records as an unknown send without ever reaching Telegram.
 LAZY_METHODS = frozenset({"get_me", "get_webhook_info", "get_updates", "send_message", "send_photo",
                           "send_document", "forward_message", "set_message_reaction", "get_chat_member",
-                          "download_file"})
+                          "download_file", "answer_callback_query", "edit_message_text"})
 
 
 class LazyTransport:
@@ -383,6 +383,18 @@ def _confirm_operator(summary):
         raise CredentialError("operator_confirmation_declined")
 
 
+def _confirm_or_ask_owner(core, client_id, summary, action, params):
+    """Confirm at the terminal, or without one ask the owner with Telegram buttons.
+
+    Returns None when the terminal confirmed, so the caller applies the change
+    now; otherwise the pending approval, which the owner's button press applies.
+    """
+    if sys.stdin.isatty():
+        _confirm_operator(summary)
+        return None
+    return core.request_owner_approval(client_id, action, params, summary)
+
+
 def run(args):
     from .core import Core, CoreError
     if args.command == "demo":
@@ -514,28 +526,42 @@ def run(args):
     if args.command == "bot-exchange-policy":
         return core.bot_exchange_policy(client_id, args.sender_id, enabled=args.exchange_enabled)
     if args.command == "delivery-settings":
+        def switch(value):
+            return None if value is None else value == "on"
+        changes = {"delivery_filter": args.delivery_filter, "capture_context": switch(args.capture_context),
+                   "accept_media": switch(args.accept_media), "reaction_wake": args.reaction_wake,
+                   "wake_interval": args.wake_interval, "wake_exempt": args.wake_exempt,
+                   "owner_notify": switch(args.owner_notify), "model_judge": switch(args.model_judge),
+                   "auto_allow": switch(args.auto_allow)}
+        warnings = []
         if args.model_judge == "on":
-            _confirm_operator("With the addressed filter, recent messages from this group or topic will be sent "
-                              "to the configured decision model (aot judge-config status) to decide whether a "
-                              "person's message is meant for this agent.")
+            warnings.append("With the addressed filter, recent messages from this group or topic will be sent "
+                            "to the configured decision model (aot judge-config status) to decide whether a "
+                            "person's message is meant for this agent.")
         if args.auto_allow == "on":
-            _confirm_operator("Every person and bot who posts in this group or topic will become an allowed sender "
-                              "and can give this agent work. That includes anyone who joins later, for example "
-                              "through an invite link. Remove one with allow-sender --remove.")
-        return core.delivery_settings(client_id, delivery_filter=args.delivery_filter,
-                                      capture_context=None if args.capture_context is None else args.capture_context == "on",
-                                      accept_media=None if args.accept_media is None else args.accept_media == "on",
-                                      reaction_wake=args.reaction_wake, wake_interval=args.wake_interval,
-                                      wake_exempt=args.wake_exempt,
-                                      owner_notify=None if args.owner_notify is None else args.owner_notify == "on",
-                                      model_judge=None if args.model_judge is None else args.model_judge == "on",
-                                      auto_allow=None if args.auto_allow is None else args.auto_allow == "on")
+            warnings.append("Every person and bot who posts in this group or topic will become an allowed sender "
+                            "and can give this agent work. That includes anyone who joins later, for example "
+                            "through an invite link. Remove one with allow-sender --remove.")
+        if warnings:
+            # The whole command waits for the owner, so nothing applies half.
+            pending = _confirm_or_ask_owner(core, client_id, " ".join(warnings), "delivery_settings",
+                                            {name: value for name, value in changes.items() if value is not None})
+            if pending is not None:
+                return pending
+        return core.delivery_settings(client_id, **changes)
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command == "conversation-budget":
         if args.additional_sends is not None:
-            _confirm_operator(f"Allow {args.additional_sends} more sends per rolling window in conversation "
-                              f"{args.conversation_id!r} for {args.duration_seconds} seconds.")
+            pending = _confirm_or_ask_owner(
+                core, client_id,
+                f"Allow {args.additional_sends} more sends per rolling window in conversation "
+                f"{args.conversation_id!r} for {args.duration_seconds} seconds. Reason: {args.reason}",
+                "conversation_budget",
+                {"conversation_id": args.conversation_id, "additional_sends": args.additional_sends,
+                 "duration_seconds": args.duration_seconds, "reason": args.reason})
+            if pending is not None:
+                return pending
         return core.conversation_budget(client_id, args.conversation_id,
                                         additional_sends=args.additional_sends,
                                         duration_seconds=args.duration_seconds, reason=args.reason)

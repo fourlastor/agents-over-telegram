@@ -7,7 +7,6 @@ import pytest
 
 from agents_over_telegram.cli import parser, run
 from agents_over_telegram.core import Core, CoreError
-from agents_over_telegram.credentials import CredentialError
 from agents_over_telegram.onboarding import human_status
 from test_core import append, bind, env, rows  # noqa: F401 (env is a fixture)
 
@@ -184,11 +183,10 @@ def cli(env):
     return core, client, call
 
 
-def test_turning_auto_allow_on_needs_the_owner_at_a_terminal(cli, monkeypatch):
+def test_turning_auto_allow_on_without_a_terminal_asks_the_owner(cli, monkeypatch):
     core, client, call = cli
     monkeypatch.setattr('sys.stdin', types.SimpleNamespace(isatty=lambda: False))
-    with pytest.raises(CredentialError, match='operator_confirmation_required'):
-        call('delivery-settings', '--auto-allow', 'on')
+    assert call('delivery-settings', '--auto-allow', 'on')['status'] == 'owner_approval_pending'
     assert core.delivery_settings(client)['auto_allow'] is False
     # Turning it off needs no confirmation.
     assert call('delivery-settings', '--auto-allow', 'off')['auto_allow'] is False
@@ -197,7 +195,7 @@ def test_turning_auto_allow_on_needs_the_owner_at_a_terminal(cli, monkeypatch):
 def test_cli_turns_it_on_and_removes_a_sender(cli, monkeypatch):
     import agents_over_telegram.cli as cli_module
     core, client, call = cli
-    monkeypatch.setattr(cli_module, '_confirm_operator', lambda summary: None)
+    monkeypatch.setattr(cli_module, '_confirm_or_ask_owner', lambda *args: None)
     assert call('delivery-settings', '--auto-allow', 'on')['auto_allow'] is True
     call('allow-sender', '--sender-id', '202')
     assert call('allow-sender', '--sender-id', '202', '--remove') == {'sender_id': 202, 'removed': True}

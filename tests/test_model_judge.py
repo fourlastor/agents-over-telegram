@@ -397,7 +397,7 @@ def test_cli_reports_the_config_without_printing_the_key(tmp_path, monkeypatch):
     assert cli('judge-config', 'clear') == {'cleared': True}
 
 
-def test_turning_the_judge_on_needs_the_owner_at_a_terminal(env, monkeypatch):
+def test_turning_the_judge_on_without_a_terminal_asks_the_owner(env, monkeypatch):
     core, transport, clock = env
     client, credentials = bind(core, transport)
     client_file = core.state_dir / 'client.json'
@@ -406,8 +406,7 @@ def test_turning_the_judge_on_needs_the_owner_at_a_terminal(env, monkeypatch):
     args = parser().parse_args(['--state-dir', str(core.state_dir), '--fake', 'delivery-settings',
                                 '--client-file', str(client_file), '--model-judge', 'on'])
     monkeypatch.setattr('sys.stdin', types.SimpleNamespace(isatty=lambda: False))
-    with pytest.raises(CredentialError, match='operator_confirmation_required'):
-        run(args)
+    assert run(args)['status'] == 'owner_approval_pending'
     assert core.delivery_settings(client)['model_judge'] is False
 
 
