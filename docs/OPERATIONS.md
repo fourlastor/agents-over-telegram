@@ -162,7 +162,7 @@ For Beta, repeat `client-create`, `pair-begin`, collection and confirmation with
 
 ### Additional senders and peers
 
-Pairing authorizes the observed owner. Group membership and BotFather visibility settings do not authorize other senders in this plugin. Existing grants from a different bot or retired receiver do not transfer automatically. Use the operator's intended scope and verified numeric identities for local grants:
+Pairing authorizes the observed owner. Group membership and BotFather visibility settings do not authorize other senders in this plugin, unless the owner turns on [auto-allow](#auto-allow-in-a-trusted-group). Existing grants from a different bot or retired receiver do not transfer automatically. Use the operator's intended scope and verified numeric identities for local grants:
 
 ```sh
 "$AOT_BIN" --state-dir "$AOT_STATE" allow-sender --client-file "$AOT_STATE/clients/alpha.json" --sender-id 123456
@@ -170,6 +170,25 @@ Pairing authorizes the observed owner. Group membership and BotFather visibility
 ```
 
 Use `allow-sender --bot` only for an intended external bot's verified numeric ID. A peer grant is directional; grant the reverse direction separately only when wanted. A message text such as “I am Beta” cannot create a grant. These grants permit transport routing; the agent still needs user authorization for the communication task.
+
+To stop accepting a sender, run `allow-sender --sender-id 123456 --remove`. The owner cannot be removed. A removed sender stays out, also with auto-allow on, until it is allowed again with `allow-sender`.
+
+#### Auto-allow in a trusted group
+
+In a group where everyone is trusted, collecting each person's and each bot's numeric ID gets tedious. The owner can let AOT do it:
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --auto-allow on
+```
+
+The command asks the owner to type `yes` at a terminal first. With auto-allow on, every person and every bot who posts a message in the bound group or topic becomes an allowed sender the first time AOT sees them. From then on, they're handled exactly like a sender added with `allow-sender`: the filters, media, reactions, the bot exchange policy and the conversation budgets all apply as usual. Keep in mind that anyone who can post in the group can then give the agent work, including people who join later through an invite link.
+
+- Only messages add senders. A reaction alone doesn't.
+- Telegram's service accounts (linked channel posts, anonymous admins, the Telegram service account) are never added, and messages sent on behalf of a chat stay refused as before.
+- An ID that is already allowed as a person isn't added again as a bot, or the other way round.
+- An automatic grant never replaces an explicit one. Running `allow-sender` for an automatically added sender turns it into an explicit grant.
+- `aot status` lists automatically added senders with `auto_added`, the time they were added, and `username`, the Telegram username seen then. `status --human` marks them `auto`.
+- `--auto-allow off` stops adding new senders. Senders added so far stay allowed; remove them one by one with `allow-sender --remove`.
 
 For an external bot already present in the same bound destination, the owner can configure its addressed command convention. This prefixes normal publications in that destination; it does not choose another Telegram chat or grant the external sender access:
 
