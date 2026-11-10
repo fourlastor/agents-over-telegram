@@ -3234,7 +3234,7 @@ class Core:
         panel = db.execute('SELECT 1 FROM settings_panels WHERE owner_id=? AND message_id=?',
                            (sender.get('id'), message_id)).fetchone() if private else None
         request = settings_panel.parse(query.get('data')) if panel else None
-        connections = self._owner_connections(db, sender['id'])[:settings_panel.MAX_CONNECTIONS] if panel else []
+        connections = self._owner_connections(db, sender.get('id'))[:settings_panel.MAX_CONNECTIONS] if panel else []
         # The connection must be one the presser owns now, on their latest panel.
         target = next((c for c in connections if request and settings_panel.key(c['client_id']) == request[1]), None)
         if panel is None:
