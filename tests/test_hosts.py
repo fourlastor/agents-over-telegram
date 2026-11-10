@@ -556,8 +556,14 @@ def test_wake_exits_2_with_a_notice_when_a_message_waits(tmp_path):
 
 
 def keep_alive(result, value='on'):
-    invoke('--state-dir', result['state_dir'], '--fake', 'delivery-settings', '--client-file', result['client_file'],
-           '--keep-alive', value)
+    # Turning it on needs the owner; here the owner confirms at a terminal.
+    original = cli._confirm_or_ask_owner
+    cli._confirm_or_ask_owner = lambda *args: None
+    try:
+        invoke('--state-dir', result['state_dir'], '--fake', 'delivery-settings', '--client-file', result['client_file'],
+               '--keep-alive', value)
+    finally:
+        cli._confirm_or_ask_owner = original
 
 
 def test_keep_alive_wakes_the_session_once_at_the_time_limit(tmp_path):

@@ -499,7 +499,8 @@ def test_transport_requests_reactions_and_sends_one_emoji(tmp_path):
     transport = TelegramTransport("123456:TEST_TOKEN_abcdefghijklmnop", opener=Opener())
     transport.get_updates(offset=7)
     body = json.loads(captured[-1].data.decode())
-    assert body["allowed_updates"] == ["message", "edited_message", "my_chat_member", "message_reaction"]
+    assert body["allowed_updates"] == ["message", "edited_message", "my_chat_member", "message_reaction",
+                                      "callback_query"]
     transport.set_message_reaction(-100, 42, "👍")
     method = captured[-1].full_url.rsplit("/", 1)[-1]
     body = json.loads(captured[-1].data.decode())

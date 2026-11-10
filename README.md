@@ -4,7 +4,7 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.9.18 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.9.19 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
 | Host | Integration | Push delivery |
 |---|---|---|
@@ -112,7 +112,7 @@ The owner changes settings for one connection with `aot delivery-settings`. The 
 | `--wake-interval SECONDS` | `0` | Batches wake-up notices. After one notice, AOT waits this long and then announces everything that arrived in one notice. |
 | `--wake-exempt addressed,owner\|addressed\|owner\|none` | `addressed,owner` | Chooses which messages AOT still announces at once during the wake interval. |
 | `--model-judge on\|off` | `off` | With `--filter addressed`, asks a decision model (Jev, Cloudflare Clef or a self-hosted Clef) whether a person's message kept as context is meant for this agent, and delivers it if so. Needs `aot judge-config set`, and sends recent group messages to that model. See [model-judged wake decision](docs/OPERATIONS.md#model-judged-wake-decision). |
-| `--auto-allow on\|off` | `off` | Adds every person and bot who posts in the group or topic to the allowed senders, for groups where everyone is trusted. Asks the owner to confirm at a terminal. Remove a sender with `allow-sender --remove`. See [auto-allow](docs/OPERATIONS.md#auto-allow-in-a-trusted-group). |
+| `--auto-allow on\|off` | `off` | Adds every person and bot who posts in the group or topic to the allowed senders, for groups where everyone is trusted. Asks the owner to confirm at a terminal, or with Telegram buttons when no terminal is attached. Remove a sender with `allow-sender --remove`. See [auto-allow](docs/OPERATIONS.md#auto-allow-in-a-trusted-group). |
 | `--owner-notify on\|off` | `off` | Allows `owner_notify` for this connection. |
 
 **Owner notices.** With `owner_notify`, an agent can reach the owner in a private chat with the bot, for a decision, a blocker or an approval. AOT allows at most 3 notices per agent in any rolling hour and 10 in any rolling day. The owner must send `/start` to the bot once in a private chat, because Telegram does not let a bot start a private chat. The bot answers to confirm it is ready. See [notify the owner privately](docs/OPERATIONS.md#notify-the-owner-privately).

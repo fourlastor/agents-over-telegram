@@ -376,6 +376,16 @@ class Core:
                     client_id TEXT NOT NULL REFERENCES clients(id), sender_id INTEGER NOT NULL,
                     is_bot INTEGER NOT NULL, PRIMARY KEY(client_id,sender_id)
                 );
+                CREATE TABLE IF NOT EXISTS owner_approvals (
+                    id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id),
+                    owner_id INTEGER NOT NULL, action TEXT NOT NULL, params TEXT NOT NULL,
+                    text TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+                    created REAL NOT NULL, expires REAL NOT NULL, decided REAL
+                );
+                CREATE TABLE IF NOT EXISTS callback_answers (
+                    callback_id TEXT PRIMARY KEY, text TEXT NOT NULL, chat_id INTEGER,
+                    message_id INTEGER, edit_text TEXT, created REAL NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS blocked_senders (
                     client_id TEXT NOT NULL REFERENCES clients(id), sender_id INTEGER NOT NULL,
                     PRIMARY KEY(client_id,sender_id)
@@ -868,40 +878,47 @@ class Core:
         turn per idle day and is off until the owner turns it on.
         The other settings default to the original behavior.
         """
-        if delivery_filter is not None and delivery_filter not in self.DELIVERY_FILTERS:
-            raise CoreError('invalid_delivery_settings')
-        if any(value is not None and type(value) is not bool for value in (capture_context, accept_media, owner_notify, model_judge, auto_allow, keep_alive)):
-            raise CoreError('invalid_delivery_settings')
-        if reaction_wake is not None and reaction_wake not in self.REACTION_WAKE_MODES:
-            raise CoreError('invalid_delivery_settings')
-        if wake_interval is not None and (not _integer(wake_interval)
-                                          or not 0 <= wake_interval <= self.WAKE_INTERVAL_MAX):
-            raise CoreError('invalid_delivery_settings')
-        if wake_exempt is not None and wake_exempt not in self.WAKE_EXEMPT_MODES:
-            raise CoreError('invalid_delivery_settings')
+        changes = {'delivery_filter': delivery_filter, 'capture_context': capture_context,
+                   'accept_media': accept_media, 'reaction_wake': reaction_wake,
+                   'wake_interval': wake_interval, 'wake_exempt': wake_exempt,
+                   'owner_notify': owner_notify, 'model_judge': model_judge, 'auto_allow': auto_allow,
+                   'keep_alive': keep_alive}
+        self._check_delivery_settings(changes)
         with self._tx() as db:
             self._binding(db, client_id)
-            if delivery_filter is not None:
-                db.execute('UPDATE bindings SET delivery_filter=? WHERE client_id=? AND connected=1', (delivery_filter, client_id))
-            if capture_context is not None:
-                db.execute('UPDATE bindings SET capture_context=? WHERE client_id=? AND connected=1', (int(capture_context), client_id))
-            if accept_media is not None:
-                db.execute('UPDATE bindings SET accept_media=? WHERE client_id=? AND connected=1', (int(accept_media), client_id))
-            if reaction_wake is not None:
-                db.execute('UPDATE bindings SET reaction_wake=? WHERE client_id=? AND connected=1', (reaction_wake, client_id))
-            if wake_interval is not None:
-                db.execute('UPDATE bindings SET wake_interval=? WHERE client_id=? AND connected=1', (wake_interval, client_id))
-            if wake_exempt is not None:
-                db.execute('UPDATE bindings SET wake_exempt=? WHERE client_id=? AND connected=1', (wake_exempt, client_id))
-            if owner_notify is not None:
-                db.execute('UPDATE bindings SET owner_notify=? WHERE client_id=? AND connected=1', (int(owner_notify), client_id))
-            if model_judge is not None:
-                db.execute('UPDATE bindings SET model_judge=? WHERE client_id=? AND connected=1', (int(model_judge), client_id))
-            if auto_allow is not None:
-                db.execute('UPDATE bindings SET auto_allow=? WHERE client_id=? AND connected=1', (int(auto_allow), client_id))
-            if keep_alive is not None:
-                db.execute('UPDATE bindings SET keep_alive=? WHERE client_id=? AND connected=1', (int(keep_alive), client_id))
+            self._write_delivery_settings(db, client_id, changes)
             row = self._binding(db, client_id)
+        return self._delivery_settings_view(row)
+
+    _BOOL_SETTINGS = ('capture_context', 'accept_media', 'owner_notify', 'model_judge', 'auto_allow', 'keep_alive')
+
+    def _check_delivery_settings(self, changes):
+        if set(changes) - {'delivery_filter', 'reaction_wake', 'wake_interval', 'wake_exempt', *self._BOOL_SETTINGS}:
+            raise CoreError('invalid_delivery_settings')
+        value = changes.get('delivery_filter')
+        if value is not None and value not in self.DELIVERY_FILTERS:
+            raise CoreError('invalid_delivery_settings')
+        if any(changes.get(name) is not None and type(changes[name]) is not bool for name in self._BOOL_SETTINGS):
+            raise CoreError('invalid_delivery_settings')
+        value = changes.get('reaction_wake')
+        if value is not None and value not in self.REACTION_WAKE_MODES:
+            raise CoreError('invalid_delivery_settings')
+        value = changes.get('wake_interval')
+        if value is not None and (not _integer(value) or not 0 <= value <= self.WAKE_INTERVAL_MAX):
+            raise CoreError('invalid_delivery_settings')
+        value = changes.get('wake_exempt')
+        if value is not None and value not in self.WAKE_EXEMPT_MODES:
+            raise CoreError('invalid_delivery_settings')
+
+    @staticmethod
+    def _write_delivery_settings(db, client_id, changes):
+        # Column names come from the fixed list checked above, never from input.
+        for name, value in changes.items():
+            if value is not None:
+                db.execute(f'UPDATE bindings SET {name}=? WHERE client_id=? AND connected=1',
+                           (int(value) if type(value) is bool else value, client_id))
+
+    def _delivery_settings_view(self, row):
         return {'delivery_filter': row['delivery_filter'], 'capture_context': bool(row['capture_context']),
                 'accept_media': bool(row['accept_media']), 'reaction_wake': row['reaction_wake'],
                 'wake_interval': row['wake_interval'], 'wake_exempt': row['wake_exempt'],
@@ -1051,6 +1068,10 @@ class Core:
                        | ({'auto_added': r['auto_added'], 'username': r['username']} if r['auto_added'] is not None else {})
                        for r in db.execute('SELECT sender_id,is_bot,auto_added,username FROM allowed_senders '
                                            'WHERE client_id=? ORDER BY sender_id', (client_id,))]
+            approvals = [dict(r) for r in db.execute(
+                "SELECT id AS approval_id,action,CASE WHEN status='pending' AND expires<=? THEN 'expired' ELSE status END AS status,"
+                'error,created,expires AS expires_at,decided FROM owner_approvals WHERE client_id=? ORDER BY created DESC LIMIT 5',
+                (now, client_id))]
             gap = account['last_gap_at'] is not None or (account['last_intake'] is not None and now - account['last_intake'] >= self.HISTORY_WINDOW)
             from .relay import WAIT_FOR_DESKTOP_WAKE, unresolved_wakes
             held = unresolved_wakes(db, now, client_id)
@@ -1118,6 +1139,7 @@ class Core:
                 'outbox': counts, 'permitted_peers': peers,
                 'bot': {'id': account['bot_id'], 'username': account['username']},
                 'allowed_senders': senders,
+                'owner_approvals': approvals,
                 'intake': {'last_success_at': account['last_intake'], 'last_attempt_at': account['last_attempt'],
                            'error': account['intake_error'], 'last_gap_at': account['last_gap_at'],
                            'possible_offline_gap': bool(gap)},
@@ -1265,6 +1287,10 @@ class Core:
         reaction = update.get('message_reaction')
         if isinstance(reaction, dict):
             self._route_reaction(db, update_id, reaction, account, now)
+            return
+        callback = update.get('callback_query')
+        if isinstance(callback, dict):
+            self._route_callback(db, update_id, callback, now)
             return
         kind = 'edited_message' if 'edited_message' in update else 'message'
         msg = update.get(kind)
@@ -1990,6 +2016,11 @@ class Core:
                     db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL WHERE singleton=1', (cursor, self.clock(), self.clock(), self.clock(), self.clock()))
                 self._probe_bot_admin(account)
                 try:
+                    self._answer_callbacks()
+                except Exception:
+                    # Answering a button press is a courtesy too.
+                    pass
+                try:
                     self._send_start_replies()
                 except Exception:
                     # A courtesy answer must never turn a good intake into a failure.
@@ -2313,10 +2344,7 @@ class Core:
             raise CoreError('invalid_conversation')
         changing = additional_sends is not None
         if changing:
-            if (not _integer(additional_sends) or not 1 <= additional_sends <= 32
-                    or not _integer(duration_seconds) or not 1 <= duration_seconds <= 86400
-                    or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 500):
-                raise CoreError('invalid_conversation_budget')
+            self._check_budget_grant(additional_sends, duration_seconds, reason)
         elif duration_seconds is not None or reason is not None:
             raise CoreError('invalid_conversation_budget')
         now = self.clock()
@@ -2327,14 +2355,7 @@ class Core:
             count = row['send_count'] if row else 0
             limits = self._limits(db)
             if changing:
-                db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
-                # A grant raises this conversation's rolling-window limit while it is active.
-                db.execute(
-                    'INSERT INTO conversation_budget_grants'
-                    '(client_id,conversation_id,send_limit,created,expires_at,reason,additional_sends)'
-                    ' VALUES(?,?,?,?,?,?,?)',
-                    (client_id, conversation, limits['conversation_send_limit'] + additional_sends,
-                     now, now + duration_seconds, reason.strip(), additional_sends))
+                self._grant_budget(db, client_id, conversation, additional_sends, duration_seconds, reason, now, limits)
             grants = [dict(row) for row in db.execute(
                 'SELECT id,additional_sends,created,expires_at,reason FROM conversation_budget_grants '
                 'WHERE client_id=? AND conversation_id=? ORDER BY id', (client_id, conversation))]
@@ -2346,6 +2367,24 @@ class Core:
                 'window_seconds': limits['conversation_window_seconds'], 'sent_in_window': used,
                 'window_reset_at': reset_at,
                 'remaining_sends': max(0, limit - used), 'retry_at': retry_at, 'grants': grants}
+
+    @staticmethod
+    def _check_budget_grant(additional_sends, duration_seconds, reason):
+        if (not _integer(additional_sends) or not 1 <= additional_sends <= 32
+                or not _integer(duration_seconds) or not 1 <= duration_seconds <= 86400
+                or not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 500):
+            raise CoreError('invalid_conversation_budget')
+
+    @staticmethod
+    def _grant_budget(db, client_id, conversation, additional_sends, duration_seconds, reason, now, limits):
+        db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
+        # A grant raises this conversation's rolling-window limit while it is active.
+        db.execute(
+            'INSERT INTO conversation_budget_grants'
+            '(client_id,conversation_id,send_limit,created,expires_at,reason,additional_sends)'
+            ' VALUES(?,?,?,?,?,?,?)',
+            (client_id, conversation, limits['conversation_send_limit'] + additional_sends,
+             now, now + duration_seconds, reason.strip(), additional_sends))
 
     def _delete_attachment_files(self, delivery_ids):
         directory = self.state_dir / 'attachments'
@@ -2696,6 +2735,179 @@ class Core:
                       (binding['client_id'], owner, reply_to, reply_to)).fetchone():
             return 'notice'
         return None
+
+    APPROVAL_ACTIONS = ('delivery_settings', 'conversation_budget')
+    APPROVAL_SECONDS = 600
+    APPROVAL_PENDING_LIMIT = 3
+
+    def request_owner_approval(self, client_id, action, params, summary):
+        """Ask the owner to approve one owner-only change with buttons in their private chat.
+
+        The local CLI uses this when no terminal is attached, instead of the
+        typed confirmation. Nothing changes now: the change is stored as a
+        pending approval with a random id, and the owner's private chat with
+        the shared bot gets the summary with Approve and Decline buttons. Only
+        a press from the owner's own account, before the request expires,
+        applies it (see ``_route_callback``). An agent can start a request but
+        never complete one.
+        """
+        if action not in self.APPROVAL_ACTIONS or not isinstance(params, dict):
+            raise CoreError('invalid_owner_approval')
+        if not isinstance(summary, str) or not 1 <= len(summary) <= 1000:
+            raise CoreError('invalid_owner_approval')
+        if action == 'delivery_settings':
+            self._check_delivery_settings(params)
+        else:
+            if set(params) != {'conversation_id', 'additional_sends', 'duration_seconds', 'reason'}:
+                raise CoreError('invalid_owner_approval')
+            self._check_budget_grant(params['additional_sends'], params['duration_seconds'], params['reason'])
+        now = self.clock()
+        approval_id = secrets.token_hex(8)
+        with self._tx() as db:
+            client = self._client(db, client_id)
+            binding = self._binding(db, client_id, usable=True)
+            if action == 'conversation_budget':
+                self._conversation(db, client_id, params['conversation_id'])
+            db.execute("UPDATE owner_approvals SET status='expired' WHERE status='pending' AND expires<=?", (now,))
+            pending = db.execute("SELECT count(*) FROM owner_approvals WHERE client_id=? AND status='pending'",
+                                 (client_id,)).fetchone()[0]
+            if pending >= self.APPROVAL_PENDING_LIMIT:
+                raise CoreError('owner_approval_limit')
+            text = self._approval_text(client['label'], binding['title'], action, params, summary)
+            db.execute("INSERT INTO owner_approvals(id,client_id,owner_id,action,params,text,status,created,expires) "
+                       "VALUES(?,?,?,?,?,?,'pending',?,?)",
+                       (approval_id, client_id, binding['owner_id'], action, json.dumps(params), text,
+                        now, now + self.APPROVAL_SECONDS))
+            owner_id = binding['owner_id']
+            username = self._account(db)['username']
+        buttons = {'inline_keyboard': [[{'text': 'Approve', 'callback_data': f'aot:a:{approval_id}'},
+                                        {'text': 'Decline', 'callback_data': f'aot:d:{approval_id}'}]]}
+        delivery = 'sent'
+        try:
+            self.transport.send_message(chat_id=owner_id, text=text, reply_markup=buttons)
+        except TransportError as error:
+            if isinstance(error.code, int) and 400 <= error.code < 500:
+                code = 'owner_chat_not_started' if error.code == 403 else 'telegram_rejected'
+                with self._tx() as db:
+                    db.execute("UPDATE owner_approvals SET status='failed',error=? WHERE id=?", (code, approval_id))
+                raise CoreError(code, details={'bot_username': username} if error.code == 403 else None) from None
+            # The owner may still have the message; its buttons keep working.
+            delivery = 'uncertain'
+        except Exception:
+            delivery = 'uncertain'
+        return {'approval_id': approval_id, 'status': 'owner_approval_pending', 'action': action,
+                'delivery': delivery, 'expires_at': now + self.APPROVAL_SECONDS,
+                'next_action': 'The owner approves or declines with the buttons in their private chat with the bot.'}
+
+    def _approval_text(self, label, title, action, params, summary):
+        """The owner's view of a request: every change on its own line, then the warning.
+
+        Approve applies exactly these values, so all of them are listed, not
+        only the ones that need approval. Every free-text part is collapsed to
+        one line and capped, so it cannot fake a line of the request.
+        """
+        def line(value, limit=200):
+            text = ' '.join(str(value).split())
+            return text if len(text) <= limit else text[:limit - 1] + '…'
+
+        if action == 'delivery_settings':
+            changes = [f'- {name}: {("on" if value else "off") if type(value) is bool else line(value)}'
+                       for name, value in params.items()]
+        else:
+            changes = [f'- conversation: {line(params["conversation_id"])}',
+                       f'- additional sends per window: {params["additional_sends"]}',
+                       f'- for: {params["duration_seconds"]} seconds',
+                       f'- reason: {line(params["reason"])}']
+        return (f'[Agent: {line(label, 64)} | {line(title, 128)}]\n'
+                f'Requested change ({action.replace("_", " ")}):\n' + '\n'.join(changes) + '\n\n'
+                f'{line(summary, 1000)}\n\n'
+                f'Approve this change? The request expires in {self.APPROVAL_SECONDS // 60} minutes.')
+
+    def _route_callback(self, db, update_id, callback, now):
+        """Handle one inline button press; only the owner's press on a live request counts."""
+        callback_id = callback.get('id')
+        if not isinstance(callback_id, str) or not 1 <= len(callback_id) <= 64:
+            self._unmatched(db, update_id, None, 'unsupported_update', now)
+            return
+        sender = _mapping(callback.get('from'))
+        message = _mapping(callback.get('message'))
+        chat = _mapping(message.get('chat'))
+        data = callback.get('data')
+        match = re.fullmatch(r'aot:([ad]):([0-9a-f]{16})', data) if isinstance(data, str) else None
+        private = (sender.get('is_bot') is False and _integer(sender.get('id')) and chat.get('type') == 'private'
+                   and chat.get('id') == sender.get('id') and _integer(message.get('message_id')))
+
+        def answer(text, edit=None):
+            # The private chat id is kept only until the answer goes out, so the
+            # message can be edited; _answer_callbacks deletes the row first.
+            db.execute('INSERT OR IGNORE INTO callback_answers(callback_id,text,chat_id,message_id,edit_text,created) '
+                       'VALUES(?,?,?,?,?,?)', (callback_id, text, chat.get('id') if private else None,
+                                               message.get('message_id') if private else None, edit, now))
+
+        row = db.execute('SELECT * FROM owner_approvals WHERE id=?', (match.group(2),)).fetchone() if match else None
+        if not private or row is None or row['owner_id'] != sender.get('id'):
+            # The refusal record never keeps the chat id: in a private chat it is
+            # the person's user id.
+            self._unmatched(db, update_id, None, 'private_chat' if chat.get('type') == 'private' else 'unsupported_update', now)
+            answer('This button does not belong to a request of yours.')
+            return
+        if row['status'] != 'pending':
+            answer(f'This request was already {row["status"].replace("_", " ")}.')
+            return
+        if row['expires'] <= now:
+            db.execute("UPDATE owner_approvals SET status='expired' WHERE id=?", (row['id'],))
+            answer('This request expired.', row['text'] + '\n\nExpired: nothing changed.')
+            return
+        if match.group(1) == 'd':
+            db.execute("UPDATE owner_approvals SET status='declined',decided=? WHERE id=?", (now, row['id']))
+            answer('Declined.', row['text'] + '\n\nDeclined: nothing changed.')
+            return
+        db.execute('SAVEPOINT approval')
+        try:
+            self._apply_approval(db, row, now)
+        except CoreError as error:
+            db.execute('ROLLBACK TO SAVEPOINT approval')
+            db.execute('RELEASE SAVEPOINT approval')
+            db.execute("UPDATE owner_approvals SET status='apply_failed',error=?,decided=? WHERE id=?",
+                       (error.code, now, row['id']))
+            answer('Could not apply the change.', row['text'] + f'\n\nApproved, but it could not be applied ({error.code}).')
+            return
+        db.execute('RELEASE SAVEPOINT approval')
+        db.execute("UPDATE owner_approvals SET status='approved',decided=? WHERE id=?", (now, row['id']))
+        answer('Approved.', row['text'] + '\n\nApproved and applied.')
+
+    def _apply_approval(self, db, row, now):
+        params = json.loads(row['params'])
+        # A re-paired connection has a new owner; the old owner's buttons no longer count.
+        if self._binding(db, row['client_id'])['owner_id'] != row['owner_id']:
+            raise CoreError('owner_changed')
+        if row['action'] == 'delivery_settings':
+            self._check_delivery_settings(params)
+            self._binding(db, row['client_id'])
+            self._write_delivery_settings(db, row['client_id'], params)
+        elif row['action'] == 'conversation_budget':
+            self._check_budget_grant(params['additional_sends'], params['duration_seconds'], params['reason'])
+            self._binding(db, row['client_id'], usable=True)
+            conversation = self._conversation(db, row['client_id'], params['conversation_id'])
+            self._grant_budget(db, row['client_id'], conversation, params['additional_sends'],
+                               params['duration_seconds'], params['reason'], now, self._limits(db))
+        else:
+            raise CoreError('invalid_owner_approval')
+
+    def _answer_callbacks(self):
+        """Answer recorded button presses and update their messages; never fails collection."""
+        with self._db() as db:
+            rows = db.execute('SELECT * FROM callback_answers ORDER BY created LIMIT 20').fetchall()
+        for row in rows:
+            # Each press is answered at most once, whatever happens next.
+            with self._tx() as db:
+                if not db.execute('DELETE FROM callback_answers WHERE callback_id=?', (row['callback_id'],)).rowcount:
+                    continue
+            with contextlib.suppress(Exception):
+                self.transport.answer_callback_query(row['callback_id'], row['text'])
+            if row['edit_text'] and row['chat_id'] and row['message_id']:
+                with contextlib.suppress(Exception):
+                    self.transport.edit_message_text(row['chat_id'], row['message_id'], row['edit_text'])
 
     def owner_notify(self, client_id, text, idempotency_key, forward_message_id=None, reply_to=None):
         """Queue one low-volume notification to the owner's private chat with the bot.

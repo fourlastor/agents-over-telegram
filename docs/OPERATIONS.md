@@ -181,7 +181,7 @@ In a group where everyone is trusted, collecting each person's and each bot's nu
 "$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --auto-allow on
 ```
 
-The command asks the owner to type `yes` at a terminal first. With auto-allow on, every person and every bot who posts a message in the bound group or topic becomes an allowed sender the first time AOT sees them. From then on, they're handled exactly like a sender added with `allow-sender`: the filters, media, reactions, the bot exchange policy and the conversation budgets all apply as usual. Keep in mind that anyone who can post in the group can then give the agent work, including people who join later through an invite link.
+The command asks the owner to type `yes` at a terminal first, or, with no terminal attached, to [approve it in Telegram](#approve-a-change-in-telegram). With auto-allow on, every person and every bot who posts a message in the bound group or topic becomes an allowed sender the first time AOT sees them. From then on, they're handled exactly like a sender added with `allow-sender`: the filters, media, reactions, the bot exchange policy and the conversation budgets all apply as usual. Keep in mind that anyone who can post in the group can then give the agent work, including people who join later through an invite link.
 
 - Only messages add senders. A reaction alone doesn't.
 - Telegram's service accounts (linked channel posts, anonymous admins, the Telegram service account) are never added, and messages sent on behalf of a chat stay refused as before.
@@ -189,6 +189,20 @@ The command asks the owner to type `yes` at a terminal first. With auto-allow on
 - An automatic grant never replaces an explicit one. Running `allow-sender` for an automatically added sender turns it into an explicit grant.
 - `aot status` lists automatically added senders with `auto_added`, the time they were added, and `username`, the Telegram username seen then. `status --human` marks them `auto`.
 - `--auto-allow off` stops adding new senders. Senders added so far stay allowed; remove them one by one with `allow-sender --remove`.
+
+#### Approve a change in Telegram
+
+Some changes need the owner's say-so: `delivery-settings --auto-allow on`, `--model-judge on` and `--keep-alive on`, and a `conversation-budget` grant. At a terminal, the command asks the owner to type `yes`. When no terminal is attached, which is how agents run commands, AOT asks the owner in Telegram instead:
+
+- The command changes nothing yet. It returns `status: "owner_approval_pending"` with an `approval_id` and `expires_at`.
+- The shared bot sends the owner a private message. It names the agent and the group, lists every value the command will set (one per line, including settings that need no approval), repeats the warning, and has **Approve** and **Decline** buttons. Free text such as a budget reason is shown on one line and shortened.
+- **Approve** applies the whole command at once, including any other settings in it. **Decline** drops it. After either, the message shows the outcome and its buttons go away.
+- Only a press from the owner's own Telegram account, in the private chat with the bot, counts. Presses by anyone else, from a forwarded copy, on a request that expired, or after the connection was paired again with a new owner are refused.
+- A request expires after 10 minutes. Each connection can have at most 3 waiting at a time.
+- The owner must have sent `/start` to the bot in a private chat once, as for [owner notices](#notify-the-owner-privately). Otherwise the command fails with `owner_chat_not_started`.
+- `aot status` lists the last few requests under `owner_approvals`, with their status: `pending`, `approved`, `declined`, `expired`, `failed` (the message could not be sent) or `apply_failed` (approved, but the change no longer applied, for example after a disconnect).
+
+An agent can start a request but can't complete one. Changing the send limits for the whole bot (`exchange-limits`) still needs a terminal.
 
 For an external bot already present in the same bound destination, the owner can configure its addressed command convention. This prefixes normal publications in that destination; it does not choose another Telegram chat or grant the external sender access:
 
@@ -242,7 +256,7 @@ In Claude Code, an idle session hears Telegram through a background waiter that 
 
 - When the waiter reaches its limit with no new message, it wakes the session once. The notice asks the model to end the turn at once. The turn end starts a new waiter for another 23 hours.
 - The cost is one short model turn per idle day. That turn reads the whole conversation again, and after a day the prompt cache has expired, so it is not cached.
-- It is off by default. With it off, the waiter stops quietly as before.
+- It is off by default. With it off, the waiter stops quietly as before. Because it spends the owner's money, turning it on asks the owner to type `yes` at a terminal, or to [approve it in Telegram](#approve-a-change-in-telegram) when no terminal is attached.
 - It applies only to Claude Code's waiter. Codex, Pi, Amp and `relay-desktop` don't use it.
 
 ## Launch one scoped MCP client
@@ -419,7 +433,7 @@ The rules above cannot catch every message meant for an agent, for example a per
 - The endpoint must use https. Plain http is allowed only to this computer (`localhost` or a loopback address).
 - `--threshold` sets how sure the model must be: AOT delivers when the model's probability for yes is at least this value. The default is `0.5`; raise it toward `0.9` for fewer, surer wakes.
 - `judge-config status` shows the endpoint, the model, the threshold and whether a key is stored. `judge-config clear` deletes the configuration. One configuration serves every connection on this computer that turns the judge on.
-- `--model-judge on` is off by default and set per connection. It asks you to type `yes` at a terminal, because it sends group text to the configured model. The model sees the agent's label and bot username, up to 8 earlier messages from the same chat or topic (this agent's own posts included, each cut to 600 characters), and the message itself. `--model-judge off` stops it.
+- `--model-judge on` is off by default and set per connection. It asks you to type `yes` at a terminal, or to [approve it in Telegram](#approve-a-change-in-telegram) when no terminal is attached, because it sends group text to the configured model. The model sees the agent's label and bot username, up to 8 earlier messages from the same chat or topic (this agent's own posts included, each cut to 600 characters), and the message itself. `--model-judge off` stops it.
 - Only a person's new message with text that the addressed filter kept as context is judged. Bot messages, edits, messages from senders who are not allowed, and messages that already count as addressed are never sent.
 - When the model says yes, the message becomes a normal delivery with `addressed: true` and `addressed_by: "model"`, so wake batching announces it at once. Otherwise it stays context. A timeout (8 seconds), an error, a redirect, a missing configuration or an unclear answer also keeps it as context. AOT never retries a judgment.
 - Only the long-running collectors judge: the Claude Code monitor and wake waiter, `watch --collect` and the relay listeners. Hooks and tool calls never wait on the model. The Claude Code monitor and wake waiter announce what a collection brought before they judge, so a message that addresses the agent never waits on the model either, and a message judged yes is announced right after. A message waits for the next long-running collection, and is dropped as context after 5 minutes.

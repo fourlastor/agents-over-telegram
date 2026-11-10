@@ -108,6 +108,7 @@ def test_grants_reject_unbounded_or_invalid_values(setup_pair, sends, seconds):
 def operator_says_yes(monkeypatch):
     import agents_over_telegram.cli as cli
     monkeypatch.setattr(cli, '_confirm_operator', lambda summary: None)
+    monkeypatch.setattr(cli, '_confirm_or_ask_owner', lambda *args: None)
 
 
 def test_cli_grant_keeps_interrupted_send(tmp_path, operator_says_yes):
