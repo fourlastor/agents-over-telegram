@@ -147,6 +147,11 @@ def run_hook(args) -> dict | None:
 
 # Exit status 2 from an ``asyncRewake`` hook wakes Claude Code, even an idle session.
 WAKE_EXIT = 2
+# Sent when the waiter reaches its time limit with nothing new, so the turn
+# that follows ends at once and its Stop hook starts a fresh waiter.
+REFRESH_NOTICE = ('[Agents over Telegram] No new Telegram messages. The background listener reached its '
+                  'time limit and starts again when this turn ends. Nothing to do: end this turn now, '
+                  'without tool calls and with at most one short line.')
 # Claude Code stops the hook at its timeout (86400 seconds in claude/hooks.json).
 # End a little earlier so the waiter exits on its own terms.
 WAKE_DURATION = 82800
@@ -194,6 +199,14 @@ def run_wake(args) -> int:
         return _wake(args)
     except Exception:
         return 0
+
+
+def _keep_alive(core, client_id) -> bool:
+    """Whether the owner turned on the daily keep-alive wake for this client."""
+    try:
+        return bool((core.connection_status(client_id).get('routing') or {}).get('keep_alive'))
+    except Exception:
+        return False
 
 
 def _wake(args) -> int:
@@ -262,11 +275,21 @@ def _wake(args) -> int:
             raise _Woken()
 
     try:
-        watch(core, client_id, emit, collect=True, duration=args.duration, keep_running=keep_running)
+        result = watch(core, client_id, emit, collect=True, duration=args.duration, keep_running=keep_running)
     except _Woken:
         from .push import with_shell_fallback
         # The asyncRewake waiter runs only for Claude Code.
         sys.stderr.write(with_shell_fallback(notices[0]) + '\n')
         sys.stderr.flush()
         return WAKE_EXIT
-    return RUNTIME_MOVED_EXIT if moved else 0
+    if moved:
+        return RUNTIME_MOVED_EXIT
+    # A new waiter starts only when a turn ends. Without this, a session idle
+    # for longer than the time limit would stop hearing Telegram for good.
+    # With keep-alive on, the session's current waiter wakes it once when time
+    # is up, so the turn end starts a fresh waiter.
+    if result.get('reason') == 'duration_elapsed' and _keep_alive(core, client_id) and keep_running():
+        sys.stderr.write(REFRESH_NOTICE + '\n')
+        sys.stderr.flush()
+        return WAKE_EXIT
+    return 0
