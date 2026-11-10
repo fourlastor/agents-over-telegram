@@ -232,6 +232,19 @@ By default, every new delivery is announced at once: an idle agent wakes up for 
 - Each delivery records whether it addressed the bot in an `addressed` field.
 - A `relay-desktop` retry of a wake that already started is never held.
 
+### Keep an idle Claude Code session listening
+
+In Claude Code, an idle session hears Telegram through a background waiter that a turn end starts. The waiter stops after 23 hours. A session that stays idle for longer than that misses messages until someone sends it a prompt. Keep-alive closes that gap:
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --keep-alive on
+```
+
+- When the waiter reaches its limit with no new message, it wakes the session once. The notice asks the model to end the turn at once. The turn end starts a new waiter for another 23 hours.
+- The cost is one short model turn per idle day. That turn reads the whole conversation again, and after a day the prompt cache has expired, so it is not cached.
+- It is off by default. With it off, the waiter stops quietly as before.
+- It applies only to Claude Code's waiter. Codex, Pi, Amp and `relay-desktop` don't use it.
+
 ## Launch one scoped MCP client
 
 ```sh

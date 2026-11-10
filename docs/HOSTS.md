@@ -57,6 +57,7 @@ This needs the plugin to be loaded in the session. When the plugin is installed 
 
 - One waiter runs per project client and Claude Code session. Each turn end starts a new waiter, which takes over from the running one when that waiter finishes its current check, usually within 30 seconds.
 - The waiter stops when Claude Code exits. It also stops quietly 23 hours after the last turn end. A session that stays idle for longer than that stops waking up until someone sends it a prompt.
+- With [keep-alive](OPERATIONS.md#keep-an-idle-claude-code-session-listening) on, the waiter instead wakes the session once when its 23 hours end. The notice says that there are no new messages and asks the model to end the turn. That turn end starts a new waiter. Only the session's current waiter does this, and only while Claude Code still runs. A waiter that handed over to a newer one, or whose host exited, stays quiet.
 - The launcher passes exit status 2 on only when the runtime printed a real notice. A runtime that predates `aot wake` fails with status 2 and a usage message, and that must not wake the session.
 
 The plugin also declares a monitor that announces new messages. Claude Code starts plugin monitors only in **interactive** terminal sessions. They do not start in `-p` mode, and they did not start in the Claude Code desktop app. The `asyncRewake` hook does run in the desktop app.

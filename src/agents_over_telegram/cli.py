@@ -242,6 +242,10 @@ def parser():
                                  help="on: add every person and bot who posts in this group or topic to the allowed "
                                       "senders, for groups where everyone is trusted (off by default; off keeps the "
                                       "senders added so far)")
+            command.add_argument("--keep-alive", dest="keep_alive", choices=["on", "off"],
+                                 help="on: Claude Code only; when an idle session's background listener reaches its "
+                                      "23-hour limit, wake the session for one short turn so a new listener starts "
+                                      "(off by default: after 23 idle hours the session stops hearing Telegram)")
         if name == "bot-exchange-policy":
             command.add_argument("--sender-id", type=int, required=True)
             change = command.add_mutually_exclusive_group()
@@ -529,7 +533,8 @@ def run(args):
                                       wake_exempt=args.wake_exempt,
                                       owner_notify=None if args.owner_notify is None else args.owner_notify == "on",
                                       model_judge=None if args.model_judge is None else args.model_judge == "on",
-                                      auto_allow=None if args.auto_allow is None else args.auto_allow == "on")
+                                      auto_allow=None if args.auto_allow is None else args.auto_allow == "on",
+                                      keep_alive=None if args.keep_alive is None else args.keep_alive == "on")
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command == "conversation-budget":

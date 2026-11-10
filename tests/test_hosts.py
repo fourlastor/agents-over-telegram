@@ -555,6 +555,45 @@ def test_wake_exits_2_with_a_notice_when_a_message_waits(tmp_path):
     assert (quiet.returncode, quiet.stdout, quiet.stderr) == (0, '', '')
 
 
+def keep_alive(result, value='on'):
+    invoke('--state-dir', result['state_dir'], '--fake', 'delivery-settings', '--client-file', result['client_file'],
+           '--keep-alive', value)
+
+
+def test_keep_alive_wakes_the_session_once_at_the_time_limit(tmp_path):
+    result = connected(tmp_path)
+    keep_alive(result)
+    refresh = run_wake('--project-dir', result['project_dir'], '--duration', '0.5')
+    assert (refresh.returncode, refresh.stdout) == (2, '')
+    assert refresh.stderr.startswith('[Agents over Telegram] No new Telegram messages.')
+    assert 'end this turn now' in refresh.stderr
+    keep_alive(result, 'off')
+    quiet = run_wake('--project-dir', result['project_dir'], '--duration', '0.5')
+    assert (quiet.returncode, quiet.stderr) == (0, '')
+
+
+def test_keep_alive_is_quiet_when_the_host_is_gone_or_a_newer_waiter_runs(tmp_path):
+    result = connected(tmp_path)
+    keep_alive(result)
+    gone = subprocess.Popen([sys.executable, '-c', 'pass'])
+    gone.wait()
+    process = run_wake('--project-dir', result['project_dir'], '--duration', '0.5', '--host-pid', gone.pid)
+    assert (process.returncode, process.stdout, process.stderr) == (0, '', '')
+    # A waiter that handed over to a newer one never wakes the session.
+    first = start_wake(result['project_dir'], 'kept', duration=60)
+    second = None
+    try:
+        time.sleep(1.0)
+        second = start_wake(result['project_dir'], 'kept', duration=60)
+        out, err = first.communicate(timeout=30)
+        assert (first.returncode, out, err) == (0, '', '')
+    finally:
+        for waiter in (first, second):
+            if waiter is not None and waiter.poll() is None:
+                waiter.kill()
+                waiter.communicate(timeout=10)
+
+
 def test_wake_collects_from_telegram_while_waiting(tmp_path):
     result = connected(tmp_path)
     project = result['project_dir']
