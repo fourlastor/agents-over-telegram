@@ -199,6 +199,7 @@ Some changes need the owner's say-so: `delivery-settings --auto-allow on`, `--mo
 - **Approve** applies the whole command at once, including any other settings in it. **Decline** drops it. After either, the message shows the outcome and its buttons go away.
 - Only a press from the owner's own Telegram account, in the private chat with the bot, counts. Presses by anyone else, from a forwarded copy, on a request that expired, or after the connection was paired again with a new owner are refused.
 - A request expires after 10 minutes. Each connection can have at most 3 waiting at a time.
+- By default the request goes to the owner's private chat. With `delivery-settings --approvals-in group`, it goes to the bound group or topic instead, as an *ephemeral* message: only the owner and the bot can see it, and nobody else in the group sees the request or its outcome. Only a press on that very message counts, from the owner it was sent to. Telegram doesn't guarantee that an ephemeral message arrives, especially when the owner is offline. If the group send fails, AOT sends the request to the private chat instead, and the command's result says `where: "private"`. `--approvals-in private` switches back.
 - The owner must have sent `/start` to the bot in a private chat once, as for [owner notices](#notify-the-owner-privately). Otherwise the command fails with `owner_chat_not_started`.
 - `aot status` lists the last few requests under `owner_approvals`, with their status: `pending`, `approved`, `declined`, `expired`, `failed` (the message could not be sent) or `apply_failed` (approved, but the change no longer applied, for example after a disconnect).
 
@@ -214,12 +215,15 @@ The owner can change their agents' settings from a panel in their private chat w
 "$AOT_BIN" --state-dir "$AOT_STATE" settings-panel --client-file "$AOT_STATE/clients/alpha.json"
 ```
 
-- One panel covers every connection the owner has on that bot (up to 8), with a picker at the top. Each connection shows the agent, the group and every setting with its current value highlighted: the filter, context, media, reaction wake, notice batching (presets from off to 30 minutes), what skips batching, keep-alive, auto-allow, the model judge and owner notices.
+- One panel covers every connection the owner has on that bot (up to 8), with a picker at the top. Each connection shows the agent, the group and every setting with its current value highlighted: the filter, context, media, reaction wake, notice batching (presets from off to 30 minutes), what skips batching, keep-alive, auto-allow, the model judge, owner notices and where approvals are asked.
 - A tap changes the setting at once and the panel shows the stored value. A value set from the terminal that isn't one of the presets shows with no highlight, plus the seconds for batching. The panel asks the bot for fresh values each time it comes on screen.
-- Turning on a setting with a warning (the model judge, auto-allow, keep-alive) first shows the same warning as the terminal, with **Turn on** and **Cancel** buttons. Turning a setting off needs no second tap.
+- Turning on a setting with a warning (the model judge, auto-allow, keep-alive) first shows the same warning as the terminal. Turning a setting off needs no second tap.
 - Only the owner's own tap counts, only in their private chat, only on the latest panel AOT sent them, and only for connections they own at that moment. A re-pair to a new owner or a disconnect takes a connection out of the panel. Sending /settings again, at most once every 10 seconds, retires the old panel.
 - The owner must have sent `/start` to the bot once. Otherwise the panel can't be sent (`owner_chat_not_started`).
-- Telegram currently shows widgets only in the private chat with the bot. Apps without widget support show the message as unsupported.
+- Telegram currently shows widgets only in the private chat with the bot, and sends them as protected content, so they can't be forwarded and phones block screenshots while one is on screen. Apps without widget support show the message as unsupported.
+- A tap must be answered within 15 seconds, so it needs a running collector: a relay or desktop listener, or a Claude Code session between turns. A tap while nothing collects shows a timeout in the panel and changes nothing; tap again later.
+- AOT sets the bot's command menu in private chats to `/start` and `/settings`, once. Group menus aren't touched.
+- A setting with a warning shows it right under that setting, with **Turn on** and **Cancel**.
 - Bot-wide send limits and conversation budget grants aren't in the panel.
 
 For an external bot already present in the same bound destination, the owner can configure its addressed command convention. This prefixes normal publications in that destination; it does not choose another Telegram chat or grant the external sender access:

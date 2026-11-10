@@ -29,8 +29,9 @@ SETTINGS = (
     ('model_judge', 'Model judge', (False, True), ('Off', 'On')),
     ('auto_allow', 'Auto-allow', (False, True), ('Off', 'On')),
     ('keep_alive', 'Keep-alive', (False, True), ('Off', 'On')),
+    ('approvals_in', 'Ask approvals in', ('private', 'group'), ('Private', 'Group')),
 )
-SECTIONS = (('Messages', (0, 1, 2)), ('Wake-ups', (3, 4, 5, 9)), ('Access', (8, 7, 6)))
+SECTIONS = (('Messages', (0, 1, 2)), ('Wake-ups', (3, 4, 5, 9)), ('Access', (8, 7, 6, 10)))
 
 # Turning these on needs a second tap, with the warning the terminal shows.
 WARNINGS = {
@@ -112,7 +113,7 @@ body{margin:0;padding:8px 10px 10px;font-size:13px}
 .seg{display:flex;flex:0 0 auto;gap:1px;padding:2px;border-radius:8px;background:var(--tg-theme-secondary-bg-color)}
 .seg button{border:0;border-radius:6px;padding:3px 7px;font-size:12px;background:transparent;color:var(--tg-theme-text-color)}
 .seg button.on{background:var(--tg-theme-button-color);color:var(--tg-theme-button-text-color);font-weight:600}
-#w{display:none;border-radius:10px;padding:8px 10px;margin:6px 0;background:var(--tg-theme-secondary-bg-color)}
+#w{display:none;border-radius:10px;padding:8px 10px;margin:2px 0 6px;background:var(--tg-theme-secondary-bg-color)}
 #w p{margin:0 0 6px;font-size:12px;color:var(--tg-theme-destructive-text-color)}#w .seg{background:none;gap:6px;padding:0}
 #w .seg button{background:var(--tg-theme-bg-color);padding:5px 12px}#w .seg button.on{background:var(--tg-theme-button-color)}
 #m{font-size:11px;color:var(--tg-theme-hint-color);min-height:14px;margin-top:2px}
@@ -125,18 +126,18 @@ const $=i=>document.getElementById(i),el=(t,c,x)=>{const e=document.createElemen
 function msg(t){$('m').textContent=t||''}
 function load(){try{st=JSON.parse(W.chatData)}catch(e){st=null}draw()}
 function cur(){return st&&st.c&&st.c.find(c=>c[2]==st.k)}
-function draw(){const s=$('s'),p=$('p');s.innerHTML='';p.innerHTML='';const c=cur();
+function draw(){const s=$('s'),p=$('p'),w=$('w');w.style.display='none';document.body.appendChild(w);s.innerHTML='';p.innerHTML='';const c=cur();
 if(!c){$('t').textContent='Settings';$('g').textContent='No connected agents.';return}
 $('t').textContent=c[0];$('g').textContent=c[1];
 if(st.c.length>1)st.c.forEach(x=>{const b=el('button',x[2]==st.k?'on':'',x[0]);b.onclick=()=>ask('v:'+x[2]);p.appendChild(b)});
 G.forEach(([h,ix])=>{s.appendChild(el('div','sec',h));ix.forEach(i=>{const r=el('div','row'),l=el('div','lb',S[i][0]);
 if(st.v[i]<0&&i==4&&st.wi!=null)l.appendChild(el('i','',' ('+st.wi+'s)'));r.appendChild(l);const g=el('div','seg');
-S[i][1].forEach((n,j)=>{const b=el('button',j==st.v[i]?'on':'',n);b.onclick=()=>ask('s:'+st.k+':'+i+':'+j);g.appendChild(b)});
+S[i][1].forEach((n,j)=>{const b=el('button',j==st.v[i]?'on':'',n);b.onclick=()=>ask('s:'+st.k+':'+i+':'+j,r);g.appendChild(b)});
 r.appendChild(g);s.appendChild(r)})})}
-function ask(d){if(busy)return;busy=1;msg('Saving…');W.request(d).then(a=>{busy=0;let r={};
+function ask(d,row){if(busy)return;busy=1;msg('Saving…');W.request(d).then(a=>{busy=0;let r={};
 try{r=JSON.parse(a.result||'{}')}catch(e){}
-if(r.w){$('wt').textContent=r.w;$('w').style.display='block';$('wy').onclick=()=>{$('w').style.display='none';
-ask('c'+d.slice(1))};$('wn').onclick=()=>{$('w').style.display='none';msg('')};msg('');return}
+if(r.w){const w=$('w');$('wt').textContent=r.w;if(row)row.parentNode.insertBefore(w,row.nextSibling);w.style.display='block';
+$('wy').onclick=()=>{w.style.display='none';ask('c'+d.slice(1),row)};$('wn').onclick=()=>{w.style.display='none';msg('')};msg('');return}
 if(r.s){st=Object.assign(st||{},r.s);draw()}msg(r.e?'Not changed: '+r.e:d[0]=='v'?'':'Saved.')},e=>{busy=0;msg('Not changed: '+e.code)})}
 W.onEvent('chatDataChanged',load);load();W.ready();
 if(st&&st.k)W.request('v:'+st.k).then(a=>{try{const r=JSON.parse(a.result||'{}');if(r.s&&!busy){Object.assign(st,r.s);draw()}}catch(e){}},()=>{});

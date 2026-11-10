@@ -139,7 +139,7 @@ def test_a_new_owner_or_a_disconnect_ends_the_panel(panel):
     assert answered(transport, q) == {'e': 'not allowed'}
 
 
-@pytest.mark.parametrize('data', ['s:K:10:0', 's:K:0:2', 's:K:4:9', 'x:K:0:1', 's:K:0', 's:K:0:1:2', 's:K:-1:0',
+@pytest.mark.parametrize('data', ['s:K:11:0', 's:K:0:2', 's:K:4:9', 'x:K:0:1', 's:K:0', 's:K:0:1:2', 's:K:-1:0',
                                   'S:K:0:1', 's:K:00001:1', '', 'v:K ', 's:K:٣:1', 's:0:1', 'r'])
 def test_unknown_requests_change_nothing(panel, data):
     core, transport, clock, client, _, message_id = panel
@@ -284,3 +284,30 @@ def test_settings_from_someone_without_agents_sends_nothing(env):
     private_message(transport, '/settings', sender=202)
     core.collect()
     assert transport.widgets == []
+
+
+def test_the_bot_menu_lists_settings_once(env):
+    core, transport, clock = env
+    bind(core, transport)
+    core.collect()
+    core.collect()
+    assert transport.menus == [{'commands': list(core.BOT_MENU), 'scope': {'type': 'all_private_chats'}}]
+    assert [c['command'] for c in transport.menus[0]['commands']] == ['start', 'settings']
+
+
+def test_a_failed_menu_update_is_retried_and_never_breaks_intake(env):
+    core, transport, clock = env
+    bind(core, transport)
+    transport.menus.clear()
+    with core._tx() as db:
+        db.execute('UPDATE account SET menu_version=NULL')
+
+    def broken(*args):
+        raise TransportError(400)
+    original = transport.set_my_commands
+    transport.set_my_commands = broken
+    assert core.collect()['status'] == 'ok'
+    assert transport.menus == []
+    transport.set_my_commands = original
+    core.collect()
+    assert len(transport.menus) == 1

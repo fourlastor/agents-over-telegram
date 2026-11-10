@@ -527,6 +527,9 @@ class Core:
         with self._tx() as db:
             if 'last_gap_at' not in {row['name'] for row in db.execute('PRAGMA table_info(account)')}:
                 db.execute('ALTER TABLE account ADD COLUMN last_gap_at REAL')
+            # Which version of the bot's private-chat command menu AOT has set.
+            if 'menu_version' not in {row['name'] for row in db.execute('PRAGMA table_info(account)')}:
+                db.execute('ALTER TABLE account ADD COLUMN menu_version INTEGER')
             if 'event_at' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
                 db.execute('ALTER TABLE inbox ADD COLUMN event_at REAL')
             binding_columns = {row['name'] for row in db.execute('PRAGMA table_info(bindings)')}
@@ -600,8 +603,28 @@ class Core:
                 db.execute('ALTER TABLE bindings ADD COLUMN auto_allow INTEGER NOT NULL DEFAULT 0')
             # Claude Code's idle-session waiter wakes the session once when its
             # time limit ends; off until the owner accepts that daily turn.
+            # Development builds kept one settings panel per connection; a panel is
+            # one per owner now. Panels are disposable: the owner sends /settings again.
+            if 'client_id' in {row['name'] for row in db.execute('PRAGMA table_info(settings_panels)')}:
+                db.execute('DROP TABLE settings_panels')
+                db.execute('CREATE TABLE settings_panels (owner_id INTEGER PRIMARY KEY, '
+                           'message_id INTEGER NOT NULL, created REAL NOT NULL)')
             if 'keep_alive' not in binding_columns:
                 db.execute('ALTER TABLE bindings ADD COLUMN keep_alive INTEGER NOT NULL DEFAULT 0')
+            # Where owner approvals are asked: the owner's private chat (the
+            # default) or the bound group, as a message only the owner sees.
+            if 'approvals_in' not in binding_columns:
+                db.execute("ALTER TABLE bindings ADD COLUMN approvals_in TEXT NOT NULL DEFAULT 'private'")
+            # An approval sent to the group as an ephemeral message: its chat and
+            # ephemeral id, so only a press on that very message counts.
+            approval_columns = {row['name'] for row in db.execute('PRAGMA table_info(owner_approvals)')}
+            for column in ('chat_id', 'ephemeral_id'):
+                if column not in approval_columns:
+                    db.execute(f'ALTER TABLE owner_approvals ADD COLUMN {column} INTEGER')
+            answer_columns = {row['name'] for row in db.execute('PRAGMA table_info(callback_answers)')}
+            for column in ('receiver_id', 'ephemeral_id'):
+                if column not in answer_columns:
+                    db.execute(f'ALTER TABLE callback_answers ADD COLUMN {column} INTEGER')
             # When auto-allow added a sender (NULL for an explicit grant), and the
             # username it saw then, so status can show who joined this way.
             sender_columns = {row['name'] for row in db.execute('PRAGMA table_info(allowed_senders)')}
@@ -884,7 +907,7 @@ class Core:
 
     def delivery_settings(self, client_id, delivery_filter=None, capture_context=None, accept_media=None,
                           reaction_wake=None, wake_interval=None, wake_exempt=None, owner_notify=None,
-                          model_judge=None, auto_allow=None, keep_alive=None):
+                          model_judge=None, auto_allow=None, keep_alive=None, approvals_in=None):
         """Local operator control; never exposed as an agent MCP mutation.
 
         ``delivery_filter`` 'all' (the default) delivers every message from an
@@ -921,13 +944,17 @@ class Core:
         ``keep_alive`` lets Claude Code's idle-session waiter wake the session
         once when its time limit ends, so a new waiter starts; it costs one short
         turn per idle day and is off until the owner turns it on.
+        ``approvals_in`` is where owner approvals are asked: 'private' (the
+        default) in the owner's private chat, or 'group' in the bound group as
+        an ephemeral message only the owner sees, with the private chat as the
+        fallback when that send fails.
         The other settings default to the original behavior.
         """
         changes = {'delivery_filter': delivery_filter, 'capture_context': capture_context,
                    'accept_media': accept_media, 'reaction_wake': reaction_wake,
                    'wake_interval': wake_interval, 'wake_exempt': wake_exempt,
                    'owner_notify': owner_notify, 'model_judge': model_judge, 'auto_allow': auto_allow,
-                   'keep_alive': keep_alive}
+                   'keep_alive': keep_alive, 'approvals_in': approvals_in}
         self._check_delivery_settings(changes)
         with self._tx() as db:
             self._binding(db, client_id)
@@ -935,10 +962,15 @@ class Core:
             row = self._binding(db, client_id)
         return self._delivery_settings_view(row)
 
+    APPROVALS_IN = ('private', 'group')
     _BOOL_SETTINGS = ('capture_context', 'accept_media', 'owner_notify', 'model_judge', 'auto_allow', 'keep_alive')
 
     def _check_delivery_settings(self, changes):
-        if set(changes) - {'delivery_filter', 'reaction_wake', 'wake_interval', 'wake_exempt', *self._BOOL_SETTINGS}:
+        if set(changes) - {'delivery_filter', 'reaction_wake', 'wake_interval', 'wake_exempt', 'approvals_in',
+                           *self._BOOL_SETTINGS}:
+            raise CoreError('invalid_delivery_settings')
+        value = changes.get('approvals_in')
+        if value is not None and value not in self.APPROVALS_IN:
             raise CoreError('invalid_delivery_settings')
         value = changes.get('delivery_filter')
         if value is not None and value not in self.DELIVERY_FILTERS:
@@ -969,7 +1001,7 @@ class Core:
                 'wake_interval': row['wake_interval'], 'wake_exempt': row['wake_exempt'],
                 'owner_notify': bool(row['owner_notify']), 'model_judge': bool(row['model_judge']),
                 'auto_allow': bool(row['auto_allow']), 'keep_alive': bool(row['keep_alive']),
-                'context_window_seconds': self.HISTORY_WINDOW}
+                'approvals_in': row['approvals_in'], 'context_window_seconds': self.HISTORY_WINDOW}
 
     def _limits(self, db):
         row = db.execute('SELECT * FROM exchange_limits WHERE singleton=1').fetchone()
@@ -1200,7 +1232,8 @@ class Core:
                             'owner_notify': bool(row['owner_notify']),
                             'model_judge': bool(row['model_judge']),
                             'auto_allow': bool(row['auto_allow']),
-                            'keep_alive': bool(row['keep_alive'])} if row else None,
+                            'keep_alive': bool(row['keep_alive']),
+                            'approvals_in': row['approvals_in']} if row else None,
                 'reactions': self._reaction_capability(row) if row else None,
                 'state': state, 'next_action': {'code': action, 'message': message},
             }
@@ -2110,6 +2143,11 @@ class Core:
                     db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL WHERE singleton=1', (cursor, self.clock(), self.clock(), self.clock(), self.clock()))
                 self._probe_bot_admin(account)
                 try:
+                    self._set_bot_menu()
+                except Exception:
+                    # The command menu is a convenience; commands work without it.
+                    pass
+                try:
                     self._expire_approvals()
                 except Exception:
                     # Telling agents about expired requests is best effort.
@@ -2145,6 +2183,23 @@ class Core:
                 with self._tx() as db:
                     db.execute('UPDATE account SET last_attempt=?,intake_error=? WHERE singleton=1', (self.clock(), code))
                 raise CoreError(code) from None
+
+    # The bot's command menu in private chats; bump the version when it changes.
+    BOT_MENU = ({'command': 'start', 'description': 'Check that this bot can message you'},
+                {'command': 'settings', 'description': "Change your agents' settings"})
+    BOT_MENU_VERSION = 1
+
+    def _set_bot_menu(self):
+        """Set the bot's private-chat command menu once per menu version; never fails collection.
+
+        Only private chats are touched, so a group's command menu stays as it is.
+        """
+        with self._db() as db:
+            if (self._account(db)['menu_version'] or 0) >= self.BOT_MENU_VERSION:
+                return
+        self.transport.set_my_commands(list(self.BOT_MENU), {'type': 'all_private_chats'})
+        with self._tx() as db:
+            db.execute('UPDATE account SET menu_version=? WHERE singleton=1', (self.BOT_MENU_VERSION,))
 
     def _probe_bot_admin(self, account):
         """Keep bot_admin flags current with getChatMember; never fails collection.
@@ -2892,9 +2947,16 @@ class Core:
                         now, now + self.APPROVAL_SECONDS))
             owner_id = binding['owner_id']
             username = self._account(db)['username']
+            in_group = binding['approvals_in'] == 'group'
+            group_chat, group_thread = binding['chat_id'], binding['thread_id'] or None
         buttons = {'inline_keyboard': [[{'text': 'Approve', 'callback_data': f'aot:a:{approval_id}'},
                                         {'text': 'Decline', 'callback_data': f'aot:d:{approval_id}'}]]}
-        delivery = 'sent'
+        delivery, where = 'sent', 'private'
+        if in_group and self._send_approval_to_group(approval_id, group_chat, group_thread, owner_id, text, buttons):
+            return {'approval_id': approval_id, 'status': 'owner_approval_pending', 'action': action,
+                    'delivery': 'sent', 'where': 'group', 'expires_at': now + self.APPROVAL_SECONDS,
+                    'next_action': 'The owner approves or declines with the buttons on a message in the group '
+                                   'that only they can see.'}
         try:
             self.transport.send_message(chat_id=owner_id, text=text, reply_markup=buttons)
         except TransportError as error:
@@ -2908,7 +2970,7 @@ class Core:
         except Exception:
             delivery = 'uncertain'
         return {'approval_id': approval_id, 'status': 'owner_approval_pending', 'action': action,
-                'delivery': delivery, 'expires_at': now + self.APPROVAL_SECONDS,
+                'delivery': delivery, 'where': where, 'expires_at': now + self.APPROVAL_SECONDS,
                 'next_action': 'The owner approves or declines with the buttons in their private chat with the bot.'}
 
     def _approval_text(self, label, title, action, params, summary):
@@ -2935,6 +2997,25 @@ class Core:
                 f'{line(summary, 1000)}\n\n'
                 f'Approve this change? The request expires in {self.APPROVAL_SECONDS // 60} minutes.')
 
+    def _send_approval_to_group(self, approval_id, chat_id, thread_id, owner_id, text, buttons):
+        """Send an approval request to the bound group, visible only to the owner; True when sent.
+
+        Telegram does not guarantee delivery of ephemeral messages, and older
+        clients or chats may refuse them, so any failure here means the caller
+        falls back to the private chat.
+        """
+        try:
+            response = self.transport.send_message(chat_id=chat_id, text=text, thread_id=thread_id,
+                                                   reply_markup=buttons, ephemeral_to=owner_id)
+        except Exception:
+            return False
+        ephemeral_id = response.get('ephemeral_message_id') if isinstance(response, dict) else None
+        if not _integer(ephemeral_id) or ephemeral_id <= 0:
+            return False
+        with self._tx() as db:
+            db.execute('UPDATE owner_approvals SET chat_id=?,ephemeral_id=? WHERE id=?', (chat_id, ephemeral_id, approval_id))
+        return True
+
     def _route_callback(self, db, update_id, callback, now):
         """Handle one inline button press; only the owner's press on a live request counts."""
         callback_id = callback.get('id')
@@ -2949,19 +3030,33 @@ class Core:
         choice = re.fullmatch(r'aot:c:([0-9a-f]{24}):([0-3])', data) if isinstance(data, str) and not match else None
         private = (sender.get('is_bot') is False and _integer(sender.get('id')) and chat.get('type') == 'private'
                    and chat.get('id') == sender.get('id') and _integer(message.get('message_id')))
+        # A press on an ephemeral message in a group: only its receiver sees it.
+        ephemeral_id = message.get('ephemeral_message_id')
+        ephemeral = (not private and sender.get('is_bot') is False and _integer(sender.get('id'))
+                     and chat.get('type') in ('group', 'supergroup') and _integer(chat.get('id'))
+                     and _integer(ephemeral_id) and ephemeral_id > 0
+                     and _mapping(message.get('receiver_user')).get('id') == sender.get('id'))
 
         def answer(text, edit=None):
             # The private chat id is kept only until the answer goes out, so the
             # message can be edited; _answer_callbacks deletes the row first.
-            db.execute('INSERT OR IGNORE INTO callback_answers(callback_id,text,chat_id,message_id,edit_text,created) '
-                       'VALUES(?,?,?,?,?,?)', (callback_id, text, chat.get('id') if private else None,
-                                               message.get('message_id') if private else None, edit, now))
+            db.execute('INSERT OR IGNORE INTO callback_answers(callback_id,text,chat_id,message_id,edit_text,created,'
+                       'receiver_id,ephemeral_id) VALUES(?,?,?,?,?,?,?,?)',
+                       (callback_id, text, chat.get('id') if private or ephemeral else None,
+                        message.get('message_id') if private else None, edit, now,
+                        sender.get('id') if ephemeral else None, ephemeral_id if ephemeral else None))
 
         if choice is not None and private:
             self._route_choice(db, update_id, choice, sender, message, answer, now)
             return
         row = db.execute('SELECT * FROM owner_approvals WHERE id=?', (match.group(2),)).fetchone() if match else None
-        if not private or row is None or row['owner_id'] != sender.get('id'):
+        # A request sent to the group counts only from its own ephemeral message;
+        # one sent privately only from the private chat.
+        if row is not None and row['chat_id'] is not None:
+            where_ok = ephemeral and row['chat_id'] == chat.get('id') and row['ephemeral_id'] == ephemeral_id
+        else:
+            where_ok = private
+        if not where_ok or row is None or row['owner_id'] != sender.get('id'):
             # The refusal record never keeps the chat id: in a private chat it is
             # the person's user id.
             self._unmatched(db, update_id, None, 'private_chat' if chat.get('type') == 'private' else 'unsupported_update', now)
@@ -3188,7 +3283,11 @@ class Core:
                     continue
             with contextlib.suppress(Exception):
                 self.transport.answer_callback_query(row['callback_id'], row['text'])
-            if row['edit_text'] and row['chat_id'] and row['message_id']:
+            if row['edit_text'] and row['chat_id'] and row['ephemeral_id'] and row['receiver_id']:
+                with contextlib.suppress(Exception):
+                    self.transport.edit_ephemeral_message_text(row['chat_id'], row['receiver_id'],
+                                                               row['ephemeral_id'], row['edit_text'])
+            elif row['edit_text'] and row['chat_id'] and row['message_id']:
                 with contextlib.suppress(Exception):
                     self.transport.edit_message_text(row['chat_id'], row['message_id'], row['edit_text'])
 

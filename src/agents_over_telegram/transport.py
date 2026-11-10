@@ -134,7 +134,7 @@ class TelegramTransport:
             raise TransportError("invalid_updates")
         return result
 
-    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None):
+    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None, ephemeral_to=None):
         params = {"chat_id": chat_id, "text": text, "link_preview_options": {"is_disabled": True}}
         if thread_id is not None:
             params["message_thread_id"] = thread_id
@@ -142,10 +142,16 @@ class TelegramTransport:
             params["reply_parameters"] = {"message_id": reply_to}
         if reply_markup is not None:
             params["reply_markup"] = reply_markup
+        if ephemeral_to is not None:
+            # Visible only to this user and the bot (Bot API 10.3+).
+            params["ephemeral_message_parameters"] = {"receiver_user_id": ephemeral_to}
         return self._call("sendMessage", params, sending=True)
 
     def answer_callback_query(self, callback_query_id, text):
         return self._call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text[:200]})
+
+    def set_my_commands(self, commands, scope):
+        return self._call("setMyCommands", {"commands": commands, "scope": scope})
 
     def send_widget(self, chat_id, html, *, chat_data=None, allow_queries=False):
         params = {"chat_id": chat_id, "html": html, "allow_queries": allow_queries}
@@ -164,6 +170,12 @@ class TelegramTransport:
         # Without reply_markup, Telegram removes the message's inline buttons.
         return self._call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text,
                                               "link_preview_options": {"is_disabled": True}})
+
+    def edit_ephemeral_message_text(self, chat_id, receiver_user_id, ephemeral_message_id, text):
+        # Without reply_markup, Telegram removes the message's inline buttons.
+        return self._call("editEphemeralMessageText", {"chat_id": chat_id, "receiver_user_id": receiver_user_id,
+                                                       "ephemeral_message_id": ephemeral_message_id, "text": text,
+                                                       "link_preview_options": {"is_disabled": True}})
 
     def send_photo(self, chat_id, data, *, caption=None, filename="photo.png",
                    mime="image/png", thread_id=None, reply_to=None):
@@ -297,6 +309,7 @@ class FakeTransport:
         self.callback_answers = []
         self.edits = []
         self.widgets = []
+        self.menus = []
         self.widget_answers = []
         self.widget_edits = []
         self._lock = threading.RLock()
@@ -312,7 +325,7 @@ class FakeTransport:
             self.poll_offsets.append(offset)
             return copy.deepcopy(sorted((u for u in self.updates if u["update_id"] >= offset), key=lambda x:x["update_id"])[:100])
 
-    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None):
+    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None, ephemeral_to=None):
         with self._lock:
             outcome = self.outcomes.pop(0) if self.outcomes else "sent"
             if isinstance(outcome, BaseException):
@@ -325,6 +338,8 @@ class FakeTransport:
                        "message_thread_id": thread_id, "reply_to_message_id": reply_to}
             if reply_markup is not None:
                 message["reply_markup"] = copy.deepcopy(reply_markup)
+            if ephemeral_to is not None:
+                message.update(message_id=0, ephemeral_message_id=len(self.sent)+1, receiver_user={"id": ephemeral_to})
             self.sent.append(message)
             if outcome == "unknown":
                 raise UnknownSend()
@@ -370,6 +385,11 @@ class FakeTransport:
             self.edits.append({"chat_id": chat_id, "message_id": message_id, "text": text})
             return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
 
+    def set_my_commands(self, commands, scope):
+        with self._lock:
+            self.menus.append({"commands": copy.deepcopy(commands), "scope": scope})
+            return True
+
     def send_widget(self, chat_id, html, *, chat_data=None, allow_queries=False):
         with self._lock:
             outcome = self.outcomes.pop(0) if self.outcomes else "sent"
@@ -391,6 +411,11 @@ class FakeTransport:
     def edit_message_widget_data(self, chat_id, message_id, chat_data):
         with self._lock:
             self.widget_edits.append({"chat_id": chat_id, "message_id": message_id, "chat_data": chat_data})
+
+    def edit_ephemeral_message_text(self, chat_id, receiver_user_id, ephemeral_message_id, text):
+        with self._lock:
+            self.edits.append({"chat_id": chat_id, "receiver_user_id": receiver_user_id,
+                               "ephemeral_message_id": ephemeral_message_id, "text": text})
             return True
 
     def set_message_reaction(self, chat_id, message_id, emoji):
@@ -471,13 +496,15 @@ class FileFakeTransport:
             data["poll_offsets"].append(offset)
             return sorted([u for u in data["updates"] if u["update_id"] >= offset], key=lambda x:x["update_id"])[:100]
 
-    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None):
+    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None, ephemeral_to=None):
         with self._data() as data:
             outcome = data["outcomes"].pop(0) if data["outcomes"] else "sent"
             result = {"message_id": len(data["sent"])+1, "chat": {"id": chat_id}, "text": text,
                       "message_thread_id": thread_id, "reply_to_message_id": reply_to}
             if reply_markup is not None:
                 result["reply_markup"] = reply_markup
+            if ephemeral_to is not None:
+                result.update(message_id=0, ephemeral_message_id=len(data["sent"])+1, receiver_user={"id": ephemeral_to})
             if outcome not in ("reject", "rate_limit"):
                 data["sent"].append(result)
         if outcome == "reject":
@@ -528,6 +555,11 @@ class FileFakeTransport:
             data.setdefault("edits", []).append({"chat_id": chat_id, "message_id": message_id, "text": text})
         return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
 
+    def set_my_commands(self, commands, scope):
+        with self._data() as data:
+            data.setdefault("menus", []).append({"commands": commands, "scope": scope})
+        return True
+
     def send_widget(self, chat_id, html, *, chat_data=None, allow_queries=False):
         with self._data() as data:
             outcome = data["outcomes"].pop(0) if data["outcomes"] else "sent"
@@ -550,6 +582,11 @@ class FileFakeTransport:
         with self._data() as stored:
             stored.setdefault("widget_edits", []).append(
                 {"chat_id": chat_id, "message_id": message_id, "chat_data": chat_data})
+
+    def edit_ephemeral_message_text(self, chat_id, receiver_user_id, ephemeral_message_id, text):
+        with self._data() as data:
+            data.setdefault("edits", []).append({"chat_id": chat_id, "receiver_user_id": receiver_user_id,
+                                                 "ephemeral_message_id": ephemeral_message_id, "text": text})
         return True
 
     def set_message_reaction(self, chat_id, message_id, emoji):
