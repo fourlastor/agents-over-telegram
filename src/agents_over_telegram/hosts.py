@@ -292,4 +292,5 @@ def _wake(args) -> int:
         sys.stderr.write(REFRESH_NOTICE + '\n')
         sys.stderr.flush()
         return WAKE_EXIT
-    return 0
+    # The last check may itself have seen a moved runtime.
+    return RUNTIME_MOVED_EXIT if moved else 0
