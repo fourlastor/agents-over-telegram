@@ -376,6 +376,10 @@ class Core:
                     client_id TEXT NOT NULL REFERENCES clients(id), sender_id INTEGER NOT NULL,
                     is_bot INTEGER NOT NULL, PRIMARY KEY(client_id,sender_id)
                 );
+                CREATE TABLE IF NOT EXISTS blocked_senders (
+                    client_id TEXT NOT NULL REFERENCES clients(id), sender_id INTEGER NOT NULL,
+                    PRIMARY KEY(client_id,sender_id)
+                );
                 CREATE TABLE IF NOT EXISTS peer_commands (
                     client_id TEXT PRIMARY KEY REFERENCES clients(id),
                     bot_username TEXT NOT NULL, command TEXT NOT NULL
@@ -535,6 +539,17 @@ class Core:
             # until the owner turns it on, because it sends group text to a model.
             if 'model_judge' not in binding_columns:
                 db.execute('ALTER TABLE bindings ADD COLUMN model_judge INTEGER NOT NULL DEFAULT 0')
+            # Everyone who posts in the destination becomes an allowed sender; off
+            # until the owner turns it on for a group of trusted people.
+            if 'auto_allow' not in binding_columns:
+                db.execute('ALTER TABLE bindings ADD COLUMN auto_allow INTEGER NOT NULL DEFAULT 0')
+            # When auto-allow added a sender (NULL for an explicit grant), and the
+            # username it saw then, so status can show who joined this way.
+            sender_columns = {row['name'] for row in db.execute('PRAGMA table_info(allowed_senders)')}
+            if 'auto_added' not in sender_columns:
+                db.execute('ALTER TABLE allowed_senders ADD COLUMN auto_added REAL')
+            if 'username' not in sender_columns:
+                db.execute('ALTER TABLE allowed_senders ADD COLUMN username TEXT')
             # When the last admin probe ran, so a failing probe is retried only after a pause.
             if 'bot_admin_probed' not in binding_columns:
                 db.execute('ALTER TABLE bindings ADD COLUMN bot_admin_probed REAL')
@@ -715,8 +730,47 @@ class Core:
             self._binding(db, client_id)
             if sender_id == self._account(db)['bot_id']:
                 raise CoreError('use_broker_for_shared_bot')
-            db.execute('INSERT INTO allowed_senders(client_id,sender_id,is_bot) VALUES(?,?,?) ON CONFLICT(client_id,sender_id) DO UPDATE SET is_bot=excluded.is_bot', (client_id, sender_id, int(is_bot)))
+            # An explicit grant replaces an automatic one and lifts a removal.
+            db.execute('INSERT INTO allowed_senders(client_id,sender_id,is_bot) VALUES(?,?,?) ON CONFLICT(client_id,sender_id) '
+                       'DO UPDATE SET is_bot=excluded.is_bot,auto_added=NULL', (client_id, sender_id, int(is_bot)))
+            db.execute('DELETE FROM blocked_senders WHERE client_id=? AND sender_id=?', (client_id, sender_id))
         return {'sender_id': sender_id, 'is_bot': is_bot}
+
+    def remove_sender(self, client_id, sender_id):
+        """Local operator control: stop accepting a sender, explicit or automatic.
+
+        The removal is remembered, so auto-allow does not add the sender back;
+        a later explicit allow_sender lifts it. The owner cannot be removed.
+        """
+        if not _integer(sender_id) or sender_id <= 0:
+            raise CoreError('invalid_sender')
+        with self._tx() as db:
+            binding = self._binding(db, client_id)
+            if sender_id == binding['owner_id']:
+                raise CoreError('cannot_remove_owner')
+            removed = db.execute('DELETE FROM allowed_senders WHERE client_id=? AND sender_id=?',
+                                 (client_id, sender_id)).rowcount
+            db.execute('INSERT OR IGNORE INTO blocked_senders(client_id,sender_id) VALUES(?,?)', (client_id, sender_id))
+        return {'sender_id': sender_id, 'removed': bool(removed)}
+
+    # Telegram's own service accounts post on behalf of others (linked channel
+    # posts, anonymous admins), so they never become senders automatically.
+    SERVICE_SENDERS = frozenset({777000, 1087968824, 136817688})
+
+    def _auto_allow(self, db, binding, sender, now):
+        """Add a sender who posted in an auto-allow destination; True when allowed now."""
+        sender_id = sender['id']
+        if (not binding['auto_allow'] or sender_id in self.SERVICE_SENDERS
+                or db.execute('SELECT 1 FROM blocked_senders WHERE client_id=? AND sender_id=?',
+                              (binding['client_id'], sender_id)).fetchone()):
+            return False
+        # Only a well-formed username is kept: status shows it to the owner.
+        username = sender.get('username')
+        username = username if isinstance(username, str) and re.fullmatch(r'[A-Za-z0-9_]{1,64}', username) else None
+        db.execute('INSERT OR IGNORE INTO allowed_senders(client_id,sender_id,is_bot,auto_added,username) VALUES(?,?,?,?,?)',
+                   (binding['client_id'], sender_id, int(sender['is_bot']), now, username))
+        return db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?',
+                          (binding['client_id'], sender_id, int(sender['is_bot']))).fetchone() is not None
 
     def configure_peer_command(self, client_id, bot_username, command):
         if not isinstance(bot_username, str) or not re.fullmatch(r'[A-Za-z0-9_]{3,64}', bot_username):
@@ -771,7 +825,7 @@ class Core:
 
     def delivery_settings(self, client_id, delivery_filter=None, capture_context=None, accept_media=None,
                           reaction_wake=None, wake_interval=None, wake_exempt=None, owner_notify=None,
-                          model_judge=None):
+                          model_judge=None, auto_allow=None):
         """Local operator control; never exposed as an agent MCP mutation.
 
         ``delivery_filter`` 'all' (the default) delivers every message from an
@@ -801,12 +855,15 @@ class Core:
         that the addressed filter kept as context is meant for this agent, and
         delivers it when the model says yes. It needs a configured model
         (``aot judge-config set``), applies only with the addressed filter, and
-        is off until the owner turns it on. The other settings default to the
-        original behavior.
+        is off until the owner turns it on. ``auto_allow`` adds every person and
+        bot who posts in the destination to the allowed senders the first time
+        AOT sees them, for groups where everyone is trusted; it is off until the
+        owner turns it on, and turning it off keeps the senders added so far.
+        The other settings default to the original behavior.
         """
         if delivery_filter is not None and delivery_filter not in self.DELIVERY_FILTERS:
             raise CoreError('invalid_delivery_settings')
-        if any(value is not None and type(value) is not bool for value in (capture_context, accept_media, owner_notify, model_judge)):
+        if any(value is not None and type(value) is not bool for value in (capture_context, accept_media, owner_notify, model_judge, auto_allow)):
             raise CoreError('invalid_delivery_settings')
         if reaction_wake is not None and reaction_wake not in self.REACTION_WAKE_MODES:
             raise CoreError('invalid_delivery_settings')
@@ -833,12 +890,14 @@ class Core:
                 db.execute('UPDATE bindings SET owner_notify=? WHERE client_id=? AND connected=1', (int(owner_notify), client_id))
             if model_judge is not None:
                 db.execute('UPDATE bindings SET model_judge=? WHERE client_id=? AND connected=1', (int(model_judge), client_id))
+            if auto_allow is not None:
+                db.execute('UPDATE bindings SET auto_allow=? WHERE client_id=? AND connected=1', (int(auto_allow), client_id))
             row = self._binding(db, client_id)
         return {'delivery_filter': row['delivery_filter'], 'capture_context': bool(row['capture_context']),
                 'accept_media': bool(row['accept_media']), 'reaction_wake': row['reaction_wake'],
                 'wake_interval': row['wake_interval'], 'wake_exempt': row['wake_exempt'],
                 'owner_notify': bool(row['owner_notify']), 'model_judge': bool(row['model_judge']),
-                'context_window_seconds': self.HISTORY_WINDOW}
+                'auto_allow': bool(row['auto_allow']), 'context_window_seconds': self.HISTORY_WINDOW}
 
     def _limits(self, db):
         row = db.execute('SELECT * FROM exchange_limits WHERE singleton=1').fetchone()
@@ -979,7 +1038,9 @@ class Core:
             counts = {r['status']: r['n'] for r in db.execute('SELECT status,count(*) n FROM outbox WHERE client_id=? GROUP BY status', (client_id,))}
             peers = [dict(r) for r in db.execute('SELECT c.id AS client_id,c.label FROM grants g JOIN clients c ON c.id=g.target WHERE g.source=? AND c.active=1', (client_id,))]
             senders = [{'sender_id': r['sender_id'], 'is_bot': bool(r['is_bot'])}
-                       for r in db.execute('SELECT sender_id,is_bot FROM allowed_senders WHERE client_id=? ORDER BY sender_id', (client_id,))]
+                       | ({'auto_added': r['auto_added'], 'username': r['username']} if r['auto_added'] is not None else {})
+                       for r in db.execute('SELECT sender_id,is_bot,auto_added,username FROM allowed_senders '
+                                           'WHERE client_id=? ORDER BY sender_id', (client_id,))]
             gap = account['last_gap_at'] is not None or (account['last_intake'] is not None and now - account['last_intake'] >= self.HISTORY_WINDOW)
             from .relay import WAIT_FOR_DESKTOP_WAKE, unresolved_wakes
             held = unresolved_wakes(db, now, client_id)
@@ -1060,7 +1121,8 @@ class Core:
                             'wake_interval': row['wake_interval'],
                             'wake_exempt': row['wake_exempt'],
                             'owner_notify': bool(row['owner_notify']),
-                            'model_judge': bool(row['model_judge'])} if row else None,
+                            'model_judge': bool(row['model_judge']),
+                            'auto_allow': bool(row['auto_allow'])} if row else None,
                 'reactions': self._reaction_capability(row) if row else None,
                 'state': state, 'next_action': {'code': action, 'message': message},
             }
@@ -1252,6 +1314,8 @@ class Core:
             self._unmatched(db, update_id, chat_id, 'unbound_destination', now)
             return
         allowed = db.execute('SELECT 1 FROM allowed_senders WHERE client_id=? AND sender_id=? AND is_bot=?', (binding['client_id'], sender_id, int(sender['is_bot']))).fetchone()
+        if not allowed:
+            allowed = self._auto_allow(db, binding, sender, now)
         media_refused = []
         if attachments and not binding['accept_media']:
             if not allowed:

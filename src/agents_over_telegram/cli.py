@@ -204,7 +204,11 @@ def parser():
             command.add_argument("--resume", action="store_true")
         if name == "allow-sender":
             command.add_argument("--sender-id", type=int, required=True)
-            command.add_argument("--bot", action="store_true")
+            kind = command.add_mutually_exclusive_group()
+            kind.add_argument("--bot", action="store_true")
+            kind.add_argument("--remove", action="store_true",
+                              help="stop accepting this sender; auto-allow will not add it back until it is "
+                                   "allowed again explicitly")
         if name == "delivery-settings":
             command.add_argument("--filter", dest="delivery_filter", choices=["all", "addressed"],
                                  help="all (default): deliver every allowed message; addressed: deliver only "
@@ -234,6 +238,10 @@ def parser():
                                  help="on: with --filter addressed, ask a decision model whether a person's message "
                                       "kept as context is meant for this agent, and deliver it if so; sends recent "
                                       "group messages to the model; needs judge-config set (off by default)")
+            command.add_argument("--auto-allow", dest="auto_allow", choices=["on", "off"],
+                                 help="on: add every person and bot who posts in this group or topic to the allowed "
+                                      "senders, for groups where everyone is trusted (off by default; off keeps the "
+                                      "senders added so far)")
         if name == "bot-exchange-policy":
             command.add_argument("--sender-id", type=int, required=True)
             change = command.add_mutually_exclusive_group()
@@ -500,6 +508,8 @@ def run(args):
     if args.command == "configure-peer":
         return core.configure_peer_command(client_id, args.bot_username, args.peer_command)
     if args.command == "allow-sender":
+        if args.remove:
+            return core.remove_sender(client_id, args.sender_id)
         return core.allow_sender(client_id, args.sender_id, is_bot=args.bot)
     if args.command == "bot-exchange-policy":
         return core.bot_exchange_policy(client_id, args.sender_id, enabled=args.exchange_enabled)
@@ -508,13 +518,18 @@ def run(args):
             _confirm_operator("With the addressed filter, recent messages from this group or topic will be sent "
                               "to the configured decision model (aot judge-config status) to decide whether a "
                               "person's message is meant for this agent.")
+        if args.auto_allow == "on":
+            _confirm_operator("Every person and bot who posts in this group or topic will become an allowed sender "
+                              "and can give this agent work. That includes anyone who joins later, for example "
+                              "through an invite link. Remove one with allow-sender --remove.")
         return core.delivery_settings(client_id, delivery_filter=args.delivery_filter,
                                       capture_context=None if args.capture_context is None else args.capture_context == "on",
                                       accept_media=None if args.accept_media is None else args.accept_media == "on",
                                       reaction_wake=args.reaction_wake, wake_interval=args.wake_interval,
                                       wake_exempt=args.wake_exempt,
                                       owner_notify=None if args.owner_notify is None else args.owner_notify == "on",
-                                      model_judge=None if args.model_judge is None else args.model_judge == "on")
+                                      model_judge=None if args.model_judge is None else args.model_judge == "on",
+                                      auto_allow=None if args.auto_allow is None else args.auto_allow == "on")
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command == "conversation-budget":

@@ -397,7 +397,13 @@ def human_status(value):
         title = json.dumps(destination.get('title', ''), ensure_ascii=True)
         lines.append(f"Destination: {title} | chat {destination.get('chat_id')} | topic {destination.get('thread_id') or 'none'}")
     senders = value.get('allowed_senders', [])
-    lines.append('Allowed senders: ' + (', '.join(str(row['sender_id']) + (' (bot)' if row.get('is_bot') else '') for row in senders) or 'none'))
+    def sender(row):
+        tags = (['bot'] if row.get('is_bot') else []) + (['auto'] if row.get('auto_added') is not None else [])
+        tags += ['@' + row['username']] if isinstance(row.get('username'), str) and row['username'].isascii() and row['username'].replace('_', '').isalnum() else []
+        return str(row['sender_id']) + (f" ({', '.join(tags)})" if tags else '')
+    lines.append('Allowed senders: ' + (', '.join(sender(row) for row in senders) or 'none'))
+    if (value.get('routing') or {}).get('auto_allow'):
+        lines.append('Auto-allow: on; everyone who posts here becomes an allowed sender.')
     lines.append(f"Pending: {value.get('pending_messages', 0)} | outgoing: " + json.dumps(value.get('outbox', {}), sort_keys=True))
     reactions = value.get('reactions') or {}
     receive = reactions.get('receive') or {}
