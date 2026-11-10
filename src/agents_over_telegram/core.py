@@ -420,7 +420,8 @@ class Core:
                 );
                 CREATE TABLE IF NOT EXISTS widget_answers (
                     query_id TEXT PRIMARY KEY, data TEXT NOT NULL, chat_id INTEGER,
-                    message_id INTEGER, chat_data TEXT, created REAL NOT NULL
+                    message_id INTEGER, chat_data TEXT, created REAL NOT NULL,
+                    remove INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS callback_answers (
                     callback_id TEXT PRIMARY KEY, text TEXT NOT NULL, chat_id INTEGER,
@@ -605,6 +606,8 @@ class Core:
             # time limit ends; off until the owner accepts that daily turn.
             # Development builds kept one settings panel per connection; a panel is
             # one per owner now. Panels are disposable: the owner sends /settings again.
+            if 'remove' not in {row['name'] for row in db.execute('PRAGMA table_info(widget_answers)')}:
+                db.execute('ALTER TABLE widget_answers ADD COLUMN remove INTEGER NOT NULL DEFAULT 0')
             if 'client_id' in {row['name'] for row in db.execute('PRAGMA table_info(settings_panels)')}:
                 db.execute('DROP TABLE settings_panels')
                 db.execute('CREATE TABLE settings_panels (owner_id INTEGER PRIMARY KEY, '
@@ -3222,12 +3225,13 @@ class Core:
         chat = _mapping(query.get('chat'))
         message_id = query.get('message_id')
 
-        def answer(result, chat_data=None):
+        def answer(result, chat_data=None, remove=False):
             # The private chat id is kept only until the answer goes out.
-            db.execute('INSERT OR IGNORE INTO widget_answers(query_id,data,chat_id,message_id,chat_data,created) '
-                       'VALUES(?,?,?,?,?,?)', (query_id, json.dumps(result, separators=(',', ':'), ensure_ascii=False),
-                                               chat.get('id') if chat_data else None,
-                                               message_id if chat_data else None, chat_data, now))
+            keep = chat_data or remove
+            db.execute('INSERT OR IGNORE INTO widget_answers(query_id,data,chat_id,message_id,chat_data,created,remove) '
+                       'VALUES(?,?,?,?,?,?,?)', (query_id, json.dumps(result, separators=(',', ':'), ensure_ascii=False),
+                                                 chat.get('id') if keep else None, message_id if keep else None,
+                                                 chat_data, now, int(remove)))
 
         private = (sender.get('is_bot') is False and _integer(sender.get('id')) and chat.get('type') == 'private'
                    and chat.get('id') == sender.get('id') and _integer(message_id))
@@ -3243,6 +3247,11 @@ class Core:
             return
         if request is None:
             answer({'e': 'unknown request'})
+            return
+        if request[0] == 'x':
+            # Closing retires the panel and deletes its message.
+            db.execute('DELETE FROM settings_panels WHERE owner_id=?', (sender.get('id'),))
+            answer({'closed': True}, remove=True)
             return
         if target is None:
             answer({'e': 'not allowed'})
@@ -3271,6 +3280,9 @@ class Core:
                     self.transport.edit_message_widget_data(row['chat_id'], row['message_id'], row['chat_data'])
             with contextlib.suppress(Exception):
                 self.transport.answer_widget_query(row['query_id'], row['data'])
+            if row['remove'] and row['chat_id'] and row['message_id']:
+                with contextlib.suppress(Exception):
+                    self.transport.delete_message(row['chat_id'], row['message_id'])
 
     def _answer_callbacks(self):
         """Answer recorded button presses and update their messages; never fails collection."""

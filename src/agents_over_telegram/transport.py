@@ -153,6 +153,9 @@ class TelegramTransport:
     def set_my_commands(self, commands, scope):
         return self._call("setMyCommands", {"commands": commands, "scope": scope})
 
+    def delete_message(self, chat_id, message_id):
+        return self._call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+
     def send_widget(self, chat_id, html, *, chat_data=None, allow_queries=False):
         params = {"chat_id": chat_id, "html": html, "allow_queries": allow_queries}
         if chat_data is not None:
@@ -310,6 +313,7 @@ class FakeTransport:
         self.edits = []
         self.widgets = []
         self.menus = []
+        self.deleted = []
         self.widget_answers = []
         self.widget_edits = []
         self._lock = threading.RLock()
@@ -384,6 +388,11 @@ class FakeTransport:
         with self._lock:
             self.edits.append({"chat_id": chat_id, "message_id": message_id, "text": text})
             return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
+
+    def delete_message(self, chat_id, message_id):
+        with self._lock:
+            self.deleted.append({"chat_id": chat_id, "message_id": message_id})
+            return True
 
     def set_my_commands(self, commands, scope):
         with self._lock:
@@ -554,6 +563,11 @@ class FileFakeTransport:
         with self._data() as data:
             data.setdefault("edits", []).append({"chat_id": chat_id, "message_id": message_id, "text": text})
         return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
+
+    def delete_message(self, chat_id, message_id):
+        with self._data() as data:
+            data.setdefault("deleted", []).append({"chat_id": chat_id, "message_id": message_id})
+        return True
 
     def set_my_commands(self, commands, scope):
         with self._data() as data:

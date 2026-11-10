@@ -224,6 +224,7 @@ The owner can change their agents' settings from a panel in their private chat w
 - A tap must be answered within 15 seconds, so it needs a running collector: a relay or desktop listener, or a Claude Code session between turns. A tap while nothing collects shows a timeout in the panel and changes nothing; tap again later.
 - AOT sets the bot's command menu in private chats to `/start` and `/settings`, once. Group menus aren't touched.
 - A setting with a warning shows it right under that setting, with **Turn on** and **Cancel**.
+- **Close** deletes the panel message and retires the panel. Send /settings for a new one.
 - Bot-wide send limits and conversation budget grants aren't in the panel.
 
 For an external bot already present in the same bound destination, the owner can configure its addressed command convention. This prefixes normal publications in that destination; it does not choose another Telegram chat or grant the external sender access:

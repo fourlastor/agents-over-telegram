@@ -84,9 +84,12 @@ def parse(data):
     ``v:<key>`` asks for one connection's values (when the panel appears or a
     connection is picked). ``s:<key>:<i>:<j>`` sets setting i to value j, and
     ``c:<key>:<i>:<j>`` is the second tap that confirms a setting that warns.
+    ``x`` closes the panel: the bot deletes its message.
     """
     if not isinstance(data, str):
         return None
+    if data == 'x':
+        return 'x', None, None, None
     match = re.fullmatch(r'v:([0-9a-f]{24})', data)
     if match:
         return 'v', match.group(1), None, None
@@ -103,6 +106,8 @@ def parse(data):
 # The widget only draws its state and sends requests; the bot decides.
 HTML = '''<style>
 body{margin:0;padding:8px 10px 10px;font-size:13px}
+.top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.top>div{min-width:0}
+#x{border:0;border-radius:12px;padding:3px 9px;font-size:12px;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-hint-color)}
 .hd{font-weight:600;font-size:14px}.sub{color:var(--tg-theme-hint-color);font-size:12px;margin:0 0 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pk{display:flex;gap:4px;flex-wrap:wrap;margin:0 0 2px}
 .pk button{border:0;border-radius:12px;padding:3px 9px;font-size:12px;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color)}
@@ -117,7 +122,7 @@ body{margin:0;padding:8px 10px 10px;font-size:13px}
 #w p{margin:0 0 6px;font-size:12px;color:var(--tg-theme-destructive-text-color)}#w .seg{background:none;gap:6px;padding:0}
 #w .seg button{background:var(--tg-theme-bg-color);padding:5px 12px}#w .seg button.on{background:var(--tg-theme-button-color)}
 #m{font-size:11px;color:var(--tg-theme-hint-color);min-height:14px;margin-top:2px}
-</style><div class="hd" id="t">Settings</div><div class="sub" id="g"></div><div class="pk" id="p"></div>
+</style><div class="top"><div><div class="hd" id="t">Settings</div><div class="sub" id="g"></div></div><button id="x">Close</button></div><div class="pk" id="p"></div>
 <div id="w"><p id="wt"></p><div class="seg"><button class="on" id="wy">Turn on</button><button id="wn">Cancel</button></div></div>
 <div id="s"></div><div id="m"></div>
 <script>
@@ -139,6 +144,7 @@ try{r=JSON.parse(a.result||'{}')}catch(e){}
 if(r.w){const w=$('w');$('wt').textContent=r.w;if(row)row.parentNode.insertBefore(w,row.nextSibling);w.style.display='block';
 $('wy').onclick=()=>{w.style.display='none';ask('c'+d.slice(1),row)};$('wn').onclick=()=>{w.style.display='none';msg('')};msg('');return}
 if(r.s){st=Object.assign(st||{},r.s);draw()}msg(r.e?'Not changed: '+r.e:d[0]=='v'?'':'Saved.')},e=>{busy=0;msg('Not changed: '+e.code)})}
+$('x').onclick=()=>{if(busy)return;busy=1;msg('Closing…');W.request('x').then(()=>{busy=0},e=>{busy=0;msg('Not closed: '+e.code)})};
 W.onEvent('chatDataChanged',load);load();W.ready();
 if(st&&st.k)W.request('v:'+st.k).then(a=>{try{const r=JSON.parse(a.result||'{}');if(r.s&&!busy){Object.assign(st,r.s);draw()}}catch(e){}},()=>{});
 </script>'''

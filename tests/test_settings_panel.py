@@ -311,3 +311,23 @@ def test_a_failed_menu_update_is_retried_and_never_breaks_intake(env):
     transport.set_my_commands = original
     core.collect()
     assert len(transport.menus) == 1
+
+
+def test_close_deletes_the_panel_and_retires_it(panel):
+    core, transport, clock, client, _, message_id = panel
+    q = query(transport, message_id, 'x')
+    core.collect()
+    assert answered(transport, q) == {'closed': True}
+    assert transport.deleted == [{'chat_id': OWNER, 'message_id': message_id}]
+    assert rows(core, 'SELECT count(*) FROM settings_panels')[0][0] == 0
+    late = query(transport, message_id, f's:{k(client)}:0:1')
+    core.collect()
+    assert answered(transport, late) == {'e': 'not allowed'}
+
+
+def test_only_the_owner_can_close(panel):
+    core, transport, clock, client, _, message_id = panel
+    query(transport, message_id, 'x', sender=202)
+    core.collect()
+    assert transport.deleted == []
+    assert rows(core, 'SELECT count(*) FROM settings_panels')[0][0] == 1

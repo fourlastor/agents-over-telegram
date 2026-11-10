@@ -21,7 +21,7 @@ LAZY_METHODS = frozenset({"get_me", "get_webhook_info", "get_updates", "send_mes
                           "send_document", "forward_message", "set_message_reaction", "get_chat_member",
                           "download_file", "answer_callback_query", "edit_message_text", "send_widget",
                           "answer_widget_query", "edit_message_widget_data", "edit_ephemeral_message_text",
-                          "set_my_commands"})
+                          "set_my_commands", "delete_message"})
 
 
 class LazyTransport:
