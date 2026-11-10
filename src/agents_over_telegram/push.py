@@ -105,6 +105,12 @@ def _wakes_at_once(payload: dict, binding, exempt: set[str]) -> bool:
         # Reactions ride along with the next notice, except the owner's reaction
         # on an owner_notify notice, which answers the agent like a message.
         return 'owner' in exempt and from_owner and payload.get('owner_notice') is True
+    if payload.get('kind') == 'owner_approval':
+        # The owner's answer to this agent's request, or its expiry (no sender).
+        return 'owner' in exempt and (from_owner or payload.get('outcome') == 'expired')
+    if payload.get('kind') == 'owner_choice':
+        # The owner's button press answers the agent like an owner message.
+        return 'owner' in exempt and from_owner
     if payload.get('kind') not in ('message', 'edited'):
         return False
     if 'addressed' in exempt and payload.get('addressed') is True:
