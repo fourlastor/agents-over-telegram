@@ -127,8 +127,9 @@ class TelegramTransport:
             # message_reaction must be named explicitly; Telegram never sends it by
             # default, and only while the bot is an administrator in the chat.
             # callback_query carries the owner's Approve or Decline button presses.
+            # widget_query carries requests from the owner's settings panel.
             "allowed_updates": ["message", "edited_message", "my_chat_member", "message_reaction",
-                                "callback_query"]}, timeout=timeout + 15)
+                                "callback_query", "widget_query"]}, timeout=timeout + 15)
         if not isinstance(result, list):
             raise TransportError("invalid_updates")
         return result
@@ -145,6 +146,19 @@ class TelegramTransport:
 
     def answer_callback_query(self, callback_query_id, text):
         return self._call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text[:200]})
+
+    def send_widget(self, chat_id, html, *, chat_data=None, allow_queries=False):
+        params = {"chat_id": chat_id, "html": html, "allow_queries": allow_queries}
+        if chat_data is not None:
+            params["chat_data"] = chat_data
+        return self._call("sendWidget", params, sending=True)
+
+    def answer_widget_query(self, widget_query_id, data):
+        return self._call("answerWidgetQuery", {"widget_query_id": widget_query_id, "data": data})
+
+    def edit_message_widget_data(self, chat_id, message_id, chat_data):
+        return self._call("editMessageWidgetData", {"chat_id": chat_id, "message_id": message_id,
+                                                    "chat_data": chat_data})
 
     def edit_message_text(self, chat_id, message_id, text):
         # Without reply_markup, Telegram removes the message's inline buttons.
@@ -282,6 +296,9 @@ class FakeTransport:
         self.files = {}  # {file_id: {"content": bytes}}
         self.callback_answers = []
         self.edits = []
+        self.widgets = []
+        self.widget_answers = []
+        self.widget_edits = []
         self._lock = threading.RLock()
 
     def get_me(self):
@@ -352,6 +369,29 @@ class FakeTransport:
         with self._lock:
             self.edits.append({"chat_id": chat_id, "message_id": message_id, "text": text})
             return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
+
+    def send_widget(self, chat_id, html, *, chat_data=None, allow_queries=False):
+        with self._lock:
+            outcome = self.outcomes.pop(0) if self.outcomes else "sent"
+            if outcome == "reject":
+                raise TransportError(403)
+            message = {"message_id": len(self.sent) + 1, "chat": {"id": chat_id},
+                       "widget": {"html": html, "chat_data": chat_data, "allow_queries": allow_queries}}
+            self.sent.append(message)
+            self.widgets.append(message)
+            if outcome == "unknown":
+                raise UnknownSend()
+            return copy.deepcopy(message)
+
+    def answer_widget_query(self, widget_query_id, data):
+        with self._lock:
+            self.widget_answers.append({"id": widget_query_id, "data": data})
+            return True
+
+    def edit_message_widget_data(self, chat_id, message_id, chat_data):
+        with self._lock:
+            self.widget_edits.append({"chat_id": chat_id, "message_id": message_id, "chat_data": chat_data})
+            return True
 
     def set_message_reaction(self, chat_id, message_id, emoji):
         with self._lock:
@@ -487,6 +527,30 @@ class FileFakeTransport:
         with self._data() as data:
             data.setdefault("edits", []).append({"chat_id": chat_id, "message_id": message_id, "text": text})
         return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
+
+    def send_widget(self, chat_id, html, *, chat_data=None, allow_queries=False):
+        with self._data() as data:
+            outcome = data["outcomes"].pop(0) if data["outcomes"] else "sent"
+            result = {"message_id": len(data["sent"]) + 1, "chat": {"id": chat_id},
+                      "widget": {"html": html, "chat_data": chat_data, "allow_queries": allow_queries}}
+            if outcome != "reject":
+                data["sent"].append(result)
+        if outcome == "reject":
+            raise TransportError(403)
+        if outcome == "unknown":
+            raise UnknownSend()
+        return result
+
+    def answer_widget_query(self, widget_query_id, data):
+        with self._data() as stored:
+            stored.setdefault("widget_answers", []).append({"id": widget_query_id, "data": data})
+        return True
+
+    def edit_message_widget_data(self, chat_id, message_id, chat_data):
+        with self._data() as stored:
+            stored.setdefault("widget_edits", []).append(
+                {"chat_id": chat_id, "message_id": message_id, "chat_data": chat_data})
+        return True
 
     def set_message_reaction(self, chat_id, message_id, emoji):
         with self._data() as data:

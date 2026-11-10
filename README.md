@@ -101,7 +101,7 @@ You can ask the agent in plain words, for example **"Telegram status"**, **"Paus
 
 ## Owner settings
 
-The owner changes settings for one connection with `aot delivery-settings`. The command without options prints the current settings. [Local operations](docs/OPERATIONS.md#addressed-only-delivery-and-group-context) explains every option.
+The owner changes settings for one connection with `aot delivery-settings`. The command without options prints the current settings. The owner can also send **/settings** to the bot in a private chat to get a panel with every agent's settings as buttons; see [settings panel](docs/OPERATIONS.md#settings-panel-in-telegram). [Local operations](docs/OPERATIONS.md#addressed-only-delivery-and-group-context) explains every option.
 
 | Option | Default | Effect |
 |---|---|---|
