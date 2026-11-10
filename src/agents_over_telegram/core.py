@@ -2812,7 +2812,6 @@ class Core:
             binding = self._binding(db, client_id, usable=True)
             if action == 'conversation_budget':
                 self._conversation(db, client_id, params['conversation_id'])
-            db.execute("UPDATE owner_approvals SET status='expired' WHERE status='pending' AND expires<=?", (now,))
             pending = db.execute("SELECT count(*) FROM owner_approvals WHERE client_id=? AND status='pending'",
                                  (client_id,)).fetchone()[0]
             if pending >= self.APPROVAL_PENDING_LIMIT:

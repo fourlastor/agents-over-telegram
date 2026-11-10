@@ -196,3 +196,14 @@ def test_replying_to_a_notice_the_owner_answered_counts_as_answering_the_owner(o
     deliveries(core, client)
     answer = core.owner_notify(client, 'Deploying now.', 'a1', reply_to=status['message_id'])
     assert answer['answers_owner'] is True
+
+
+def test_owner_answers_and_expiries_wake_at_once():
+    from agents_over_telegram.push import _wakes_at_once
+    binding = {'owner_id': OWNER}
+    owner = {'id': OWNER, 'is_bot': False}
+    exempt = {'addressed', 'owner'}
+    assert _wakes_at_once({'kind': 'owner_choice', 'sender': owner}, binding, exempt)
+    assert _wakes_at_once({'kind': 'owner_approval', 'sender': owner, 'outcome': 'declined'}, binding, exempt)
+    assert _wakes_at_once({'kind': 'owner_approval', 'sender': None, 'outcome': 'expired'}, binding, exempt)
+    assert not _wakes_at_once({'kind': 'owner_approval', 'sender': None, 'outcome': 'expired'}, binding, {'addressed'})
