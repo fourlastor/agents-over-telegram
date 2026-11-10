@@ -17,7 +17,9 @@ the new runtime.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -28,8 +30,8 @@ from .credentials import CredentialError, read_private_json, write_private_json
 
 POINTER = 'serve-runtime.json'
 LAUNCHER = 'serve_launch.py'
-SERVICE = 'agents-over-telegram'
-LAUNCHD_LABEL = 'dev.agents-over-telegram.serve'
+LOG = 'serve.log'
+LOG_LIMIT = 1_000_000  # bytes; a bigger log is moved to serve.log.1 when the service starts
 POLL_TIMEOUT = 20
 BUSY_PAUSE = 2.0
 BACKOFF = 2.0
@@ -90,6 +92,7 @@ def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_runnin
     """Collect without stopping; return 3 when the runtime moved, 0 when told to stop."""
     from .hosts import RUNTIME_MOVED_EXIT
     log = log or (lambda text: print(text, flush=True))
+    rotate_log(state)
     log(f'aot serve: collecting for {state}')
     failures = 0
     while keep_running is None or keep_running():
@@ -120,38 +123,46 @@ def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_runnin
     return 0
 
 
-def _unit_paths():
+def name(state):
+    """The service name for one state directory, so several accounts can each have one."""
+    digest = hashlib.sha256(os.path.realpath(state).encode()).hexdigest()[:12]
+    return f'agents-over-telegram-{digest}'
+
+
+def _label(state):
+    return 'dev.' + name(state).replace('agents-over-telegram-', 'agents-over-telegram.serve.')
+
+
+def _unit_path(state):
     if sys.platform == 'darwin':
-        return Path.home() / 'Library' / 'LaunchAgents' / f'{LAUNCHD_LABEL}.plist'
+        return Path.home() / 'Library' / 'LaunchAgents' / f'{_label(state)}.plist'
     base = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
-    return base / 'systemd' / 'user' / f'{SERVICE}.service'
+    return base / 'systemd' / 'user' / f'{name(state)}.service'
 
 
 def _unit(state, python):
     launcher = Path(state) / LAUNCHER
     if sys.platform == 'darwin':
-        return f'''<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>Label</key><string>{LAUNCHD_LABEL}</string>
-<key>ProgramArguments</key><array><string>{python}</string><string>{launcher}</string></array>
-<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-<key>StandardOutPath</key><string>{Path(state) / 'serve.log'}</string>
-<key>StandardErrorPath</key><string>{Path(state) / 'serve.log'}</string>
-</dict></plist>
-'''
-    return f'''[Unit]
-Description=Agents over Telegram collector ({state})
-After=network-online.target
+        return plistlib.dumps({'Label': _label(state), 'ProgramArguments': [str(python), str(launcher)],
+                               'RunAtLoad': True, 'KeepAlive': True,
+                               'StandardOutPath': str(Path(state) / LOG),
+                               'StandardErrorPath': str(Path(state) / LOG)}).decode()
+    # systemd unit values: quote the paths, and keep the state path out of
+    # specifier expansion in the description.
+    return (f'[Unit]\nDescription=Agents over Telegram collector ({str(state).replace("%", "%%")})\n'
+            'After=network-online.target\n\n'
+            f'[Service]\nExecStart="{python}" "{launcher}"\nRestart=always\nRestartSec=5\n\n'
+            '[Install]\nWantedBy=default.target\n')
 
-[Service]
-ExecStart={python} {launcher}
-Restart=always
-RestartSec=5
 
-[Install]
-WantedBy=default.target
-'''
+def rotate_log(state):
+    """Move a log over LOG_LIMIT to serve.log.1, replacing an older one (launchd only writes it)."""
+    log = Path(state) / LOG
+    try:
+        if log.stat().st_size > LOG_LIMIT:
+            os.replace(log, log.with_name(LOG + '.1'))
+    except OSError:
+        pass
 
 
 def install(state, *, run_command=subprocess.run, python=None):
@@ -162,7 +173,7 @@ def install(state, *, run_command=subprocess.run, python=None):
     launcher = state / LAUNCHER
     launcher.write_text(LAUNCHER_SOURCE, encoding='utf-8')
     launcher.chmod(0o600)
-    unit = _unit_paths()
+    unit = _unit_path(state)
     unit.parent.mkdir(parents=True, exist_ok=True)
     unit.write_text(_unit(state, python), encoding='utf-8')
     if sys.platform == 'darwin':
@@ -170,20 +181,23 @@ def install(state, *, run_command=subprocess.run, python=None):
         run_command(['launchctl', 'bootout', f'gui/{uid}', str(unit)], check=False, capture_output=True)
         run_command(['launchctl', 'bootstrap', f'gui/{uid}', str(unit)], check=True, capture_output=True)
     else:
+        service = f'{name(state)}.service'
         run_command(['systemctl', '--user', 'daemon-reload'], check=True, capture_output=True)
-        run_command(['systemctl', '--user', 'enable', '--now', f'{SERVICE}.service'], check=True, capture_output=True)
-        run_command(['systemctl', '--user', 'restart', f'{SERVICE}.service'], check=True, capture_output=True)
-    return {'installed': True, 'unit': str(unit), 'executable': str(own_executable()), 'state_dir': str(state)}
+        run_command(['systemctl', '--user', 'enable', '--now', service], check=True, capture_output=True)
+        run_command(['systemctl', '--user', 'restart', service], check=True, capture_output=True)
+    return {'installed': True, 'service': name(state), 'unit': str(unit), 'executable': str(own_executable()),
+            'state_dir': str(state)}
 
 
 def uninstall(state, *, run_command=subprocess.run):
     """Stop and remove the user service, the launcher and the pointer."""
     state = Path(state).absolute()
-    unit = _unit_paths()
+    unit = _unit_path(state)
     if sys.platform == 'darwin':
         run_command(['launchctl', 'bootout', f'gui/{os.getuid()}', str(unit)], check=False, capture_output=True)
     else:
-        run_command(['systemctl', '--user', 'disable', '--now', f'{SERVICE}.service'], check=False, capture_output=True)
+        run_command(['systemctl', '--user', 'disable', '--now', f'{name(state)}.service'], check=False,
+                    capture_output=True)
     removed = unit.exists()
     for path in (unit, state / LAUNCHER, state / POINTER):
         if path.exists() or path.is_symlink():
@@ -194,7 +208,13 @@ def uninstall(state, *, run_command=subprocess.run):
 
 
 def status(state):
+    """Whether this state directory's service is set up: its pointer, and a unit that starts its launcher."""
+    state = Path(state).absolute()
     current = pointer(state)
-    unit = _unit_paths()
-    return {'installed': current is not None and unit.exists(), 'unit': str(unit),
+    unit = _unit_path(state)
+    try:
+        serves_this = str(state / LAUNCHER) in unit.read_text(encoding='utf-8')
+    except OSError:
+        serves_this = False
+    return {'installed': current is not None and serves_this, 'service': name(state), 'unit': str(unit),
             'executable': str(current) if current else None}

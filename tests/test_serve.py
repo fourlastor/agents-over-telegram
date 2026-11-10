@@ -1,6 +1,7 @@
 """aot serve: the always-on collector, its user service and its runtime pointer."""
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -116,26 +117,30 @@ def test_install_and_uninstall_a_systemd_user_service(home):
         commands.append(argv)
         return subprocess.CompletedProcess(argv, 0)
     result = serve.install(home, run_command=run_command, python='/usr/bin/python3')
-    unit = home.parent / 'home' / '.config' / 'systemd' / 'user' / 'agents-over-telegram.service'
-    assert result['unit'] == str(unit)
+    service = serve.name(home)
+    unit = home.parent / 'home' / '.config' / 'systemd' / 'user' / f'{service}.service'
+    assert result['unit'] == str(unit) and result['service'] == service
     text = unit.read_text()
-    assert f'ExecStart=/usr/bin/python3 {home / serve.LAUNCHER}' in text and 'Restart=always' in text
+    assert f'ExecStart="/usr/bin/python3" "{home / serve.LAUNCHER}"' in text and 'Restart=always' in text
     assert serve.pointer(home) == serve.own_executable()
     assert oct((home / serve.LAUNCHER).stat().st_mode & 0o777) == '0o600'
-    assert ['systemctl', '--user', 'enable', '--now', 'agents-over-telegram.service'] in commands
+    assert ['systemctl', '--user', 'enable', '--now', f'{service}.service'] in commands
     assert serve.status(home)['installed'] is True
     assert serve.uninstall(home, run_command=run_command) == {'installed': False, 'removed': True}
     assert not unit.exists() and not (home / serve.LAUNCHER).exists() and serve.pointer(home) is None
-    assert ['systemctl', '--user', 'disable', '--now', 'agents-over-telegram.service'] in commands
+    assert ['systemctl', '--user', 'disable', '--now', f'{service}.service'] in commands
 
 
 def test_install_a_launchd_agent_on_macos(home, monkeypatch):
     monkeypatch.setattr(sys, 'platform', 'darwin')
     commands = []
     result = serve.install(home, run_command=lambda argv, **kw: commands.append(argv), python='/usr/bin/python3')
-    plist = home.parent / 'home' / 'Library' / 'LaunchAgents' / f'{serve.LAUNCHD_LABEL}.plist'
-    assert result['unit'] == str(plist)
-    assert f'<string>{home / serve.LAUNCHER}</string>' in plist.read_text()
+    import plistlib
+    plist = Path(result['unit'])
+    assert plist.parent == home.parent / 'home' / 'Library' / 'LaunchAgents'
+    value = plistlib.loads(plist.read_bytes())
+    assert value['ProgramArguments'] == ['/usr/bin/python3', str(home / serve.LAUNCHER)]
+    assert value['KeepAlive'] is True and value['Label'].startswith('dev.agents-over-telegram.serve.')
     assert commands[-1][:2] == ['launchctl', 'bootstrap']
 
 
@@ -159,3 +164,32 @@ def test_the_cli_reports_status(env):
     assert result['installed'] is False and result['executable'] is None
     with pytest.raises(SystemExit):
         parser().parse_args(['serve', '--install', '--uninstall'])
+
+
+def test_two_state_directories_get_separate_services(home):
+    other = home.parent / 'other-state'
+    other.mkdir(mode=0o700)
+    ok = lambda argv, **kw: subprocess.CompletedProcess(argv, 0)
+    first, second = serve.install(home, run_command=ok), serve.install(other, run_command=ok)
+    assert first['unit'] != second['unit'] and first['service'] != second['service']
+    assert serve.status(home)['installed'] is True and serve.status(other)['installed'] is True
+    serve.uninstall(other, run_command=ok)
+    assert serve.status(home)['installed'] is True and serve.status(other)['installed'] is False
+    assert Path(first['unit']).exists()
+
+
+def test_status_needs_a_unit_that_starts_this_launcher(home):
+    write_private_json(home / serve.POINTER, {'version': 1, 'executable': str(serve.own_executable())})
+    assert serve.status(home)['installed'] is False
+    unit = Path(serve.status(home)['unit'])
+    unit.parent.mkdir(parents=True)
+    unit.write_text('ExecStart=/usr/bin/python3 /elsewhere/serve_launch.py')
+    assert serve.status(home)['installed'] is False
+
+
+def test_a_big_log_is_rotated_when_serve_starts(env):
+    core, transport, clock = env
+    log = core.state_dir / serve.LOG
+    log.write_bytes(b'x' * (serve.LOG_LIMIT + 1))
+    loop(core, core.state_dir, 0)
+    assert not log.exists() and (core.state_dir / (serve.LOG + '.1')).stat().st_size == serve.LOG_LIMIT + 1

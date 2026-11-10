@@ -86,12 +86,11 @@ Owner actions (settings panel taps, approval presses, `/settings`) must be answe
 "$AOT_BIN" --state-dir "$AOT_STATE" serve --install
 ```
 
-- `--install` sets it up as a user service and starts it: a systemd user unit (`~/.config/systemd/user/agents-over-telegram.service`) on Linux, or a launchd agent (`~/Library/LaunchAgents/dev.agents-over-telegram.serve.plist`) on macOS. It starts again after a crash or a reboot. Logs go to `journalctl --user -u agents-over-telegram` on Linux, and to `serve.log` in the state directory on macOS.
+- `--install` sets it up as a user service and starts it: a systemd user unit (`~/.config/systemd/user/agents-over-telegram-<id>.service`) on Linux, or a launchd agent (`~/Library/LaunchAgents/dev.agents-over-telegram.serve.<id>.plist`) on macOS. `<id>` comes from the state directory's path, so each account directory on a machine gets its own service. It starts again after a crash or a reboot. On Linux, logs go to `journalctl --user -u agents-over-telegram-<id>`. On macOS they go to `serve.log` in the state directory, which moves to `serve.log.1` when the collector starts and the log is over 1 MB.
 - It long-polls Telegram the whole time. It routes messages into each agent's inbox, answers panel requests and approval presses at once, runs the optional model judge, and sends queued messages that waited for a rate limit. It never replies for an agent.
 - Agents keep working as before. Their waiters, hooks and watchers see its collector lock and only watch the inbox for new deliveries, so nothing is collected twice.
 - The service runs the AOT recorded in `serve-runtime.json` in the state directory. Every `setup` that moves a project to a new runtime updates that file. The collector notices, exits, and the service manager starts it again on the new runtime.
-- `serve --status` shows whether it's installed and which runtime it runs. `serve --uninstall` stops and removes it. `serve` with no option runs it in the foreground.
-- One service per user. It serves the state directory it was installed for.
+- `serve --status` shows whether this state directory's service is installed, its name, and which runtime it runs. `serve --uninstall` stops and removes only this directory's service. `serve` with no option runs it in the foreground.
 - On a machine that already runs `relay-desktop --collect` all the time, that listener does the same collecting, so you don't need `serve` there too.
 
 
