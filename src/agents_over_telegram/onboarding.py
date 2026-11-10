@@ -327,6 +327,9 @@ def setup(args):
     if config_path is not None:
         _write_local(config_path, new_config, old_config)
     _write_local(pointer_path, new_pointer, old_pointer)
+    # An installed always-on collector moves to this runtime too.
+    from . import serve
+    serve.follow(state, Path(_entry(state, client, fake)['command']))
     status = core.connection_status(client_id)
     next_setup = _next_setup(args, state, fake, project, client)
     result = {'project_dir': str(project), 'profile_file': str(project / PROFILE_NAME),

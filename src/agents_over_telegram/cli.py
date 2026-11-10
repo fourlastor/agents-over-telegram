@@ -279,6 +279,12 @@ def parser():
     limits.add_argument("--reason", help="Why the limits change; required when changing them")
     sub.add_parser("collect")
     sub.add_parser("unassigned")
+    serve = sub.add_parser("serve", help="Collect from Telegram without stopping, so owner actions and messages "
+                                         "are handled even while no agent is free")
+    action = serve.add_mutually_exclusive_group()
+    action.add_argument("--install", action="store_true", help="Run it as a user service (systemd or launchd)")
+    action.add_argument("--uninstall", action="store_true", help="Stop and remove the user service")
+    action.add_argument("--status", action="store_true", help="Show whether the user service is set up")
     flush = sub.add_parser("flush")
     flush.add_argument("--client-file", type=Path)
     peer = sub.add_parser("configure-peer")
@@ -431,7 +437,7 @@ def run(args):
     _mode(state_dir, args.fake)
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
                 and args.command not in {"history", "status", "account-status", "judge-config", "bot-exchange-policy", "delivery-settings", "watch",
-                                         "conversation-budget", "exchange-limits"}))
+                                         "conversation-budget", "exchange-limits", "serve"}))
     if args.command.startswith("relay-"):
         from .relay import RelayStore
         store = RelayStore(core, project_validator=lambda binding: _relay_project_valid(core, binding, args.fake))
@@ -491,6 +497,15 @@ def run(args):
         return core.collect()
     if args.command == "unassigned":
         return core.unassigned()
+    if args.command == "serve":
+        from . import serve
+        if args.install:
+            return serve.install(state_dir)
+        if args.uninstall:
+            return serve.uninstall(state_dir)
+        if args.status:
+            return serve.status(state_dir)
+        raise SystemExit(serve.run(core, state_dir))
     if args.command == "flush":
         return core.flush(client_id=_client(core, args.client_file, args.expected_client_id) if args.client_file else None)
     if args.command == "account-status":
