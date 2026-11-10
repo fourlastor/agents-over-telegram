@@ -663,7 +663,7 @@ def test_owner_start_gets_one_short_answer(env):
     answers = owner_messages(transport)
     assert [m['text'] for m in answers] == [
         'Ready. You have 1 connected agent on this bot. It can send you private notices here. '
-        'Reply to a notice to answer the agent that sent it.']
+        'Reply to a notice to answer the agent that sent it. Send /settings to change agent settings.']
     assert start_replies(core) == [(OWNER, 'sent')]
     # The /start itself still reaches no agent and keeps its own reason.
     assert [row['reason'] for row in core.unassigned()['updates']].count('private_chat') == 1

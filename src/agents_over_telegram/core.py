@@ -411,6 +411,18 @@ class Core:
                     text TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
                     created REAL NOT NULL, expires REAL NOT NULL, decided REAL
                 );
+                CREATE TABLE IF NOT EXISTS settings_panels (
+                    owner_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL, created REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS panel_requests (
+                    update_id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, status TEXT NOT NULL,
+                    created REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS widget_answers (
+                    query_id TEXT PRIMARY KEY, data TEXT NOT NULL, chat_id INTEGER,
+                    message_id INTEGER, chat_data TEXT, created REAL NOT NULL,
+                    remove INTEGER NOT NULL DEFAULT 0
+                );
                 CREATE TABLE IF NOT EXISTS callback_answers (
                     callback_id TEXT PRIMARY KEY, text TEXT NOT NULL, chat_id INTEGER,
                     message_id INTEGER, edit_text TEXT, created REAL NOT NULL
@@ -516,6 +528,9 @@ class Core:
         with self._tx() as db:
             if 'last_gap_at' not in {row['name'] for row in db.execute('PRAGMA table_info(account)')}:
                 db.execute('ALTER TABLE account ADD COLUMN last_gap_at REAL')
+            # Which version of the bot's private-chat command menu AOT has set.
+            if 'menu_version' not in {row['name'] for row in db.execute('PRAGMA table_info(account)')}:
+                db.execute('ALTER TABLE account ADD COLUMN menu_version INTEGER')
             if 'event_at' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
                 db.execute('ALTER TABLE inbox ADD COLUMN event_at REAL')
             binding_columns = {row['name'] for row in db.execute('PRAGMA table_info(bindings)')}
@@ -589,6 +604,14 @@ class Core:
                 db.execute('ALTER TABLE bindings ADD COLUMN auto_allow INTEGER NOT NULL DEFAULT 0')
             # Claude Code's idle-session waiter wakes the session once when its
             # time limit ends; off until the owner accepts that daily turn.
+            # Development builds kept one settings panel per connection; a panel is
+            # one per owner now. Panels are disposable: the owner sends /settings again.
+            if 'remove' not in {row['name'] for row in db.execute('PRAGMA table_info(widget_answers)')}:
+                db.execute('ALTER TABLE widget_answers ADD COLUMN remove INTEGER NOT NULL DEFAULT 0')
+            if 'client_id' in {row['name'] for row in db.execute('PRAGMA table_info(settings_panels)')}:
+                db.execute('DROP TABLE settings_panels')
+                db.execute('CREATE TABLE settings_panels (owner_id INTEGER PRIMARY KEY, '
+                           'message_id INTEGER NOT NULL, created REAL NOT NULL)')
             if 'keep_alive' not in binding_columns:
                 db.execute('ALTER TABLE bindings ADD COLUMN keep_alive INTEGER NOT NULL DEFAULT 0')
             # Where owner approvals are asked: the owner's private chat (the
@@ -1350,6 +1373,10 @@ class Core:
         if isinstance(callback, dict):
             self._route_callback(db, update_id, callback, now)
             return
+        query = update.get('widget_query')
+        if isinstance(query, dict):
+            self._route_widget_query(db, update_id, query, now)
+            return
         kind = 'edited_message' if 'edited_message' in update else 'message'
         msg = update.get(kind)
         if not isinstance(msg, dict):
@@ -1368,7 +1395,8 @@ class Core:
             # own reason, so it does not look like a bug.
             if not self._route_owner_reply(db, update_id, msg, kind, account, now):
                 self._unmatched(db, update_id, None, 'private_chat', now)
-                self._queue_start_reply(db, update_id, msg, kind, now)
+                if not self._queue_panel_request(db, update_id, msg, kind, now):
+                    self._queue_start_reply(db, update_id, msg, kind, now)
             return
         if not _integer(chat_id) or not _integer(thread_id) or thread_id < 0 or chat.get('type') not in ('group', 'supergroup'):
             self._unmatched(db, update_id, None, 'unsupported_destination', now)
@@ -1820,6 +1848,50 @@ class Core:
                     db.execute(f'DELETE FROM {table} WHERE inbox_id IN ({marks})', chunk)
             db.execute(f'DELETE FROM inbox WHERE context=1 AND id IN ({marks})', chunk)
 
+    PANEL_REQUEST_INTERVAL = 10.0
+
+    def _queue_panel_request(self, db, update_id, msg, kind, now):
+        """Queue a settings panel for an owner's private /settings; True when the message was /settings.
+
+        Only a person who owns a connected agent on this bot gets a panel, at
+        most one per PANEL_REQUEST_INTERVAL.
+        """
+        sender = _mapping(msg.get('from'))
+        sender_id = sender.get('id')
+        text = msg.get('text') if isinstance(msg.get('text'), str) else ''
+        if re.fullmatch(r'/settings(?:@[A-Za-z0-9_]+)?\s*', text) is None:
+            return False
+        if (kind != 'message' or sender.get('is_bot') is not False or msg.get('sender_chat')
+                or not _integer(sender_id) or _mapping(msg.get('chat')).get('id') != sender_id):
+            return True
+        if not self._owner_connections(db, sender_id):
+            return True
+        if db.execute('SELECT 1 FROM panel_requests WHERE owner_id=? AND created>? LIMIT 1',
+                      (sender_id, now - self.PANEL_REQUEST_INTERVAL)).fetchone():
+            return True
+        db.execute('DELETE FROM panel_requests WHERE created<?', (now - 86400,))
+        db.execute("INSERT OR IGNORE INTO panel_requests(update_id,owner_id,status,created) VALUES(?,?,'queued',?)",
+                   (update_id, sender_id, now))
+        return True
+
+    def _send_panel_requests(self):
+        """Send the panels owners asked for with /settings; never fails collection. Each is tried once."""
+        with self._tx() as db:
+            db.execute("UPDATE panel_requests SET status='expired' WHERE status='queued' AND created<?",
+                       (self.clock() - 600,))
+            rows = db.execute("SELECT update_id,owner_id FROM panel_requests WHERE status='queued' "
+                              'ORDER BY update_id LIMIT 5').fetchall()
+            for row in rows:
+                db.execute("UPDATE panel_requests SET status='sending' WHERE update_id=?", (row['update_id'],))
+        for row in rows:
+            try:
+                self._send_panel(row['owner_id'])
+                status = 'sent'
+            except Exception:
+                status = 'failed'
+            with self._tx() as db:
+                db.execute('UPDATE panel_requests SET status=? WHERE update_id=?', (status, row['update_id']))
+
     def _queue_start_reply(self, db, update_id, msg, kind, now):
         """Queue one short answer to the owner's private /start.
 
@@ -1856,7 +1928,7 @@ class Core:
         else:
             notices = f'{enabled} of them can send you private notices here.'
         return (f'Ready. You have {agents} on this bot. {notices} '
-                'Reply to a notice to answer the agent that sent it.')
+                'Reply to a notice to answer the agent that sent it. Send /settings to change agent settings.')
 
     def _send_start_replies(self):
         """Answer queued /start messages; never fails collection.
@@ -2074,9 +2146,23 @@ class Core:
                     db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL WHERE singleton=1', (cursor, self.clock(), self.clock(), self.clock(), self.clock()))
                 self._probe_bot_admin(account)
                 try:
+                    self._set_bot_menu()
+                except Exception:
+                    # The command menu is a convenience; commands work without it.
+                    pass
+                try:
                     self._expire_approvals()
                 except Exception:
                     # Telling agents about expired requests is best effort.
+                    pass
+                try:
+                    self._answer_widget_queries()
+                except Exception:
+                    # A widget answer is best effort; an unanswered one times out in the widget.
+                    pass
+                try:
+                    self._send_panel_requests()
+                except Exception:
                     pass
                 try:
                     self._answer_callbacks()
@@ -2100,6 +2186,23 @@ class Core:
                 with self._tx() as db:
                     db.execute('UPDATE account SET last_attempt=?,intake_error=? WHERE singleton=1', (self.clock(), code))
                 raise CoreError(code) from None
+
+    # The bot's command menu in private chats; bump the version when it changes.
+    BOT_MENU = ({'command': 'start', 'description': 'Check that this bot can message you'},
+                {'command': 'settings', 'description': "Change your agents' settings"})
+    BOT_MENU_VERSION = 1
+
+    def _set_bot_menu(self):
+        """Set the bot's private-chat command menu once per menu version; never fails collection.
+
+        Only private chats are touched, so a group's command menu stays as it is.
+        """
+        with self._db() as db:
+            if (self._account(db)['menu_version'] or 0) >= self.BOT_MENU_VERSION:
+                return
+        self.transport.set_my_commands(list(self.BOT_MENU), {'type': 'all_private_chats'})
+        with self._tx() as db:
+            db.execute('UPDATE account SET menu_version=? WHERE singleton=1', (self.BOT_MENU_VERSION,))
 
     def _probe_bot_admin(self, account):
         """Keep bot_admin flags current with getChatMember; never fails collection.
@@ -3067,6 +3170,119 @@ class Core:
             for row in rows:
                 db.execute("UPDATE owner_approvals SET status='expired' WHERE id=?", (row['id'],))
                 self._tell_approval(db, None, row, 'expired', None, None, now)
+
+    def send_settings_panel(self, client_id):
+        """Send the owner of this connection a settings panel, with this connection selected.
+
+        Local operator control. The panel lives in the owner's private chat with
+        the shared bot and covers every connection the owner has on it; only the
+        latest panel sent to an owner accepts changes. The owner can also ask
+        for one by sending /settings to the bot.
+        """
+        with self._db() as db:
+            owner_id = self._binding(db, client_id)['owner_id']
+        return self._send_panel(owner_id, client_id)
+
+    def _owner_connections(self, db, owner_id):
+        return db.execute('SELECT c.id AS client_id,c.label,b.* FROM bindings b JOIN clients c ON c.id=b.client_id '
+                          'WHERE b.owner_id=? AND b.connected=1 AND c.active=1 ORDER BY c.label,c.id',
+                          (owner_id,)).fetchall()
+
+    def _send_panel(self, owner_id, client_id=None):
+        from . import settings_panel
+        with self._db() as db:
+            connections = self._owner_connections(db, owner_id)[:settings_panel.MAX_CONNECTIONS]
+            selected = next((c for c in connections if c['client_id'] == client_id), connections[0] if connections else None)
+            if selected is None:
+                raise CoreError('not_connected')
+            chat_data = settings_panel.state(connections, selected['client_id'], self._delivery_settings_view(selected))
+            username = self._account(db)['username']
+        try:
+            response = self.transport.send_widget(owner_id, settings_panel.html(), chat_data=chat_data,
+                                                  allow_queries=True)
+        except TransportError as error:
+            if error.code == 403:
+                raise CoreError('owner_chat_not_started', details={'bot_username': username}) from None
+            if isinstance(error.code, int) and 400 <= error.code < 500:
+                raise CoreError('telegram_rejected') from None
+            raise CoreError('uncertain_send') from None
+        if not isinstance(response, dict) or not _integer(response.get('message_id')):
+            raise CoreError('uncertain_send')
+        with self._tx() as db:
+            db.execute('INSERT INTO settings_panels(owner_id,message_id,created) VALUES(?,?,?) '
+                       'ON CONFLICT(owner_id) DO UPDATE SET message_id=excluded.message_id,created=excluded.created',
+                       (owner_id, response['message_id'], self.clock()))
+        return {'status': 'sent', 'message_id': response['message_id'], 'connections': len(connections)}
+
+    def _route_widget_query(self, db, update_id, query, now):
+        """One request from a settings panel; only the owner's latest panel changes their own connections."""
+        from . import settings_panel
+        query_id = query.get('id')
+        if not isinstance(query_id, str) or not 1 <= len(query_id) <= 64:
+            self._unmatched(db, update_id, None, 'unsupported_update', now)
+            return
+        sender = _mapping(query.get('from'))
+        chat = _mapping(query.get('chat'))
+        message_id = query.get('message_id')
+
+        def answer(result, chat_data=None, remove=False):
+            # The private chat id is kept only until the answer goes out.
+            keep = chat_data or remove
+            db.execute('INSERT OR IGNORE INTO widget_answers(query_id,data,chat_id,message_id,chat_data,created,remove) '
+                       'VALUES(?,?,?,?,?,?,?)', (query_id, json.dumps(result, separators=(',', ':'), ensure_ascii=False),
+                                                 chat.get('id') if keep else None, message_id if keep else None,
+                                                 chat_data, now, int(remove)))
+
+        private = (sender.get('is_bot') is False and _integer(sender.get('id')) and chat.get('type') == 'private'
+                   and chat.get('id') == sender.get('id') and _integer(message_id))
+        panel = db.execute('SELECT 1 FROM settings_panels WHERE owner_id=? AND message_id=?',
+                           (sender.get('id'), message_id)).fetchone() if private else None
+        request = settings_panel.parse(query.get('data')) if panel else None
+        connections = self._owner_connections(db, sender.get('id'))[:settings_panel.MAX_CONNECTIONS] if panel else []
+        # The connection must be one the presser owns now, on their latest panel.
+        target = next((c for c in connections if request and settings_panel.key(c['client_id']) == request[1]), None)
+        if panel is None:
+            self._unmatched(db, update_id, None, 'private_chat' if chat.get('type') == 'private' else 'unsupported_update', now)
+            answer({'e': 'not allowed'})
+            return
+        if request is None:
+            answer({'e': 'unknown request'})
+            return
+        if request[0] == 'x':
+            # Closing retires the panel and deletes its message.
+            db.execute('DELETE FROM settings_panels WHERE owner_id=?', (sender.get('id'),))
+            answer({'closed': True}, remove=True)
+            return
+        if target is None:
+            answer({'e': 'not allowed'})
+            return
+        kind, _, name, value = request
+        if kind != 'v':
+            if value is True and name in settings_panel.WARNINGS and kind != 'c':
+                answer({'w': settings_panel.WARNINGS[name]})
+                return
+            self._write_delivery_settings(db, target['client_id'], {name: value})
+        settings = self._delivery_settings_view(self._binding(db, target['client_id']))
+        view = settings_panel.view(target['client_id'], settings)
+        # Viewing only answers; a change also rewrites the panel's chat state.
+        answer({'s': view}, None if kind == 'v' else settings_panel.state(connections, target['client_id'], settings))
+
+    def _answer_widget_queries(self):
+        """Answer recorded widget requests and refresh their panels; never fails collection."""
+        with self._db() as db:
+            rows = db.execute('SELECT * FROM widget_answers ORDER BY created LIMIT 20').fetchall()
+        for row in rows:
+            with self._tx() as db:
+                if not db.execute('DELETE FROM widget_answers WHERE query_id=?', (row['query_id'],)).rowcount:
+                    continue
+            if row['chat_data'] and row['chat_id'] and row['message_id']:
+                with contextlib.suppress(Exception):
+                    self.transport.edit_message_widget_data(row['chat_id'], row['message_id'], row['chat_data'])
+            with contextlib.suppress(Exception):
+                self.transport.answer_widget_query(row['query_id'], row['data'])
+            if row['remove'] and row['chat_id'] and row['message_id']:
+                with contextlib.suppress(Exception):
+                    self.transport.delete_message(row['chat_id'], row['message_id'])
 
     def _answer_callbacks(self):
         """Answer recorded button presses and update their messages; never fails collection."""

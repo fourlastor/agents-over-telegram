@@ -19,8 +19,9 @@ from .transport import FakeTransport, TelegramTransport, TransportError, make_tr
 # which Core records as an unknown send without ever reaching Telegram.
 LAZY_METHODS = frozenset({"get_me", "get_webhook_info", "get_updates", "send_message", "send_photo",
                           "send_document", "forward_message", "set_message_reaction", "get_chat_member",
-                          "download_file", "answer_callback_query", "edit_message_text",
-                          "edit_ephemeral_message_text"})
+                          "download_file", "answer_callback_query", "edit_message_text", "send_widget",
+                          "answer_widget_query", "edit_message_widget_data", "edit_ephemeral_message_text",
+                          "set_my_commands", "delete_message"})
 
 
 class LazyTransport:
@@ -180,9 +181,11 @@ def parser():
     create = sub.add_parser("client-create")
     create.add_argument("--label", required=True)
     create.add_argument("--client-file", type=Path, required=True)
-    for name in ("pair-begin", "status", "history", "pause", "resume", "unsuspend", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "delivery-settings", "watch", "conversation-budget"):
+    for name in ("pair-begin", "status", "history", "pause", "resume", "unsuspend", "disconnect", "mcp", "allow-sender", "bot-exchange-policy", "delivery-settings", "watch", "conversation-budget", "settings-panel"):
         command = (sub.add_parser(name, help="Owner only: check with Telegram that a suspended destination works again, then clear it")
-                   if name == "unsuspend" else sub.add_parser(name))
+                   if name == "unsuspend" else
+                   sub.add_parser(name, help="Send the owner a settings panel for this connection in the private chat with the bot")
+                   if name == "settings-panel" else sub.add_parser(name))
         command.add_argument("--client-file", type=Path, required=name not in {"status", "history", "pause", "resume", "unsuspend", "mcp", "watch"})
         if name == "unsuspend":
             command.add_argument("--topic-open", action="store_true",
@@ -564,6 +567,8 @@ def run(args):
             if pending is not None:
                 return pending
         return core.delivery_settings(client_id, **changes)
+    if args.command == "settings-panel":
+        return core.send_settings_panel(client_id)
     if args.command == "unsuspend":
         return core.clear_suspension(client_id, topic_open_confirmed=args.topic_open)
     if args.command == "conversation-budget":
