@@ -244,7 +244,7 @@ def test_tool_is_listed_with_schema_and_dispatches(env):
     tool = {t.name: t for t in TOOLS}['owner_notify']
     schema = tool.inputSchema
     assert schema['required'] == ['text', 'idempotency_key']
-    assert set(schema['properties']) == {'text', 'idempotency_key', 'forward_message_id', 'reply_to'}
+    assert set(schema['properties']) == {'text', 'idempotency_key', 'forward_message_id', 'reply_to', 'choices'}
     assert 'decision' in tool.description and 'routine' in tool.description
     body = call_tool(core, client, 'owner_notify', {'text': 'Approve?', 'idempotency_key': 't1'})
     assert body['ok'] and body['result']['status'] == 'sent'

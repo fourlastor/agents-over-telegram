@@ -52,7 +52,8 @@ def _telegram_message_keys(payload):
 
     Reaction deliveries are excluded: a reaction is not itself a reaction target.
     """
-    if not isinstance(payload, dict) or payload.get('origin') != 'telegram' or payload.get('kind') == 'reaction':
+    if not isinstance(payload, dict) or payload.get('origin') != 'telegram' or payload.get('kind') in (
+            'reaction', 'owner_choice', 'owner_approval'):
         return None
     chat_id, message_id = payload.get('chat_id'), payload.get('message_id')
     if not _integer(chat_id) or not _integer(message_id):
@@ -66,6 +67,32 @@ def _mapping(value: Any) -> dict:
 
 def _bounded(value: Any, maximum: int = 128) -> str:
     return ''.join(c for c in str(value)[:maximum] if c.isprintable())
+
+
+def _check_choices(choices):
+    """Validated owner_notify answer labels: 2-4 distinct one-line labels of 1-32 characters, or None."""
+    if choices is None:
+        return None
+    if not isinstance(choices, list) or not 2 <= len(choices) <= 4:
+        raise CoreError('invalid_choices')
+    labels = []
+    for label in choices:
+        if (not isinstance(label, str) or label != label.strip() or not 1 <= len(label) <= 32
+                or not all(c.isprintable() for c in label)):
+            raise CoreError('invalid_choices')
+        labels.append(label)
+    if len(set(labels)) != len(labels):
+        raise CoreError('invalid_choices')
+    return labels
+
+
+def _choice_buttons(notify_id, choices):
+    """The inline keyboard for an owner_notify notice with choices, else None."""
+    if not choices:
+        return None
+    key = notify_id.removeprefix('owner_')
+    return {'inline_keyboard': [[{'text': label, 'callback_data': f'aot:c:{key}:{index}'}]
+                                for index, label in enumerate(json.loads(choices))]}
 
 
 _MEDIA_KINDS = ('document', 'photo', 'video', 'audio', 'voice', 'animation')
@@ -296,6 +323,8 @@ class Core:
     # The bot answers an owner's private /start at most once in this window.
     START_REPLY_INTERVAL = 60.0
     OWNER_NOTIFY_FOOTER = 'Reply to this message to answer the agent.'
+    OWNER_CHOICE_FOOTER = 'Tap an answer, or reply to this message to answer the agent.'
+    OWNER_CHOICE_SECONDS = 86400
     REACTION_WAKE_MODES = ('own_messages', 'all', 'none')
     WAKE_EXEMPT_MODES = ('addressed,owner', 'addressed', 'owner', 'none')
     WAKE_INTERVAL_MAX = 86400
@@ -541,6 +570,11 @@ class Core:
             # 1 when the notice answers a message the owner sent this agent.
             if 'answers_owner' not in owner_columns:
                 db.execute('ALTER TABLE owner_outbox ADD COLUMN answers_owner INTEGER NOT NULL DEFAULT 0')
+            # Optional answer buttons (a JSON list of labels), the owner's pressed
+            # label, and when the buttons stop counting.
+            for column, kind in (('choices', 'TEXT'), ('choice', 'TEXT'), ('choice_expires', 'REAL')):
+                if column not in owner_columns:
+                    db.execute(f'ALTER TABLE owner_outbox ADD COLUMN {column} {kind}')
             # owner_notify is the first tool that writes outside the bound
             # destination, so the owner switches it on knowingly per connection.
             if 'owner_notify' not in binding_columns:
@@ -2016,6 +2050,11 @@ class Core:
                     db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL WHERE singleton=1', (cursor, self.clock(), self.clock(), self.clock(), self.clock()))
                 self._probe_bot_admin(account)
                 try:
+                    self._expire_approvals()
+                except Exception:
+                    # Telling agents about expired requests is best effort.
+                    pass
+                try:
                     self._answer_callbacks()
                 except Exception:
                     # Answering a button press is a courtesy too.
@@ -2731,9 +2770,11 @@ class Core:
         if db.execute('SELECT 1 FROM inbox WHERE client_id=? AND tg_chat_id=? AND tg_message_id=? LIMIT 1',
                       (binding['client_id'], owner, reply_to)).fetchone():
             return 'owner'
-        if db.execute('SELECT 1 FROM owner_outbox WHERE client_id=? AND owner_id=? AND (message_id=? OR forwarded_message_id=?) LIMIT 1',
-                      (binding['client_id'], owner, reply_to, reply_to)).fetchone():
-            return 'notice'
+        notice = db.execute('SELECT choice FROM owner_outbox WHERE client_id=? AND owner_id=? AND (message_id=? OR forwarded_message_id=?) '
+                            'ORDER BY created DESC LIMIT 1', (binding['client_id'], owner, reply_to, reply_to)).fetchone()
+        if notice is not None:
+            # A notice the owner answered with a button: replying to it answers the owner.
+            return 'owner' if notice['choice'] is not None else 'notice'
         return None
 
     APPROVAL_ACTIONS = ('delivery_settings', 'conversation_budget')
@@ -2761,6 +2802,9 @@ class Core:
             if set(params) != {'conversation_id', 'additional_sends', 'duration_seconds', 'reason'}:
                 raise CoreError('invalid_owner_approval')
             self._check_budget_grant(params['additional_sends'], params['duration_seconds'], params['reason'])
+        with contextlib.suppress(Exception):
+            # Requests that ran out tell their agent first, and free their slot.
+            self._expire_approvals()
         now = self.clock()
         approval_id = secrets.token_hex(8)
         with self._tx() as db:
@@ -2834,6 +2878,7 @@ class Core:
         chat = _mapping(message.get('chat'))
         data = callback.get('data')
         match = re.fullmatch(r'aot:([ad]):([0-9a-f]{16})', data) if isinstance(data, str) else None
+        choice = re.fullmatch(r'aot:c:([0-9a-f]{24}):([0-3])', data) if isinstance(data, str) and not match else None
         private = (sender.get('is_bot') is False and _integer(sender.get('id')) and chat.get('type') == 'private'
                    and chat.get('id') == sender.get('id') and _integer(message.get('message_id')))
 
@@ -2844,6 +2889,9 @@ class Core:
                        'VALUES(?,?,?,?,?,?)', (callback_id, text, chat.get('id') if private else None,
                                                message.get('message_id') if private else None, edit, now))
 
+        if choice is not None and private:
+            self._route_choice(db, update_id, choice, sender, message, answer, now)
+            return
         row = db.execute('SELECT * FROM owner_approvals WHERE id=?', (match.group(2),)).fetchone() if match else None
         if not private or row is None or row['owner_id'] != sender.get('id'):
             # The refusal record never keeps the chat id: in a private chat it is
@@ -2857,10 +2905,12 @@ class Core:
         if row['expires'] <= now:
             db.execute("UPDATE owner_approvals SET status='expired' WHERE id=?", (row['id'],))
             answer('This request expired.', row['text'] + '\n\nExpired: nothing changed.')
+            self._tell_approval(db, update_id, row, 'expired', None, sender, now)
             return
         if match.group(1) == 'd':
             db.execute("UPDATE owner_approvals SET status='declined',decided=? WHERE id=?", (now, row['id']))
             answer('Declined.', row['text'] + '\n\nDeclined: nothing changed.')
+            self._tell_approval(db, update_id, row, 'declined', None, sender, now)
             return
         db.execute('SAVEPOINT approval')
         try:
@@ -2871,10 +2921,61 @@ class Core:
             db.execute("UPDATE owner_approvals SET status='apply_failed',error=?,decided=? WHERE id=?",
                        (error.code, now, row['id']))
             answer('Could not apply the change.', row['text'] + f'\n\nApproved, but it could not be applied ({error.code}).')
+            self._tell_approval(db, update_id, row, 'apply_failed', error.code, sender, now)
             return
         db.execute('RELEASE SAVEPOINT approval')
         db.execute("UPDATE owner_approvals SET status='approved',decided=? WHERE id=?", (now, row['id']))
         answer('Approved.', row['text'] + '\n\nApproved and applied.')
+        self._tell_approval(db, update_id, row, 'approved', None, sender, now)
+
+    def _owner_sender(self, sender):
+        return {'id': sender['id'], 'is_bot': False, 'username': _bounded(sender.get('username', ''), 64)}
+
+    def _tell_approval(self, db, update_id, row, outcome, error, sender, now):
+        """Tell the agent that asked how the owner answered its approval request."""
+        if not db.execute('SELECT 1 FROM clients WHERE id=? AND active=1', (row['client_id'],)).fetchone():
+            return
+        payload = {'origin': 'telegram', 'kind': 'owner_approval', 'update_id': update_id,
+                   'sender': self._owner_sender(sender) if sender else None,
+                   'approval_id': row['id'], 'action': row['action'],
+                   'params': json.loads(row['params']), 'outcome': outcome, 'error': error,
+                   'addressed': True, 'owner_notice': True}
+        conversation = f'owner_approval:{row["client_id"]}'
+        db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
+        with contextlib.suppress(CoreError):
+            self._enqueue(db, row['client_id'], f'approval:{row["id"]}', payload, conversation, now)
+
+    def _route_choice(self, db, update_id, choice, sender, message, answer, now):
+        """The owner pressed an answer button on an owner_notify notice."""
+        row = db.execute('SELECT * FROM owner_outbox WHERE id=?', ('owner_' + choice.group(1),)).fetchone()
+        labels = json.loads(row['choices']) if row is not None and row['choices'] else []
+        index = int(choice.group(2))
+        binding = db.execute('SELECT b.* FROM bindings b JOIN clients c ON c.id=b.client_id '
+                             'WHERE b.client_id=? AND b.owner_id=? AND b.connected=1 AND c.active=1',
+                             (row['client_id'], sender['id'])).fetchone() if row is not None else None
+        # The press must be the owner's, on this very notice, in a connection
+        # that still has that owner.
+        if (row is None or row['owner_id'] != sender['id'] or row['message_id'] != message['message_id']
+                or index >= len(labels) or binding is None):
+            self._unmatched(db, update_id, None, 'private_chat', now)
+            answer('This button does not belong to a question of yours.')
+            return
+        if row['choice'] is not None:
+            answer(f'Already answered: {row["choice"]}.')
+            return
+        if row['choice_expires'] is not None and row['choice_expires'] <= now:
+            answer('This question expired. Reply to the message instead.', row['text'] + '\n\nThe buttons expired.')
+            return
+        label = labels[index]
+        db.execute('UPDATE owner_outbox SET choice=?,updated=? WHERE id=?', (label, now, row['id']))
+        answer(f'Answered: {label}', row['text'] + f'\n\nAnswered: {label}')
+        payload = {'origin': 'telegram', 'kind': 'owner_choice', 'update_id': update_id,
+                   'sender': self._owner_sender(sender), 'notify_id': row['id'],
+                   'notice_message_id': row['message_id'], 'choice': label, 'choice_index': index,
+                   'text': label, 'addressed': True, 'owner_notice': True}
+        conversation = f'owner:{row["client_id"]}:{row["id"]}'
+        db.execute('INSERT OR IGNORE INTO conversations(id) VALUES(?)', (conversation,))
+        self._enqueue(db, row['client_id'], f'tg:{update_id}', payload, conversation, now)
 
     def _apply_approval(self, db, row, now):
         params = json.loads(row['params'])
@@ -2894,6 +2995,16 @@ class Core:
         else:
             raise CoreError('invalid_owner_approval')
 
+    def _expire_approvals(self):
+        """Expire unanswered approval requests and tell each agent that asked; never fails collection."""
+        now = self.clock()
+        with self._tx() as db:
+            rows = db.execute("SELECT * FROM owner_approvals WHERE status='pending' AND expires<=? ORDER BY expires LIMIT 20",
+                              (now,)).fetchall()
+            for row in rows:
+                db.execute("UPDATE owner_approvals SET status='expired' WHERE id=?", (row['id'],))
+                self._tell_approval(db, None, row, 'expired', None, None, now)
+
     def _answer_callbacks(self):
         """Answer recorded button presses and update their messages; never fails collection."""
         with self._db() as db:
@@ -2909,7 +3020,7 @@ class Core:
                 with contextlib.suppress(Exception):
                     self.transport.edit_message_text(row['chat_id'], row['message_id'], row['edit_text'])
 
-    def owner_notify(self, client_id, text, idempotency_key, forward_message_id=None, reply_to=None):
+    def owner_notify(self, client_id, text, idempotency_key, forward_message_id=None, reply_to=None, choices=None):
         """Queue one low-volume notification to the owner's private chat with the bot.
 
         The owner is the person who paired this destination; in a private chat
@@ -2918,7 +3029,9 @@ class Core:
         Like message_send, the intent is durable before any network activity,
         and a repeated idempotency key with the same content returns the same
         outcome. ``reply_to`` sends the notice as a Telegram reply to a message
-        in the owner's private chat that belongs to this agent.
+        in the owner's private chat that belongs to this agent. ``choices`` adds
+        2-4 answer buttons; the owner's press arrives as an ``owner_choice``
+        delivery, and a text reply to the notice still works as usual.
         """
         if not isinstance(text, str) or not 1 <= len(text) <= 3500:
             raise CoreError('invalid_text')
@@ -2928,8 +3041,10 @@ class Core:
             raise CoreError('invalid_forward')
         if reply_to is not None and (not _integer(reply_to) or reply_to <= 0):
             raise CoreError('invalid_reply')
-        # Requests without reply_to keep their earlier hash, so old keys still match.
-        parts = [text, forward_message_id] + ([reply_to] if reply_to is not None else [])
+        choices = _check_choices(choices)
+        # Requests without reply_to or choices keep their earlier hash, so old keys still match.
+        parts = [text, forward_message_id] + ([reply_to] if reply_to is not None or choices else [])
+        parts += [choices] if choices else []
         request_hash = _digest(json.dumps(parts))
         now = self.clock()
         with self._tx() as db:
@@ -2965,13 +3080,16 @@ class Core:
                 # Pairing already strips control characters from the title; collapse
                 # any whitespace too, so a group name can't fake a label or footer line.
                 title = ' '.join(str(binding['title']).split())
-                labelled = f'[Agent: {client["label"]} | {title}]\n{text}\n{self.OWNER_NOTIFY_FOOTER}'
+                footer = self.OWNER_CHOICE_FOOTER if choices else self.OWNER_NOTIFY_FOOTER
+                labelled = f'[Agent: {client["label"]} | {title}]\n{text}\n{footer}'
                 db.execute("INSERT INTO owner_outbox(id,client_id,owner_id,text,from_chat_id,forward_message_id,reply_to,"
-                           'answers_owner,idempotency_key,request_hash,status,created,updated,due) '
-                           "VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                           'answers_owner,idempotency_key,request_hash,status,created,updated,due,choices,choice_expires) '
+                           "VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
                            (notify_id, client_id, binding['owner_id'], labelled,
                             binding['chat_id'] if forward_message_id is not None else None, forward_message_id,
-                            reply_to, int(answers_owner), idempotency_key, request_hash, now, now, now))
+                            reply_to, int(answers_owner), idempotency_key, request_hash, now, now, now,
+                            json.dumps(choices) if choices else None,
+                            now + self.OWNER_CHOICE_SECONDS if choices else None))
             username = self._account(db)['username']
         self.flush(client_id=client_id, limit=20)
         status = self.delivery_status(client_id, notify_id)
@@ -2987,6 +3105,8 @@ class Core:
                 'forward_message_id': row['forward_message_id'],
                 'forwarded_message_id': row['forwarded_message_id'], 'reply_to': row['reply_to'],
                 'answers_owner': bool(row['answers_owner']),
+                **({'choices': json.loads(row['choices']), 'choice': row['choice'],
+                    'choice_expires_at': row['choice_expires']} if row['choices'] else {}),
                 'created_at': row['created'], 'updated_at': row['updated'],
                 'retry_at': row['due'] if row['status'] == 'queued' else None}
 
@@ -3215,7 +3335,12 @@ class Core:
             step = 'text' if message_id is None else 'forward'
             try:
                 if message_id is None:
-                    response = self.transport.send_message(chat_id=row['owner_id'], text=row['text'], reply_to=row['reply_to'])
+                    markup = _choice_buttons(row['id'], row['choices'])
+                    if markup is None:
+                        response = self.transport.send_message(chat_id=row['owner_id'], text=row['text'], reply_to=row['reply_to'])
+                    else:
+                        response = self.transport.send_message(chat_id=row['owner_id'], text=row['text'],
+                                                               reply_to=row['reply_to'], reply_markup=markup)
                     if not isinstance(response, dict) or not _integer(response.get('message_id')) or response['message_id'] <= 0:
                         raise UnknownSend()
                     message_id = response['message_id']
