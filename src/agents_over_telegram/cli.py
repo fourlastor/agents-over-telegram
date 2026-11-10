@@ -19,7 +19,8 @@ from .transport import FakeTransport, TelegramTransport, TransportError, make_tr
 # which Core records as an unknown send without ever reaching Telegram.
 LAZY_METHODS = frozenset({"get_me", "get_webhook_info", "get_updates", "send_message", "send_photo",
                           "send_document", "forward_message", "set_message_reaction", "get_chat_member",
-                          "download_file", "answer_callback_query", "edit_message_text"})
+                          "download_file", "answer_callback_query", "edit_message_text",
+                          "edit_ephemeral_message_text"})
 
 
 class LazyTransport:
@@ -246,6 +247,11 @@ def parser():
                                  help="on: Claude Code only; when an idle session's background listener reaches its "
                                       "23-hour limit, wake the session for one short turn so a new listener starts "
                                       "(off by default: after 23 idle hours the session stops hearing Telegram)")
+            command.add_argument("--approvals-in", dest="approvals_in", choices=["private", "group"],
+                                 help="where owner approvals are asked: private (default) in the owner's private "
+                                      "chat with the bot, or group in this group or topic as a message only the "
+                                      "owner sees; Telegram does not guarantee those, so a failed send falls back "
+                                      "to the private chat")
         if name == "bot-exchange-policy":
             command.add_argument("--sender-id", type=int, required=True)
             change = command.add_mutually_exclusive_group()
@@ -536,7 +542,8 @@ def run(args):
                    "accept_media": switch(args.accept_media), "reaction_wake": args.reaction_wake,
                    "wake_interval": args.wake_interval, "wake_exempt": args.wake_exempt,
                    "owner_notify": switch(args.owner_notify), "model_judge": switch(args.model_judge),
-                   "auto_allow": switch(args.auto_allow), "keep_alive": switch(args.keep_alive)}
+                   "auto_allow": switch(args.auto_allow), "keep_alive": switch(args.keep_alive),
+                   "approvals_in": args.approvals_in}
         warnings = []
         if args.model_judge == "on":
             warnings.append("With the addressed filter, recent messages from this group or topic will be sent "
