@@ -553,6 +553,10 @@ class Core:
             # until the owner turns it on for a group of trusted people.
             if 'auto_allow' not in binding_columns:
                 db.execute('ALTER TABLE bindings ADD COLUMN auto_allow INTEGER NOT NULL DEFAULT 0')
+            # Claude Code's idle-session waiter wakes the session once when its
+            # time limit ends; off until the owner accepts that daily turn.
+            if 'keep_alive' not in binding_columns:
+                db.execute('ALTER TABLE bindings ADD COLUMN keep_alive INTEGER NOT NULL DEFAULT 0')
             # When auto-allow added a sender (NULL for an explicit grant), and the
             # username it saw then, so status can show who joined this way.
             sender_columns = {row['name'] for row in db.execute('PRAGMA table_info(allowed_senders)')}
@@ -835,7 +839,7 @@ class Core:
 
     def delivery_settings(self, client_id, delivery_filter=None, capture_context=None, accept_media=None,
                           reaction_wake=None, wake_interval=None, wake_exempt=None, owner_notify=None,
-                          model_judge=None, auto_allow=None):
+                          model_judge=None, auto_allow=None, keep_alive=None):
         """Local operator control; never exposed as an agent MCP mutation.
 
         ``delivery_filter`` 'all' (the default) delivers every message from an
@@ -869,12 +873,16 @@ class Core:
         bot who posts in the destination to the allowed senders the first time
         AOT sees them, for groups where everyone is trusted; it is off until the
         owner turns it on, and turning it off keeps the senders added so far.
+        ``keep_alive`` lets Claude Code's idle-session waiter wake the session
+        once when its time limit ends, so a new waiter starts; it costs one short
+        turn per idle day and is off until the owner turns it on.
         The other settings default to the original behavior.
         """
         changes = {'delivery_filter': delivery_filter, 'capture_context': capture_context,
                    'accept_media': accept_media, 'reaction_wake': reaction_wake,
                    'wake_interval': wake_interval, 'wake_exempt': wake_exempt,
-                   'owner_notify': owner_notify, 'model_judge': model_judge, 'auto_allow': auto_allow}
+                   'owner_notify': owner_notify, 'model_judge': model_judge, 'auto_allow': auto_allow,
+                   'keep_alive': keep_alive}
         self._check_delivery_settings(changes)
         with self._tx() as db:
             self._binding(db, client_id)
@@ -882,7 +890,7 @@ class Core:
             row = self._binding(db, client_id)
         return self._delivery_settings_view(row)
 
-    _BOOL_SETTINGS = ('capture_context', 'accept_media', 'owner_notify', 'model_judge', 'auto_allow')
+    _BOOL_SETTINGS = ('capture_context', 'accept_media', 'owner_notify', 'model_judge', 'auto_allow', 'keep_alive')
 
     def _check_delivery_settings(self, changes):
         if set(changes) - {'delivery_filter', 'reaction_wake', 'wake_interval', 'wake_exempt', *self._BOOL_SETTINGS}:
@@ -915,7 +923,8 @@ class Core:
                 'accept_media': bool(row['accept_media']), 'reaction_wake': row['reaction_wake'],
                 'wake_interval': row['wake_interval'], 'wake_exempt': row['wake_exempt'],
                 'owner_notify': bool(row['owner_notify']), 'model_judge': bool(row['model_judge']),
-                'auto_allow': bool(row['auto_allow']), 'context_window_seconds': self.HISTORY_WINDOW}
+                'auto_allow': bool(row['auto_allow']), 'keep_alive': bool(row['keep_alive']),
+                'context_window_seconds': self.HISTORY_WINDOW}
 
     def _limits(self, db):
         row = db.execute('SELECT * FROM exchange_limits WHERE singleton=1').fetchone()
@@ -1145,7 +1154,8 @@ class Core:
                             'wake_exempt': row['wake_exempt'],
                             'owner_notify': bool(row['owner_notify']),
                             'model_judge': bool(row['model_judge']),
-                            'auto_allow': bool(row['auto_allow'])} if row else None,
+                            'auto_allow': bool(row['auto_allow']),
+                            'keep_alive': bool(row['keep_alive'])} if row else None,
                 'reactions': self._reaction_capability(row) if row else None,
                 'state': state, 'next_action': {'code': action, 'message': message},
             }

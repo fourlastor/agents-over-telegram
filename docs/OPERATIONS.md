@@ -192,7 +192,7 @@ The command asks the owner to type `yes` at a terminal first, or, with no termin
 
 #### Approve a change in Telegram
 
-Some changes need the owner's say-so: `delivery-settings --auto-allow on`, `delivery-settings --model-judge on`, and a `conversation-budget` grant. At a terminal, the command asks the owner to type `yes`. When no terminal is attached, which is how agents run commands, AOT asks the owner in Telegram instead:
+Some changes need the owner's say-so: `delivery-settings --auto-allow on`, `--model-judge on` and `--keep-alive on`, and a `conversation-budget` grant. At a terminal, the command asks the owner to type `yes`. When no terminal is attached, which is how agents run commands, AOT asks the owner in Telegram instead:
 
 - The command changes nothing yet. It returns `status: "owner_approval_pending"` with an `approval_id` and `expires_at`.
 - The shared bot sends the owner a private message. It names the agent and the group, lists every value the command will set (one per line, including settings that need no approval), repeats the warning, and has **Approve** and **Decline** buttons. Free text such as a budget reason is shown on one line and shortened.
@@ -245,6 +245,19 @@ By default, every new delivery is announced at once: an idle agent wakes up for 
 - `--wake-exempt` names what is still announced at once. The default `addressed,owner` covers messages that mention the bot, reply to it or address a command to it, and messages from the owner who paired the connection; `addressed` or `owner` keeps one of them, and `none` batches everything. An exempt delivery takes the held ones into the same notice. Messages a peer agent sends to this agent count as addressed. Reactions are announced with the next notice, except the owner's reaction on an [owner notice](#notify-the-owner-privately): it answers the agent, so it counts as an owner message and carries `owner_notice: true`.
 - Each delivery records whether it addressed the bot in an `addressed` field.
 - A `relay-desktop` retry of a wake that already started is never held.
+
+### Keep an idle Claude Code session listening
+
+In Claude Code, an idle session hears Telegram through a background waiter that a turn end starts. The waiter stops after 23 hours. A session that stays idle for longer than that misses messages until someone sends it a prompt. Keep-alive closes that gap:
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" delivery-settings --client-file "$AOT_STATE/clients/alpha.json" --keep-alive on
+```
+
+- When the waiter reaches its limit with no new message, it wakes the session once. The notice asks the model to end the turn at once. The turn end starts a new waiter for another 23 hours.
+- The cost is one short model turn per idle day. That turn reads the whole conversation again, and after a day the prompt cache has expired, so it is not cached.
+- It is off by default. With it off, the waiter stops quietly as before. Because it spends the owner's money, turning it on asks the owner to type `yes` at a terminal, or to [approve it in Telegram](#approve-a-change-in-telegram) when no terminal is attached.
+- It applies only to Claude Code's waiter. Codex, Pi, Amp and `relay-desktop` don't use it.
 
 ## Launch one scoped MCP client
 

@@ -288,3 +288,20 @@ def test_an_old_owners_button_does_not_apply_after_a_new_owner(owner):
     core.collect()
     assert core.delivery_settings(client)['auto_allow'] is False
     assert rows(core, 'SELECT status,error FROM owner_approvals') == [('apply_failed', 'owner_changed')]
+
+
+def test_keep_alive_needs_the_owner_and_applies_on_approval(owner, monkeypatch):
+    core, transport, clock, client, credentials = owner
+    client_file = core.state_dir / 'client.json'
+    client_file.write_text(json.dumps(credentials))
+    client_file.chmod(0o600)
+    monkeypatch.setattr('sys.stdin', types.SimpleNamespace(isatty=lambda: False))
+    args = ['--state-dir', str(core.state_dir), '--fake', 'delivery-settings', '--client-file', str(client_file)]
+    result = run(parser().parse_args(args + ['--keep-alive', 'on']))
+    assert result['status'] == 'owner_approval_pending'
+    assert core.delivery_settings(client)['keep_alive'] is False
+    press(transport, result['approval_id'])
+    core.collect()
+    assert core.delivery_settings(client)['keep_alive'] is True
+    # Turning it off needs nobody's approval.
+    assert run(parser().parse_args(args + ['--keep-alive', 'off']))['keep_alive'] is False

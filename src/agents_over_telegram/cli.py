@@ -242,6 +242,10 @@ def parser():
                                  help="on: add every person and bot who posts in this group or topic to the allowed "
                                       "senders, for groups where everyone is trusted (off by default; off keeps the "
                                       "senders added so far)")
+            command.add_argument("--keep-alive", dest="keep_alive", choices=["on", "off"],
+                                 help="on: Claude Code only; when an idle session's background listener reaches its "
+                                      "23-hour limit, wake the session for one short turn so a new listener starts "
+                                      "(off by default: after 23 idle hours the session stops hearing Telegram)")
         if name == "bot-exchange-policy":
             command.add_argument("--sender-id", type=int, required=True)
             change = command.add_mutually_exclusive_group()
@@ -532,7 +536,7 @@ def run(args):
                    "accept_media": switch(args.accept_media), "reaction_wake": args.reaction_wake,
                    "wake_interval": args.wake_interval, "wake_exempt": args.wake_exempt,
                    "owner_notify": switch(args.owner_notify), "model_judge": switch(args.model_judge),
-                   "auto_allow": switch(args.auto_allow)}
+                   "auto_allow": switch(args.auto_allow), "keep_alive": switch(args.keep_alive)}
         warnings = []
         if args.model_judge == "on":
             warnings.append("With the addressed filter, recent messages from this group or topic will be sent "
@@ -542,6 +546,10 @@ def run(args):
             warnings.append("Every person and bot who posts in this group or topic will become an allowed sender "
                             "and can give this agent work. That includes anyone who joins later, for example "
                             "through an invite link. Remove one with allow-sender --remove.")
+        if args.keep_alive == "on":
+            warnings.append("Claude Code only: when this idle session's background listener reaches its 23-hour "
+                            "limit, it wakes the session for one short turn so a new listener starts. Each such "
+                            "turn reads the whole conversation without the prompt cache, once per idle day.")
         if warnings:
             # The whole command waits for the owner, so nothing applies half.
             pending = _confirm_or_ask_owner(core, client_id, " ".join(warnings), "delivery_settings",
