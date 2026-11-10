@@ -4,7 +4,7 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.9.22 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.9.23 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
 | Host | Integration | Push delivery |
 |---|---|---|
@@ -101,7 +101,7 @@ You can ask the agent in plain words, for example **"Telegram status"**, **"Paus
 
 ## Owner settings
 
-The owner changes settings for one connection with `aot delivery-settings`. The command without options prints the current settings. The owner can also send **/settings** to the bot in a private chat to get a panel with every agent's settings as buttons; see [settings panel](docs/OPERATIONS.md#settings-panel-in-telegram). [Local operations](docs/OPERATIONS.md#addressed-only-delivery-and-group-context) explains every option.
+The owner changes settings for one connection with `aot delivery-settings`. The command without options prints the current settings. The owner can also send **/settings** to the bot in a private chat to get a panel with every agent's settings as buttons; see [settings panel](docs/OPERATIONS.md#settings-panel-in-telegram). For the panel and approvals to answer even while every agent is busy, run the [always-on collector](docs/OPERATIONS.md#always-on-collector) with `aot serve --install`. [Local operations](docs/OPERATIONS.md#addressed-only-delivery-and-group-context) explains every option.
 
 | Option | Default | Effect |
 |---|---|---|

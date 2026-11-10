@@ -78,7 +78,22 @@ Status reports the logical label, actual bot, destination, state, backlog, allow
 
 The setup command and scoped native tools are distinct from installing the plugin through Codex's plugin UI. The manifest declares onboarding, but UI installation and setup-button invocation remain untested. See [compatibility](COMPATIBILITY.md) for evidence limits.
 
-## Optional desktop listening
+## Always-on collector
+
+Owner actions (settings panel taps, approval presses, `/settings`) must be answered within seconds, and messages should keep arriving while every agent is busy or closed. Without a long-running collector, collection happens only through agents: a Claude Code session collects between turns, Codex hooks every few seconds, Pi and Amp while their watcher runs. `aot serve` is a collector that never stops:
+
+```sh
+"$AOT_BIN" --state-dir "$AOT_STATE" serve --install
+```
+
+- `--install` sets it up as a user service and starts it: a systemd user unit (`~/.config/systemd/user/agents-over-telegram.service`) on Linux, or a launchd agent (`~/Library/LaunchAgents/dev.agents-over-telegram.serve.plist`) on macOS. It starts again after a crash or a reboot. Logs go to `journalctl --user -u agents-over-telegram` on Linux, and to `serve.log` in the state directory on macOS.
+- It long-polls Telegram the whole time. It routes messages into each agent's inbox, answers panel requests and approval presses at once, runs the optional model judge, and sends queued messages that waited for a rate limit. It never replies for an agent.
+- Agents keep working as before. Their waiters, hooks and watchers see its collector lock and only watch the inbox for new deliveries, so nothing is collected twice.
+- The service runs the AOT recorded in `serve-runtime.json` in the state directory. Every `setup` that moves a project to a new runtime updates that file. The collector notices, exits, and the service manager starts it again on the new runtime.
+- `serve --status` shows whether it's installed and which runtime it runs. `serve --uninstall` stops and removes it. `serve` with no option runs it in the foreground.
+- One service per user. It serves the state directory it was installed for.
+- On a machine that already runs `relay-desktop --collect` all the time, that listener does the same collecting, so you don't need `serve` there too.
+
 
 Ask **“Listen for Telegram”** with the target local chat and listening period. Keep ChatGPT open normally from the app list. The [desktop listener](DIRECT_DISPATCH.md) binds the existing client to an exact local thread UUID and matching project, then uses native queueing and the desktop wake URL when messages arrive. It requires no custom desktop launch, replacement backend or running relay model. Setup, status and resume do not start it automatically.
 
@@ -221,7 +236,7 @@ The owner can change their agents' settings from a panel in their private chat w
 - Only the owner's own tap counts, only in their private chat, only on the latest panel AOT sent them, and only for connections they own at that moment. A re-pair to a new owner or a disconnect takes a connection out of the panel. Sending /settings again, at most once every 10 seconds, retires the old panel.
 - The owner must have sent `/start` to the bot once. Otherwise the panel can't be sent (`owner_chat_not_started`).
 - Telegram currently shows widgets only in the private chat with the bot, and sends them as protected content, so they can't be forwarded and phones block screenshots while one is on screen. Apps without widget support show the message as unsupported.
-- A tap must be answered within 15 seconds, so it needs a running collector: a relay or desktop listener, or a Claude Code session between turns. A tap while nothing collects shows a timeout in the panel and changes nothing; tap again later.
+- A tap must be answered within 15 seconds, so it needs a running collector. With the [always-on collector](#always-on-collector) the panel always answers. Without it, a tap is answered only while some agent collects, for example a Claude Code session between turns, and a tap while nothing collects times out and changes nothing.
 - AOT sets the bot's command menu in private chats to `/start` and `/settings`, once. Group menus aren't touched.
 - A setting with a warning shows it right under that setting, with **Turn on** and **Cancel**.
 - **Close** deletes the panel message and retires the panel. Send /settings for a new one.
