@@ -88,5 +88,16 @@ jobs:
           python=.venv/bin/python; [ -x "$python" ] || python=.venv/Scripts/python.exe
           "$python" scripts/validate_package.py
 
+      - name: Prepare a real runtime with the bootstrap script
+        if: runner.os == 'Windows'
+        run: |
+          python=.venv/Scripts/python.exe
+          out=$("$python" scripts/bootstrap_runtime.py --runtime-root "$RUNNER_TEMP/aot-runtimes")
+          echo "$out"
+          aot=$(printf '%s' "$out" | "$python" -c "import json, sys; print(json.loads(sys.stdin.read().strip().splitlines()[-1])['executable'])")
+          "$aot" --help > /dev/null
+
       - name: Run the offline demo
-        run: .venv/bin/aot demo
+        run: |
+          aot=.venv/bin/aot; [ -x "$aot" ] || aot=.venv/Scripts/aot.exe
+          "$aot" demo

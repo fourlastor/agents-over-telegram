@@ -9,6 +9,9 @@ collect_ignore = ([
     'test_appserver_client.py', 'test_desktop_dispatcher.py', 'test_dispatcher.py',
     'test_macos_desktop_queue.py', 'test_native_desktop_queue.py', 'test_relay_watch.py',
     'test_shared_backend_wrapper.py',
+    # These fake uv and the runtime with POSIX shebang scripts; CI runs the
+    # real bootstrap on Windows instead.
+    'test_bootstrap_runtime.py',
 ] if os.name == 'nt' else [])
 
 from agents_over_telegram import onboarding as _onboarding

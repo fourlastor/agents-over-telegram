@@ -112,7 +112,9 @@ def test_plugin_launcher_finds_the_project_from_the_hook_input_cwd(env, tmp_path
     elsewhere = tmp_path / 'hook-cwd'
     elsewhere.mkdir()
     clean = {k: v for k, v in os.environ.items() if k not in ('AOT_PROJECT_DIR', 'CLAUDE_PROJECT_DIR')}
-    result = subprocess.run(['/usr/bin/python3', str(ROOT / 'scripts' / 'aot_host_launch.py'), 'hook', '--host', 'codex',
+    # The host's system Python, as the plugin hook command runs it; any Python 3.11+ on Windows.
+    system_python = '/usr/bin/python3' if os.name != 'nt' else sys.executable
+    result = subprocess.run([system_python, str(ROOT / 'scripts' / 'aot_host_launch.py'), 'hook', '--host', 'codex',
                              '--collect-interval', '0.001'],
                             input=json.dumps(payload(env, 'PostToolUse', tool_name='shell')),
                             capture_output=True, text=True, cwd=elsewhere, env=clean, timeout=60)
