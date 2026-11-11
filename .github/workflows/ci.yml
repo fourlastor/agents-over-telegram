@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   test:
-    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python }}${{ matrix.shard && format(', {0}', matrix.shard) || '' }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
@@ -29,8 +29,23 @@ jobs:
             python: "3.13"
           - os: macos-latest
             python: "3.13"
+          # Windows runs in shards by test file name while it is brought up,
+          # so one shard that loses its runner does not hide the others' logs.
           - os: windows-latest
             python: "3.13"
+            shard: "[a-c]"
+          - os: windows-latest
+            python: "3.13"
+            shard: "[d-g]"
+          - os: windows-latest
+            python: "3.13"
+            shard: "[h-m]"
+          - os: windows-latest
+            python: "3.13"
+            shard: "[n-r]"
+          - os: windows-latest
+            python: "3.13"
+            shard: "[s-z]"
     defaults:
       run:
         shell: bash
@@ -56,7 +71,8 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             # A test that hangs for two minutes dumps every thread and exits,
             # so the log survives instead of running into the job limit.
-            AOT_TEST_HANG_SECONDS=120 "$python" -m pytest -v
+            # Collect only this shard's files; conftest still skips the ones Windows does not support.
+            AOT_TEST_HANG_SECONDS=120 "$python" -m pytest -v tests -o 'python_files=test_${{ matrix.shard }}*.py'
           else
             "$python" -m pytest -q
           fi
