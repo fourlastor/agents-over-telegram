@@ -41,6 +41,18 @@ class LazyTransport:
 MAX_TOOL_ARGUMENTS = 1024 * 1024
 
 
+def _relayed_tool(state_dir, args):
+    """The tool's answer from the always-on collector, or None when none took it."""
+    from . import relay_api
+    from .mcp_server import _TOOL_MAP, _VALIDATORS, relayed
+    arguments = args.tool_arguments
+    if args.name not in _TOOL_MAP or not isinstance(arguments, dict) or not _VALIDATORS[args.name].is_valid(arguments):
+        return None
+    secret = read_private_json(args.client_file)["client_secret"]
+    return relayed(lambda name, values: relay_api.call(state_dir, secret, name, values), args.name, arguments,
+                   args.client_file)
+
+
 def _tool_arguments():
     """The tool arguments as one JSON object on stdin; nothing on stdin means none."""
     if sys.stdin is None or sys.stdin.isatty():
@@ -443,6 +455,13 @@ def run(args):
         return codex_trust.status()
     state_dir = private_directory(args.state_dir)
     _mode(state_dir, args.fake)
+    if args.command == "tool" and args.client_file is not None:
+        # A tool call goes to the always-on collector first; this process
+        # opens the database only when no relay answers.
+        args.tool_arguments = _tool_arguments()
+        body = _relayed_tool(state_dir, args)
+        if body is not None:
+            return body
     core = Core(state_dir, LazyTransport(state_dir, args.fake), recover_sends=(not args.command.startswith("relay-")
                 and args.command not in {"history", "status", "account-status", "judge-config", "bot-exchange-policy", "delivery-settings", "watch",
                                          "conversation-budget", "exchange-limits", "serve"}))
@@ -551,16 +570,8 @@ def run(args):
         raise CredentialError("client_file_required")
     client_id = _client(core, args.client_file, args.expected_client_id)
     if args.command == "tool":
-        from . import relay_api
-        from .mcp_server import _TOOL_MAP, _VALIDATORS, call_tool, relayed
-        arguments = _tool_arguments()
-        if args.name in _TOOL_MAP and isinstance(arguments, dict) and _VALIDATORS[args.name].is_valid(arguments):
-            secret = read_private_json(args.client_file)["client_secret"]
-            body = relayed(lambda name, values: relay_api.call(state_dir, secret, name, values), args.name, arguments,
-                           args.client_file)
-            if body is not None:
-                return body
-        return call_tool(core, client_id, args.name, arguments)
+        from .mcp_server import call_tool
+        return call_tool(core, client_id, args.name, args.tool_arguments)
     if args.command == "pair-begin":
         return core.connection_begin(client_id)
     if args.command == "status":

@@ -19,6 +19,7 @@ import time
 from typing import Any, Callable
 
 from .core import CoreError, _mapping
+from .relay_api import Unavailable
 from . import compat
 from .credentials import CredentialError
 from .transport import TransportError
@@ -210,12 +211,25 @@ def pending_summary(core, client_id: str) -> dict[str, Any] | None:
 RELAY_WAIT = 10.0
 
 
+def prepare_watch(core, client_id: str, announce_backlog: bool = True) -> None:
+    """Set a watcher up: the push tables, and without announce_backlog, the waiting work marked as known."""
+    ensure_tables(core)
+    if announce_backlog:
+        return
+    with core._tx() as db:
+        core._client(db, client_id)
+        db.execute('''INSERT OR IGNORE INTO push_announcements(inbox_id,client_id,surface,announced)
+            SELECT id,client_id,'watch',? FROM inbox WHERE client_id=? AND acknowledged=0''',
+                   (core.clock(), client_id))
+
+
 def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool = False,
           duration: float = 0, interval: float = 2.0, poll_timeout: int = 10,
           clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
           announce_backlog: bool = True,
           keep_running: Callable[[], bool] | None = None,
-          wait_for_change: Callable[[float], bool] | None = None) -> dict[str, Any]:
+          wait_for_change: Callable[[float], bool] | None = None,
+          remote: Any = None) -> dict[str, Any]:
     """Emit one event per batch of new deliveries until the duration ends.
 
     ``keep_running`` is checked once per cycle; the CLI uses it to stop when the
@@ -235,21 +249,37 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
         raise CoreError('invalid_watch_interval')
     if not isinstance(poll_timeout, int) or isinstance(poll_timeout, bool) or not 0 <= poll_timeout <= 20:
         raise CoreError('invalid_watch_poll_timeout')
-    ensure_tables(core)
     events = 0
 
     def stopped(code):
         emit({'type': 'watch_stopped', 'reason': code})
         return {'events': events, 'reason': code}
 
-    if not announce_backlog:
-        # Treat already waiting work as known; only later arrivals are announced.
+    # With a relay the inbox work runs there and this process never opens the
+    # database; without one (or when it goes away) it runs here.
+    relay = remote is not None
+    if relay:
         try:
-            with core._tx() as db:
-                core._client(db, client_id)
-                db.execute('''INSERT OR IGNORE INTO push_announcements(inbox_id,client_id,surface,announced)
-                    SELECT id,client_id,'watch',? FROM inbox WHERE client_id=? AND acknowledged=0''',
-                           (core.clock(), client_id))
+            remote.prepare_watch(announce_backlog)
+        except Unavailable:
+            relay = False
+        except CoreError as error:
+            if error.code in FATAL_CODES:
+                return stopped(error.code)
+            raise
+    local_ready = False
+
+    def ready_locally():
+        nonlocal local_ready
+        if not local_ready:
+            # Already waiting work stays announced once: a backlog the relay
+            # marked is in the same table.
+            prepare_watch(core, client_id, announce_backlog or relay)
+            local_ready = True
+
+    if not relay:
+        try:
+            ready_locally()
         except CoreError as error:
             if error.code in FATAL_CODES:
                 return stopped(error.code)
@@ -261,9 +291,27 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
         if keep_running is not None and not keep_running():
             return {'events': events, 'reason': 'parent_exited'}
         waited = collected = relayed = False
-        if wait_for_change is not None:
+        waiter = remote.wait if remote is not None else wait_for_change
+        if waiter is not None:
             limit = RELAY_WAIT if deadline is None else max(0.0, min(RELAY_WAIT, deadline - clock()))
-            relayed = wait_for_change(limit)
+            relayed = waiter(limit)
+        if relayed and remote is not None:
+            try:
+                event = remote.claim('watch')
+            except Unavailable:
+                relayed = False
+            except CoreError as error:
+                if error.code in FATAL_CODES:
+                    return stopped(error.code)
+                event = None
+            else:
+                if event is not None:
+                    emit(event)
+                    events += 1
+                if deadline is not None and clock() >= deadline:
+                    return {'events': events, 'reason': 'duration_elapsed'}
+                continue
+        ready_locally()
         if collect and not relayed and clock() >= next_collect:
             timeout = poll_timeout
             if deadline is not None:

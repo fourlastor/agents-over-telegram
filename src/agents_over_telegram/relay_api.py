@@ -51,6 +51,8 @@ CALL_TIMEOUT = 90.0
 CONNECT_TIMEOUT = 2.0
 # The longest a waiting agent's request is held before it is answered anyway.
 WAIT_LIMIT = 50.0
+# The inbox work of hooks and waiters (push.py) the relay runs for agents.
+NODE_OPS = frozenset({'hook', 'claim', 'watch_prepare'})
 # Calls after which other agents may have something new (a peer delivery).
 _CHANGING_TOOLS = frozenset({'message_send'})
 # A request line must arrive within this, however slowly its bytes trickle in.
@@ -202,12 +204,17 @@ class Relay:
         if request['protocol'] > PROTOCOL:
             return {'protocol': PROTOCOL, 'ok': False, 'error': 'relay_too_old'}
         secret, tool, arguments = request.get('secret'), request.get('tool'), request.get('arguments')
-        if not isinstance(secret, str) or not (isinstance(tool, str) or request.get('op') == 'wait'):
+        op = request.get('op')
+        if not isinstance(secret, str) or not (isinstance(tool, str) or op == 'wait' or op in NODE_OPS):
             return {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
         try:
             client_id = self.core.authenticate(secret)
         except CoreError:
+            if op in NODE_OPS:
+                return {'protocol': PROTOCOL, 'ok': True, 'error_code': 'authentication_failed'}
             return {'protocol': PROTOCOL, 'ok': True, 'body': _error_body('authentication_failed')}
+        if op in NODE_OPS:
+            return self._node_op(op, client_id, request)
         if request.get('op') == 'wait':
             timeout = request.get('timeout')
             if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 <= timeout <= WAIT_LIMIT:
@@ -225,6 +232,25 @@ class Relay:
             # own inbox, which is cheap and finds nothing for most of them.
             self.notify()
         return {'protocol': PROTOCOL, 'ok': True, 'body': body}
+
+    def _node_op(self, op, client_id, request):
+        """The inbox work of hooks and waiters, run here so agents never open the database."""
+        from . import push
+        from .core import CoreError
+        try:
+            if op == 'hook':
+                event, payload = request.get('event'), request.get('payload')
+                if not isinstance(event, str) or not isinstance(payload, dict):
+                    return {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
+                result = push.hook_response(self.core, client_id, event, payload)
+            elif op == 'claim':
+                result = push.claim_new(self.core, client_id, request.get('surface'))
+            else:  # watch_prepare
+                push.prepare_watch(self.core, client_id, request.get('announce_backlog') is not False)
+                result = None
+        except CoreError as error:
+            return {'protocol': PROTOCOL, 'ok': True, 'error_code': error.code}
+        return {'protocol': PROTOCOL, 'ok': True, 'result': result}
 
     def handle(self, connection):
         self.last_activity = time.monotonic()
@@ -422,3 +448,65 @@ class Waiter:
             return False
         self.instance, self.generation = wait.get('instance'), wait.get('generation')
         return True
+
+
+class Node:
+    """An agent's side of the relay: hook answers, inbox claims, waits and status.
+
+    Every method raises Unavailable when no relay took the request, and the
+    caller then does the work itself on its own database handle. A relay that
+    predates an operation answers bad_request before running anything, which
+    counts as unavailable too.
+    """
+
+    def __init__(self, state, secret):
+        self.state, self.secret = Path(state), secret
+        self.waiter = Waiter(state, secret)
+
+    def _op(self, op, **fields):
+        answer = _request(self.state, {'op': op, 'secret': self.secret, **fields}, CALL_TIMEOUT)
+        if not isinstance(answer, dict) or not answer.get('ok'):
+            raise Unavailable((answer or {}).get('error') or 'no_answer')
+        if answer.get('error_code'):
+            from .core import CoreError
+            raise CoreError(answer['error_code'])
+        return answer.get('result')
+
+    def hook(self, event, payload):
+        return self._op('hook', event=event, payload=payload)
+
+    def claim(self, surface):
+        return self._op('claim', surface=surface)
+
+    def prepare_watch(self, announce_backlog):
+        self._op('watch_prepare', announce_backlog=announce_backlog)
+
+    def wait(self, timeout):
+        return self.waiter(timeout)
+
+    def status(self):
+        body = call(self.state, self.secret, 'connection_status', {})
+        if not body.get('ok'):
+            from .core import CoreError
+            raise CoreError((body.get('error') or {}).get('code') or 'relay_refused')
+        return body['result']
+
+
+class LazyCore:
+    """A database handle opened on first use, for agents that use the relay.
+
+    Agents keep a local path for when no relay answers; building a Core opens
+    and migrates the database, so it waits until that path is actually taken.
+    """
+
+    def __init__(self, factory):
+        self._factory, self._core = factory, None
+
+    @property
+    def opened(self):
+        return self._core is not None
+
+    def __getattr__(self, name):
+        if self._core is None:
+            self._core = self._factory()
+        return getattr(self._core, name)
