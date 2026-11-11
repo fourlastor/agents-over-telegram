@@ -26,6 +26,7 @@ import urllib.request
 from pathlib import Path
 
 from .credentials import CredentialError, read_private_json, write_private_json
+from .net import RacingHTTPSHandler
 
 JUDGE_FILE = 'judge.json'
 TIMEOUT_SECONDS = 8.0
@@ -171,7 +172,8 @@ class DecisionJudge:
         self.endpoint, self.model, self.threshold = endpoint, model, threshold
         self._api_key = api_key
         # No proxies from the environment and no redirects, like the Telegram transport.
-        self._opener = opener or urllib.request.build_opener(_NoRedirect(), urllib.request.ProxyHandler({}))
+        self._opener = opener or urllib.request.build_opener(
+            _NoRedirect(), urllib.request.ProxyHandler({}), RacingHTTPSHandler())
 
     def __repr__(self):  # never print the key
         return f'DecisionJudge(endpoint={self.endpoint!r}, model={self.model!r})'

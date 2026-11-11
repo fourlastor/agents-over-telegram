@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 
 from . import compat
+from .net import RacingHTTPSHandler
 from .credentials import load_token, private_directory, read_private_json, validate_token, write_private_json
 
 
@@ -53,7 +54,8 @@ OWNER_ANSWER_TIMEOUT = 5
 class TelegramTransport:
     def __init__(self, token, *, opener=None):
         self._token = validate_token(token)
-        self._opener = opener or urllib.request.build_opener(_NoRedirect(), urllib.request.ProxyHandler({}))
+        self._opener = opener or urllib.request.build_opener(
+            _NoRedirect(), urllib.request.ProxyHandler({}), RacingHTTPSHandler())
 
     def _call(self, method, params, *, sending=False, timeout=15, expects="message"):
         return self._post(method, json.dumps(params).encode(), "application/json",
