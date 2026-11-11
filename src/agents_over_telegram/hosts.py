@@ -178,13 +178,7 @@ class _Woken(Exception):
 
 
 def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
+    return compat.pid_alive(pid)
 
 
 def run_wake(args) -> int:

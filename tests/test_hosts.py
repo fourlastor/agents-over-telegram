@@ -926,6 +926,10 @@ def test_relay_swaps_past_a_call_the_host_cancelled(tmp_path):
 
 
 def alive(pid):
+    from agents_over_telegram import compat
+    if compat.WINDOWS:
+        # os.kill(pid, 0) would terminate it there.
+        return compat.pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
