@@ -292,6 +292,9 @@ def setup(args):
         raise CredentialError('private_terminal_required')
     # A mode mismatch is checked before any transport can load credentials.
     state = private_directory(state)
+    if compat.WINDOWS and not compat.restrict_directory(state):
+        # An existing state folder keeps the ACL it inherited otherwise.
+        raise CredentialError('state_directory_acl_failed')
     _mode(state, fake)
     core = Core(state, LazyTransport(state, fake), recover_sends=False)
     try:
