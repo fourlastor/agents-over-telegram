@@ -17,7 +17,7 @@ jobs:
   test:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +48,9 @@ jobs:
         run: uv sync --frozen --extra dev --python ${{ matrix.python }}
 
       - name: Run the test suite
+        # A step that runs out of time fails the job but keeps its log;
+        # a job that runs out of time is cancelled and its log is lost.
+        timeout-minutes: 20
         run: |
           python=.venv/bin/python; [ -x "$python" ] || python=.venv/Scripts/python.exe
           if [ "$RUNNER_OS" = Windows ]; then
