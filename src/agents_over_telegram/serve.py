@@ -206,6 +206,13 @@ def _hold_serve_lock(state, sleep, keep_running, log, give_up=None, clock=time.m
         sleep(BUSY_PAUSE)
 
 
+def opt_out(state):
+    """Record that the human wants no collector: no service, and none started on demand."""
+    marker = Path(state) / NO_SERVE
+    if not marker.exists():
+        os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600))
+
+
 def _on_demand_done(state, relay, started, clock):
     """Why a collector started on demand should stop now, or None."""
     state = Path(state)
