@@ -204,8 +204,9 @@ def pending_summary(core, client_id: str) -> dict[str, Any] | None:
 
 
 # How long one wait on the always-on collector lasts before the watcher checks
-# that its host is still there.
-RELAY_WAIT = 20.0
+# its host is still there, and its inbox for deliveries the collector did not
+# announce (a held batch whose interval ended, a lease that expired).
+RELAY_WAIT = 10.0
 
 
 def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool = False,

@@ -171,6 +171,8 @@ class Relay:
         self.generation = 0
         self.closing = False
         self.changed = threading.Condition()
+        self.path = None
+        self.active = threading.BoundedSemaphore(MAX_ACTIVE)
 
     def notify(self):
         """Wake every waiting agent; each then checks its own inbox."""
@@ -183,8 +185,6 @@ class Relay:
             if instance == self.instance and generation == self.generation:
                 self.changed.wait_for(lambda: self.generation != generation or self.closing, timeout)
             return {'instance': self.instance, 'generation': self.generation}
-        self.path = None
-        self.active = threading.BoundedSemaphore(MAX_ACTIVE)
 
     def answer(self, request):
         """One request's answer; never raises."""
@@ -217,6 +217,8 @@ class Relay:
             return {'protocol': PROTOCOL, 'ok': False, 'error': 'not_handled'}
         body = call_tool(self.core, client_id, tool, arguments)
         if tool in _CHANGING_TOOLS and body.get('ok'):
+            # A send can deliver to a peer agent; every waiter then checks its
+            # own inbox, which is cheap and finds nothing for most of them.
             self.notify()
         return {'protocol': PROTOCOL, 'ok': True, 'body': body}
 

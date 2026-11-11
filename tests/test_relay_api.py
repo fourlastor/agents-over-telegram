@@ -255,7 +255,13 @@ def test_a_send_through_the_relay_wakes_waiters(env, relay):
 def test_serve_wakes_waiters_after_routing_updates(env, monkeypatch):
     core, transport, clock = env
     outcomes = [{'status': 'ok', 'updates': 0}, {'status': 'ok', 'updates': 2}]
-    monkeypatch.setattr(core, 'collect', lambda **kw: outcomes.pop(0))
+
+    def collect(**kw):
+        outcome = outcomes.pop(0)
+        if outcome['updates']:
+            kw['routed']()
+        return outcome
+    monkeypatch.setattr(core, 'collect', collect)
     monkeypatch.setattr(core, 'flush', lambda **kw: None)
     notified = []
 
@@ -429,3 +435,27 @@ def test_image_sends_stay_with_the_agent():
     assert relayed(lambda name, arguments: called.append(name), 'message_send',
                    {'text': 'x', 'idempotency_key': 'k', 'image_path': '/tmp/a.png'}) is None
     assert called == []
+
+
+def test_collect_announces_routed_updates_before_the_judge(env, monkeypatch):
+    core, transport, clock = env
+    client, _ = bind(core, transport)
+    order = []
+    monkeypatch.setattr(core, '_judge_pending', lambda: order.append('judge'))
+    core.collect(judge=True, routed=lambda: order.append('routed'))
+    assert order == ['judge']  # nothing routed, nothing announced
+    order.clear()
+    append(transport, 'hello')
+    core.collect(judge=True, routed=lambda: order.append('routed'))
+    assert order == ['routed', 'judge']
+
+
+def test_a_judge_yes_is_announced(env, monkeypatch):
+    core, transport, clock = env
+    client, _ = bind(core, transport)
+    counts = iter([3, 4])
+    monkeypatch.setattr(core, '_delivery_count', lambda: next(counts))
+    monkeypatch.setattr(core, '_judge_pending', lambda: None)
+    announced = []
+    core.collect(judge=True, routed=lambda: announced.append(1))
+    assert announced == [1]

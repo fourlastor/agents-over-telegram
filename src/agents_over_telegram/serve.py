@@ -184,7 +184,8 @@ def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay=N
             log('aot serve: a newer runtime is installed; restarting on it')
             return RUNTIME_MOVED_EXIT
         try:
-            result = core.collect(timeout=poll_timeout, judge=True)
+            result = core.collect(timeout=poll_timeout, judge=True,
+                                  routed=relay.notify if relay is not None else None)
         except Exception as error:  # the core records intake errors; keep going
             failures += 1
             code = getattr(error, 'code', type(error).__name__)
@@ -202,9 +203,6 @@ def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay=N
         if failures:
             log('aot serve: collecting again')
         failures = 0
-        if relay is not None and result.get('updates'):
-            # Waiting agents check their inboxes now instead of on their next poll.
-            relay.notify()
         if result.get('status') == 'busy':
             # Another collector holds the lock (an older one still stopping).
             sleep(BUSY_PAUSE)
