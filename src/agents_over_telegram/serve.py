@@ -142,7 +142,7 @@ def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_runnin
         try:
             relay.start()
         except Exception as error:
-            log(f'aot serve: not answering agents ({type(error).__name__}); they run their calls themselves')
+            log(f'aot serve: not answering agents ({type(error).__name__}: {error}); they run their calls themselves')
             relay = None
     try:
         return _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay)
