@@ -73,8 +73,10 @@ def test_no_warning_without_the_service(env):
     assert hook_response(core, client, 'UserPromptSubmit', {}) is None
 
 
-def test_a_silent_service_is_reported_in_status_and_prompts(env):
+def test_a_silent_service_is_reported_in_status_and_prompts(env, monkeypatch):
     core, transport, clock = env
+    # Long after boot; CI machines may have started minutes ago.
+    monkeypatch.setattr('agents_over_telegram.core.time.monotonic', lambda: 1e6)
     client, _ = bind(core, transport)
     install(core)
     core.collect()
