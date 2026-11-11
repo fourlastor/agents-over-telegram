@@ -327,13 +327,15 @@ def setup(args):
     if config_path is not None:
         _write_local(config_path, new_config, old_config)
     _write_local(pointer_path, new_pointer, old_pointer)
-    # An installed always-on collector moves to this runtime too.
     from . import serve
-    serve.follow(state, Path(_entry(state, client, fake)['command']))
     collector = None
     if not fake:
-        collector = ({'installed': serve.pointer(state) is not None, 'skipped': 'no_serve'}
-                     if getattr(args, 'no_serve', False) else _install_collector(state))
+        executable = Path(_entry(state, client, fake)['command'])
+        # An installed always-on collector moves to this runtime too, never to an older one.
+        moved = serve.follow(state, executable)
+        collector = _collector_choice(args, state, executable)
+        if moved:
+            collector['moved_to'] = str(executable)
     status = core.connection_status(client_id)
     next_setup = _next_setup(args, state, fake, project, client)
     result = {'project_dir': str(project), 'profile_file': str(project / PROFILE_NAME),
@@ -393,34 +395,75 @@ def setup(args):
     return result
 
 
-def _install_collector(state, run_command=None):
+def _serve_command(executable, state, option):
+    return f'"{executable}" --state-dir "{state}" serve {option}'
+
+
+def _collector_choice(args, state, executable):
+    """Install the always-on collector only when the human chose it.
+
+    A login service runs on the human's machine after the session ends, so it
+    is their call: ``--serve`` installs it, ``--no-serve`` declines it, and
+    the interactive wizard asks. ``--prepare-only`` without either flag (an
+    agent running setup) installs nothing and reports the offer, so the agent
+    can ask the human first.
+    """
+    from . import serve
+    if serve.status(state)['installed']:
+        return {'installed': True, 'already_installed': True, 'service': serve.name(state),
+                'remove_with': _serve_command(executable, state, '--uninstall')}
+    offer = {'installed': False,
+             'offer': 'An always-on collector answers settings taps, approvals and /settings, and keeps '
+                      'collecting messages, while no agent is running. It is installed as a login service '
+                      '(systemd, launchd or Task Scheduler). Ask the human; with a yes, rerun setup with --serve.',
+             'install_with': _serve_command(executable, state, '--install')}
+    if getattr(args, 'no_serve', False):
+        return {'installed': False, 'declined': True}
+    chosen = getattr(args, 'serve', False)
+    if not chosen and not args.prepare_only and sys.stdin.isatty():
+        chosen = _ask_serve()
+    if not chosen:
+        return offer
+    return _install_collector(state, executable=executable)
+
+
+def _ask_serve():
+    """Ask the human at the terminal whether to install the always-on collector."""
+    _say('Optional: install an always-on collector as a login service. It answers settings taps, '
+         'approvals and /settings, and keeps collecting messages, while no agent is running.')
+    return _answer('Install it? Type yes to install, anything else to skip:').lower() == 'yes'
+
+
+def _install_collector(state, run_command=None, executable=None):
     """Install aot serve as a user service unless it is already there; never fails setup.
 
-    Settings taps, approvals and /settings are answered only while something
-    collects, so setup installs the always-on collector by default. Hosts that
-    cannot install a service (a sandbox, no systemd) keep working as before.
+    Hosts that cannot install a service (a sandbox, no systemd) keep working
+    as before, and get the command to run themselves.
     """
     import shutil
     import subprocess
     from . import serve
+    executable = executable or serve.own_executable()
     if serve.status(state)['installed']:
-        return {'installed': True, 'already_installed': True, 'service': serve.name(state)}
+        return {'installed': True, 'already_installed': True, 'service': serve.name(state),
+                'remove_with': _serve_command(executable, state, '--uninstall')}
     if sys.platform not in ('linux', 'darwin') or (sys.platform == 'linux' and not shutil.which('systemctl')):
         return {'installed': False, 'reason': 'unsupported_platform'}
+    run_command = run_command or subprocess.run
     try:
-        installed = serve.install(state, run_command=run_command or subprocess.run)
-    except (OSError, subprocess.SubprocessError) as error:
-        # Leave nothing half-installed: a pointer without a running service
-        # would make status report a collector that is down.
+        installed = serve.install(state, run_command=run_command)
+    except (OSError, subprocess.SubprocessError, CredentialError) as error:
+        # Leave nothing half-installed: undo what the service manager may
+        # already have enabled or loaded, and the pointer, which would make
+        # status report a collector that is down.
         try:
-            serve.uninstall(state, run_command=lambda *args, **kwargs: None)
-        except OSError:
+            serve.uninstall(state, run_command=run_command)
+        except (OSError, subprocess.SubprocessError, CredentialError):
             pass
         return {'installed': False, 'reason': type(error).__name__,
-                'next_step': 'Run "aot serve --install" outside the sandbox to answer settings and '
-                             'approvals while no agent is running.'}
-    return {**installed, 'remove_with': 'aot serve --uninstall',
-            'opt_out': 'setup --no-serve skips this step'}
+                'next_step': f'Run {_serve_command(executable, state, "--install")} outside the sandbox to '
+                             'answer settings and approvals while no agent is running.'}
+    return {**installed, 'remove_with': _serve_command(executable, state, '--uninstall')}
 
 
 def collector_down_text(collector):
@@ -478,7 +521,8 @@ def human_status(value):
     if collector.get('legacy_intake_at'):
         when = datetime.fromtimestamp(collector['legacy_intake_at'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         lines.append(f'Collector: a runtime older than 0.9.24 fetched from Telegram at {when} and routed updates '
-                     'with its older code. Rerun setup in the projects that still use an older runtime.')
+                     "with its older code. Each project's .aot-runtime.json names its runtime; rerun setup in the "
+                     'projects still on an older one.')
     wake = value.get('unresolved_wake') or {}
     if wake.get('notification_id'):
         since = datetime.fromtimestamp(wake['since'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')

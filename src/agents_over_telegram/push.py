@@ -301,10 +301,10 @@ def collector_down_notice(core) -> str | None:
     """A notice when the installed always-on collector stopped fetching, else None."""
     from .onboarding import collector_down_text
     try:
-        collector = core.collector_status()
+        collector = core.collector_down_notice_due()
     except Exception:
         return None
-    if not collector.get('service_stale'):
+    if not collector:
         return None
     return '[Agents over Telegram] Tell the user: ' + collector_down_text(collector)
 

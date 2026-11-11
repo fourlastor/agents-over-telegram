@@ -36,7 +36,8 @@ LOG_LIMIT = 1_000_000  # bytes; a bigger log is moved to serve.log.1 when the se
 POLL_TIMEOUT = 20
 BUSY_PAUSE = 2.0
 BACKOFF = 2.0
-BACKOFF_MAX = 300.0
+# Well under WATCHDOG_LIMIT, so a long outage never looks like a stuck loop.
+BACKOFF_MAX = 120.0
 # A loop iteration takes at most a long poll plus a few requests; one that
 # runs past this is stuck, and the collector exits so the service restarts it.
 WATCHDOG_LIMIT = 300.0
@@ -73,17 +74,39 @@ def pointer(state):
     return Path(executable) if isinstance(executable, str) and os.path.isabs(executable) else None
 
 
+def _pointer_value(executable):
+    from . import __version__
+    return {'version': 1, 'executable': str(executable), 'aot_version': __version__}
+
+
+def pointer_version(state):
+    """The AOT release the pointer names, when the pointer records it."""
+    try:
+        value = read_private_json(Path(state) / POINTER)
+    except (CredentialError, OSError):
+        return None
+    version = value.get('aot_version') if isinstance(value, dict) else None
+    return version if isinstance(version, str) else None
+
+
 def follow(state, executable=None):
     """Point an installed service at this runtime; True when the pointer changed.
 
     Setup calls this, so moving a project to a new runtime also moves the
-    collector. Nothing happens when no service is installed.
+    collector. Nothing happens when no service is installed, and the service
+    never moves to an older release than the one it runs: rerunning setup in
+    a project that is still on an older runtime leaves it alone.
     """
+    from . import __version__
+    from .core import _version_key
     current = pointer(state)
     target = Path(executable or own_executable())
     if current is None or os.path.realpath(current) == os.path.realpath(target):
         return False
-    write_private_json(Path(state) / POINTER, {'version': 1, 'executable': str(target)}, overwrite=True)
+    recorded, ours = _version_key(pointer_version(state)), _version_key(__version__)
+    if recorded is not None and ours is not None and recorded > ours:
+        return False
+    write_private_json(Path(state) / POINTER, _pointer_value(target), overwrite=True)
     return True
 
 
@@ -167,8 +190,15 @@ def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog):
             code = getattr(error, 'code', type(error).__name__)
             pause = min(BACKOFF_MAX, BACKOFF * 2 ** min(failures - 1, 16))
             log(f'aot serve: collection failed ({code}); retrying in {pause:.0f}s')
+            # Waiting out a failure is progress: beat around the pause.
+            if watchdog is not None:
+                watchdog.beat()
             sleep(pause)
+            if watchdog is not None:
+                watchdog.beat()
             continue
+        if watchdog is not None:
+            watchdog.beat()
         if failures:
             log('aot serve: collecting again')
         failures = 0
@@ -230,7 +260,7 @@ def install(state, *, run_command=subprocess.run, python=None):
     """Write the pointer, the launcher and the user service, then start it."""
     state = Path(state).absolute()
     python = python or shutil.which('python3') or '/usr/bin/python3'
-    write_private_json(state / POINTER, {'version': 1, 'executable': str(own_executable())}, overwrite=True)
+    write_private_json(state / POINTER, _pointer_value(own_executable()), overwrite=True)
     launcher = state / LAUNCHER
     launcher.write_text(LAUNCHER_SOURCE, encoding='utf-8')
     launcher.chmod(0o600)
