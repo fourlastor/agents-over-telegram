@@ -2215,6 +2215,10 @@ class Core:
     # How long a newer runtime's last collection keeps older runtimes from
     # collecting. Past it the newer one counts as gone, so nobody goes deaf.
     COLLECTOR_STALE = 120
+    # How long without a fetch attempt before status calls the always-on
+    # collector down. It polls every 20 seconds, backs off at most 300 seconds
+    # after failures, and its watchdog restarts it after 300 seconds stuck.
+    SERVICE_STALE = 360
 
     def _newer_collector(self, account):
         """The version of a newer runtime that collected recently, or None."""
@@ -2234,9 +2238,18 @@ class Core:
         legacy = account['legacy_intake_at']
         # An older runtime's collection is worth mentioning for a week.
         recent_legacy = legacy if legacy is not None and self.clock() - legacy < 7 * 86400 else None
+        from . import serve
+        # With the always-on collector installed, someone fetches every few
+        # seconds; a long silence means it is down or stuck.
+        service = serve.pointer(self.state_dir) is not None
+        # Attempts count, failed ones included: a network outage is reported
+        # as an intake error, not as a collector that stopped.
+        last = account['last_attempt']
+        stale = service and (last is None or self.clock() - last > self.SERVICE_STALE)
         return {'runtime_version': self.runtime_version, 'collector_version': account['collector_version'],
                 'collector_seen_at': account['collector_seen'], 'deferring_to': newer,
-                'legacy_intake_at': recent_legacy}
+                'legacy_intake_at': recent_legacy, 'service_installed': service, 'service_stale': stale,
+                'last_attempt_at': last}
 
     # The bot's command menu in private chats; bump the version when it changes.
     BOT_MENU = ({'command': 'start', 'description': 'Check that this bot can message you'},

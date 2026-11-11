@@ -505,7 +505,7 @@ def run(args):
             return serve.uninstall(state_dir)
         if args.status:
             return serve.status(state_dir)
-        raise SystemExit(serve.run(core, state_dir))
+        raise SystemExit(serve.run(core, state_dir, watchdog=serve.Watchdog()))
     if args.command == "flush":
         return core.flush(client_id=_client(core, args.client_file, args.expected_client_id) if args.client_file else None)
     if args.command == "account-status":
