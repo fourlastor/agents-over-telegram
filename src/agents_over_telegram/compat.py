@@ -45,6 +45,11 @@ def mode_is(info, mode):
     return WINDOWS or stat.S_IMODE(info.st_mode) == mode
 
 
+# msvcrt.locking reports a byte another process holds as EACCES, or EDEADLOCK
+# after its internal retries.
+_LOCK_CONTENTION = {13, 36}
+
+
 def lock(fd, *, blocking=False):
     """Take an exclusive lock on an open file; BlockingIOError when another process holds it.
 
@@ -59,7 +64,11 @@ def lock(fd, *, blocking=False):
             try:
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                 return
-            except OSError:
+            except OSError as error:
+                # Only contention means "held by someone else"; a bad file
+                # descriptor or a broken handle is a real error.
+                if error.errno not in _LOCK_CONTENTION:
+                    raise
                 if not blocking:
                     raise BlockingIOError('locked') from None
                 import time
@@ -102,7 +111,13 @@ def pid_alive(pid):
         import ctypes
         from ctypes import wintypes
         kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        # Declared, so 64-bit handles are passed whole.
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
         kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
         handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
             # Access denied still means it exists; anything else means it is gone.
@@ -130,11 +145,42 @@ def refuse_link(path):
     the window between the check and the open needs write access to the
     user's own private directory.
     """
-    if WINDOWS and os.path.islink(path):
-        raise OSError('symlink refused')
+    if not WINDOWS:
+        return
+    info = os.lstat(path)
+    # Symlinks, junctions and every other reparse point redirect the open.
+    import stat
+    if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+        raise OSError('link or reparse point refused')
 
 
 def own_aot():
     """This runtime's aot executable: next to its Python, aot.exe on Windows."""
     import sys
     return Path(sys.executable).absolute().parent / executable_name('aot')
+
+
+def restrict_directory(path, run=None):
+    """On Windows, give a private folder an ACL of its own: full control for this
+    user and SYSTEM, nothing inherited. True when applied, False when it failed.
+
+    POSIX folders are private by mode (0700) instead, so this does nothing there.
+    Windows folders inherit their parent's ACL, which outside the user's profile
+    (a state directory given with --state-dir, say) can let other users read
+    the bot token.
+    """
+    if not WINDOWS:
+        return True
+    import subprocess
+    user = os.environ.get('USERNAME')
+    if not user:
+        return False
+    if os.environ.get('USERDOMAIN'):
+        user = os.environ['USERDOMAIN'] + '\\' + user
+    run = run or subprocess.run
+    try:
+        result = run(['icacls', str(path), '/inheritance:r', '/grant:r', f'{user}:(OI)(CI)F',
+                      '*S-1-5-18:(OI)(CI)F'], capture_output=True, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return getattr(result, 'returncode', 1) == 0

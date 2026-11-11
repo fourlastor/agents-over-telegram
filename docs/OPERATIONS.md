@@ -547,9 +547,9 @@ Acknowledged messages and outbox records remain until an operator retires state;
 
 Since 0.9.30 AOT runs on Windows. The test suite and a real runtime bootstrap run in CI on Windows; no agent host has been tried on a Windows machine yet, so treat it as early.
 
-- **Where things live.** The state directory and runtimes go in `%LOCALAPPDATA%\agents-over-telegram`. Windows has no file modes or owners like Linux and macOS, so AOT relies on that folder being private to your user profile; it still refuses symlinked private files.
+- **Where things live.** The state directory and runtimes go in `%LOCALAPPDATA%\agents-over-telegram`. Windows has no file modes or owners like Linux and macOS, so AOT gives every private folder it creates, and the state folder on each setup, an ACL of its own with `icacls`: full control for you and SYSTEM, nothing inherited. Setup stops with `state_directory_acl_failed` when that fails. AOT refuses private files that are symlinks, junctions or other reparse points.
 - **Runtime.** `scripts/bootstrap_runtime.py` prepares the runtime with uv or `venv` as elsewhere; the executable is `.venv\Scripts\aot.exe` in the runtime folder.
 - **Always-on collector.** `aot serve --install` registers a Task Scheduler task that starts at logon, runs hidden, and restarts the collector itself when it exits or a newer runtime is installed. `serve --uninstall` deletes the task. On demand, agents start it detached from their console.
-- **Relay.** Python on Windows has no Unix sockets, so the collector does not answer agents' calls there; agents run their calls themselves, as before the relay.
+- **Relay.** Python on Windows has no Unix sockets, so the collector does not answer agents' calls there; agents run their calls themselves, as before the relay. Without the relay, a collector started on demand cannot see that agents are active, so it stops 15 minutes after it starts; the next agent that starts brings it back. When the service is uninstalled, the collector it supervised notices the removed pointer and stops too.
 - **Hooks.** The plugin hook commands start `python3`. Make sure that name runs Python 3.11 or newer in the shell your host uses for hooks.
 - **Not supported.** The Codex desktop listener (`relay-desktop`) and the shared-backend wrapper drive Unix processes and signals; they are Linux and macOS only.
