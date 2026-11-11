@@ -24,6 +24,7 @@ from typing import Any
 from .transport import TransportError, UnknownSend
 from .credentials import CredentialError, private_directory
 from . import judge as judge_module
+from . import __version__
 
 
 class CoreError(Exception):
@@ -41,6 +42,17 @@ class CoreError(Exception):
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _version_key(text):
+    """(major, minor, patch) for a release version such as 0.9.24, or None.
+
+    A suffix (0.9.24rc1, 0.9.24.dev0) is ignored, so such a build counts as
+    the release it precedes; runtimes of equal versions never defer to each
+    other, which keeps that harmless.
+    """
+    match = re.match(r'(\d+)\.(\d+)\.(\d+)', text) if isinstance(text, str) else None
+    return tuple(int(part) for part in match.groups()) if match else None
 
 
 def _integer(value: Any) -> bool:
@@ -287,6 +299,8 @@ _LOAD_JUDGE = object()
 
 class Core:
     PAIR_TTL = 600
+    # The AOT release running this core; collect() records it.
+    runtime_version = __version__
     # Defaults for the rolling send limits. The operator can change them for
     # the whole state directory with exchange_limits().
     CONVERSATION_SEND_LIMIT = 30
@@ -531,6 +545,12 @@ class Core:
             # Which version of the bot's private-chat command menu AOT has set.
             if 'menu_version' not in {row['name'] for row in db.execute('PRAGMA table_info(account)')}:
                 db.execute('ALTER TABLE account ADD COLUMN menu_version INTEGER')
+            # The newest runtime that collected, so older ones stand aside (see collect).
+            account_columns = {row['name'] for row in db.execute('PRAGMA table_info(account)')}
+            for column, kind in (('collector_version', 'TEXT'), ('collector_seen', 'REAL'),
+                                 ('legacy_intake_at', 'REAL'), ('aware_intake', 'REAL')):
+                if column not in account_columns:
+                    db.execute(f'ALTER TABLE account ADD COLUMN {column} {kind}')
             if 'event_at' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
                 db.execute('ALTER TABLE inbox ADD COLUMN event_at REAL')
             binding_columns = {row['name'] for row in db.execute('PRAGMA table_info(bindings)')}
@@ -1223,6 +1243,7 @@ class Core:
                 'intake': {'last_success_at': account['last_intake'], 'last_attempt_at': account['last_attempt'],
                            'error': account['intake_error'], 'last_gap_at': account['last_gap_at'],
                            'possible_offline_gap': bool(gap)},
+                'collector': self.collector_status(db),
                 'delivery': {'mode': 'on_demand', 'automatic': False, 'scope': 'inbox_core',
                              'listener_status': 'not_checked'},
                 'unresolved_wake': held_wake,
@@ -2123,6 +2144,17 @@ class Core:
             with self._db() as db:
                 account = self._account(db)
                 cursor = account['cursor']
+            newer = self._newer_collector(account)
+            if newer is not None:
+                # A newer runtime collects for this bot; its routing wins.
+                return {'status': 'busy', 'updates': 0, 'reason': 'newer_runtime', 'collector_version': newer}
+            if (account['aware_intake'] is not None and account['last_intake'] is not None
+                    and account['last_intake'] > account['aware_intake']):
+                # Every collection by a runtime that knows the record sets
+                # aware_intake with last_intake; a later last_intake came
+                # from a runtime that predates it.
+                with self._tx() as db:
+                    db.execute('UPDATE account SET legacy_intake_at=? WHERE singleton=1', (account['last_intake'],))
             try:
                 webhook = self.transport.get_webhook_info()
                 if not isinstance(webhook, dict) or not isinstance(webhook.get('url'), str):
@@ -2143,7 +2175,14 @@ class Core:
                         cursor = update['update_id'] + 1
                         accepted += 1
                     self._prune_context(db, self.clock())
-                    db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL WHERE singleton=1', (cursor, self.clock(), self.clock(), self.clock(), self.clock()))
+                    now = self.clock()
+                    db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL,aware_intake=? WHERE singleton=1', (cursor, now, now, now, now, now))
+                    if timeout > 0 or judge:
+                        # Only long-running collectors claim the floor. A one-shot
+                        # poll from a newer hook or tool call must not silence an
+                        # older long-poller, or nothing would long-poll meanwhile.
+                        db.execute('UPDATE account SET collector_version=?,collector_seen=? WHERE singleton=1',
+                                   (self.runtime_version, now))
                 self._probe_bot_admin(account)
                 try:
                     self._set_bot_menu()
@@ -2186,6 +2225,33 @@ class Core:
                 with self._tx() as db:
                     db.execute('UPDATE account SET last_attempt=?,intake_error=? WHERE singleton=1', (self.clock(), code))
                 raise CoreError(code) from None
+
+    # How long a newer runtime's last collection keeps older runtimes from
+    # collecting. Past it the newer one counts as gone, so nobody goes deaf.
+    COLLECTOR_STALE = 120
+
+    def _newer_collector(self, account):
+        """The version of a newer runtime that collected recently, or None."""
+        recorded, seen = account['collector_version'], account['collector_seen']
+        # A clock that went backwards makes the record stale, not fresh forever.
+        if recorded is None or seen is None or not 0 <= self.clock() - seen < self.COLLECTOR_STALE:
+            return None
+        ours, theirs = _version_key(self.runtime_version), _version_key(recorded)
+        return recorded if ours is not None and theirs is not None and theirs > ours else None
+
+    def collector_status(self, db=None):
+        """Which runtime collects for this bot, and whether this one stands aside."""
+        if db is None:
+            with self._db() as db:
+                return self.collector_status(db)
+        account = self._account(db)
+        newer = self._newer_collector(account)
+        legacy = account['legacy_intake_at']
+        # An older runtime's collection is worth mentioning for a week.
+        recent_legacy = legacy if legacy is not None and self.clock() - legacy < 7 * 86400 else None
+        return {'runtime_version': self.runtime_version, 'collector_version': account['collector_version'],
+                'collector_seen_at': account['collector_seen'], 'deferring_to': newer,
+                'legacy_intake_at': recent_legacy}
 
     # The bot's command menu in private chats; bump the version when it changes.
     BOT_MENU = ({'command': 'start', 'description': 'Check that this bot can message you'},

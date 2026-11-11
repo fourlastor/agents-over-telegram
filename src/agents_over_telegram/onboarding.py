@@ -422,6 +422,16 @@ def human_status(value):
         lines.append('Intake: ' + str(intake['error']))
     if intake.get('possible_offline_gap'):
         lines.append('History coverage: a collection gap is possible.')
+    collector = value.get('collector') or {}
+    if collector.get('deferring_to'):
+        lines.append(f"Collector: a newer runtime ({collector['deferring_to']}) fetches from Telegram for this bot; "
+                     f"this project's runtime ({collector.get('runtime_version')}) only reads its inbox. "
+                     'Rerun setup in this project to move it to the newer runtime.')
+    if collector.get('legacy_intake_at'):
+        when = datetime.fromtimestamp(collector['legacy_intake_at'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        lines.append(f'Collector: a runtime older than 0.9.24 fetched from Telegram at {when} and routed updates '
+                     "with its older code. Each project's .aot-runtime.json names its runtime; rerun setup in the "
+                     'projects still on an older one.')
     wake = value.get('unresolved_wake') or {}
     if wake.get('notification_id'):
         since = datetime.fromtimestamp(wake['since'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
