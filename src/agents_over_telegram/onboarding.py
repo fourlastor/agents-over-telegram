@@ -408,14 +408,18 @@ def _collector_choice(args, state, executable):
     agent running setup) installs nothing and reports the offer, so the agent
     can ask the human first.
     """
+    import shutil
     from . import serve
     if serve.status(state)['installed']:
         return {'installed': True, 'already_installed': True, 'service': serve.name(state),
                 'remove_with': _serve_command(executable, state, '--uninstall')}
+    if sys.platform not in ('linux', 'darwin') or (sys.platform == 'linux' and not shutil.which('systemctl')):
+        return {'installed': False, 'reason': 'unsupported_platform'}
     offer = {'installed': False,
              'offer': 'An always-on collector answers settings taps, approvals and /settings, and keeps '
                       'collecting messages, while no agent is running. It is installed as a login service '
-                      '(systemd, launchd or Task Scheduler). Ask the human; with a yes, rerun setup with --serve.',
+                      f"({'launchd' if sys.platform == 'darwin' else 'systemd'}). Ask the human; with a yes, "
+                      'rerun setup with --serve.',
              'install_with': _serve_command(executable, state, '--install')}
     if getattr(args, 'no_serve', False):
         # Also keeps agents from starting a collector on demand.
