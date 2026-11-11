@@ -17,7 +17,7 @@ jobs:
   test:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -50,7 +50,13 @@ jobs:
       - name: Run the test suite
         run: |
           python=.venv/bin/python; [ -x "$python" ] || python=.venv/Scripts/python.exe
-          "$python" -m pytest -q
+          if [ "$RUNNER_OS" = Windows ]; then
+            # Stop before the job limit so the log survives, and dump the stack
+            # of any test that runs for more than two minutes.
+            timeout 900 "$python" -m pytest -v -o faulthandler_timeout=120
+          else
+            "$python" -m pytest -q
+          fi
 
       - name: Validate the plugin package
         run: |
