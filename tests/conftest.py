@@ -59,8 +59,14 @@ def _hang_guard():
         yield
         return
     import faulthandler
-    faulthandler.dump_traceback_later(_HANG_SECONDS, exit=True)
+    import sys
+    # pytest swaps sys.stderr per test; the dump must outlive that.
+    faulthandler.dump_traceback_later(_HANG_SECONDS, exit=True, file=sys.__stderr__)
     try:
         yield
     finally:
         faulthandler.cancel_dump_traceback_later()
+
+
+# For tests of POSIX file modes, owners and shebang scripts, which Windows does not have.
+posix_only = pytest.mark.skipif(os.name == 'nt', reason='POSIX file modes, owners or scripts')

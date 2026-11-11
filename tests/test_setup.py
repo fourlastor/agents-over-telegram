@@ -1,5 +1,6 @@
 """Isolated setup/profile contracts: no live Telegram or global host configuration."""
 import json
+import os
 from pathlib import Path
 import shlex
 import sqlite3
@@ -14,6 +15,7 @@ from agents_over_telegram.core import Core
 from agents_over_telegram.credentials import CredentialError, read_private_json, write_private_json
 from agents_over_telegram.onboarding import PROFILE_NAME, human_status
 from agents_over_telegram.transport import FakeTransport, make_transport
+from conftest import posix_only
 
 
 def invoke(*argv):
@@ -72,7 +74,8 @@ def test_prepare_only_is_idempotent_does_not_collect_and_writes_no_secrets(tmp_p
         assert db.execute('select count(*) from clients').fetchone()[0] == 1
     assert 'dedicated Telegram group or topic' in first['next_step']
     assert 'add @' + first['connection']['bot']['username'] in first['next_step']
-    assert shlex.split(first['next_step'].split('then run: ', 1)[1])[0].startswith('/')
+    if os.name != 'nt':
+        assert shlex.split(first['next_step'].split('then run: ', 1)[1])[0].startswith('/')
 
 
 def test_two_projects_share_bot_but_have_distinct_identity_and_fake_mcp_flags(tmp_path):
@@ -398,6 +401,7 @@ def test_matching_config_timeouts_preserved_and_env_override_rejected(tmp_path):
         prepare(tmp_path)
 
 
+@posix_only
 def test_group_writable_profile_reference_rejected(tmp_path, monkeypatch):
     result = prepare(tmp_path)
     Path(result['profile_file']).chmod(0o660)

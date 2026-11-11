@@ -119,3 +119,14 @@ def pid_alive(pid):
     except OSError:
         return True
     return True
+
+
+def refuse_link(path):
+    """Raise OSError when ``path`` is a symlink, where opening cannot refuse one itself.
+
+    POSIX opens with O_NOFOLLOW. Windows has no such flag, so check first;
+    the window between the check and the open needs write access to the
+    user's own private directory.
+    """
+    if WINDOWS and os.path.islink(path):
+        raise OSError('symlink refused')

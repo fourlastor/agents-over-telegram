@@ -33,7 +33,13 @@ jobs:
           # so one shard that loses its runner does not hide the others' logs.
           - os: windows-latest
             python: "3.13"
-            shard: "[a-c]"
+            shard: "[a-b]"
+          - os: windows-latest
+            python: "3.13"
+            shard: "c[a-n]"
+          - os: windows-latest
+            python: "3.13"
+            shard: "c[o-z]"
           - os: windows-latest
             python: "3.13"
             shard: "[d-g]"

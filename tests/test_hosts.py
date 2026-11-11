@@ -16,6 +16,7 @@ import pytest
 from agents_over_telegram import cli
 from agents_over_telegram.credentials import read_private_json, write_private_json
 from agents_over_telegram.hosts import RUNTIME_POINTER, read_runtime_pointer, runtime_pointer
+from conftest import posix_only
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / 'scripts' / 'aot_host_launch.py'
@@ -80,6 +81,7 @@ def secret_free_json_has_telegram(path, host):
     return servers['telegram']['args'][-2] == '--client-file' and path.stat().st_mode & 0o077 == 0
 
 
+@posix_only
 @pytest.mark.parametrize('host', HOSTS)
 def test_setup_host_writes_private_runtime_pointer(tmp_path, host):
     result = prepare(tmp_path, host)
@@ -120,6 +122,7 @@ def test_setup_host_next_step_matches_host(tmp_path, host, marker):
     assert marker in status['next_step']
 
 
+@posix_only
 def test_setup_host_replaces_group_writable_pointer_and_refuses_world_writable(tmp_path):
     result = prepare(tmp_path, 'claude')
     pointer = Path(result['project_dir']) / RUNTIME_POINTER
@@ -225,6 +228,7 @@ def test_hook_cli_is_silent_on_oversized_input(tmp_path):
     assert (process.returncode, process.stdout) == (0, '')
 
 
+@posix_only
 def test_hook_cli_is_silent_in_unconfigured_or_broken_folders(tmp_path):
     plain = tmp_path / 'plain'
     plain.mkdir()
@@ -742,7 +746,7 @@ def test_wake_stops_when_the_host_is_gone(tmp_path):
 
 
 def test_waiting_waiter_keeps_waiting_until_replaced(tmp_path):
-    import fcntl
+    from agents_over_telegram import compat
     import hashlib
     result = connected(tmp_path)
     key = hashlib.sha256(f"{result['client_id']}\0abc".encode()).hexdigest()[:24]
@@ -750,7 +754,7 @@ def test_waiting_waiter_keeps_waiting_until_replaced(tmp_path):
     locks.mkdir(mode=0o700, exist_ok=True)
     # Stand in for an old waiter that is slow to notice the handover.
     with open(locks / f'{key}.lock', 'a+') as held:
-        fcntl.flock(held, fcntl.LOCK_EX)
+        compat.lock(held, blocking=True)
         waiting = start_wake(result['project_dir'], 'abc')
         try:
             time.sleep(2.0)

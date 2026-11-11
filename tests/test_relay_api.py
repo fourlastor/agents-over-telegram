@@ -5,6 +5,10 @@ import socket
 import pytest
 
 from agents_over_telegram import cli, relay_api, serve
+
+# The relay listens on a Unix socket, which Python on Windows does not have;
+# agents there run their calls themselves.
+pytestmark = pytest.mark.skipif(not hasattr(socket, 'AF_UNIX'), reason='needs Unix sockets')
 from agents_over_telegram.core import Core
 from agents_over_telegram.transport import make_transport
 from test_core import append, bind, env  # noqa: F401 (env is a fixture)

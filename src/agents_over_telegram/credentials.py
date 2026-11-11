@@ -31,6 +31,7 @@ def private_directory(path):
 
 def read_private_json(path):
     try:
+        compat.refuse_link(path)
         fd = os.open(path, os.O_RDONLY | compat.O_NOFOLLOW | compat.O_BINARY | compat.O_CLOEXEC)
         with os.fdopen(fd, "r", encoding="utf-8") as stream:
             info = os.fstat(stream.fileno())
