@@ -238,6 +238,13 @@ def _hold_serve_lock(state, sleep, keep_running, log, give_up=None, clock=time.m
         sleep(BUSY_PAUSE)
 
 
+def opt_out(state):
+    """Record that the human wants no collector: no service, and none started on demand."""
+    marker = Path(state) / NO_SERVE
+    if not marker.exists():
+        os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | compat.O_CLOEXEC, 0o600))
+
+
 def _on_demand_done(state, relay, started, clock):
     """Why a collector started on demand should stop now, or None."""
     state = Path(state)
@@ -527,24 +534,37 @@ def install(state, *, run_command=subprocess.run, python=None):
 
 
 def uninstall(state, *, run_command=subprocess.run):
-    """Stop and remove the user service, the launcher and the pointer."""
+    """Stop and remove the user service, the launcher and the pointer.
+
+    The files are removed even when the service manager cannot be reached
+    (a sandbox refusing launchctl or systemctl), so nothing is left that
+    makes the service look installed.
+    """
     state = Path(state).absolute()
     unit = _unit_path(state)
+
+    def attempt(argv):
+        try:
+            run_command(argv, check=False, capture_output=True)
+        except (OSError, subprocess.SubprocessError):
+            pass
     if sys.platform == 'win32':
         task = _task_name(state)
-        run_command(['schtasks', '/End', '/TN', task], check=False, capture_output=True)
-        run_command(['schtasks', '/Delete', '/TN', task, '/F'], check=False, capture_output=True)
+        attempt(['schtasks', '/End', '/TN', task])
+        attempt(['schtasks', '/Delete', '/TN', task, '/F'])
     elif sys.platform == 'darwin':
-        run_command(['launchctl', 'bootout', f'gui/{os.getuid()}', str(unit)], check=False, capture_output=True)
+        attempt(['launchctl', 'bootout', f'gui/{os.getuid()}', str(unit)])
     else:
-        run_command(['systemctl', '--user', 'disable', '--now', f'{name(state)}.service'], check=False,
-                    capture_output=True)
+        attempt(['systemctl', '--user', 'disable', '--now', f'{name(state)}.service'])
     removed = unit.exists()
     for path in (unit, state / LAUNCHER, state / POINTER):
-        if path.exists() or path.is_symlink():
-            path.unlink()
+        try:
+            if path.exists() or path.is_symlink():
+                path.unlink()
+        except OSError:
+            pass
     if sys.platform not in ('darwin', 'win32'):
-        run_command(['systemctl', '--user', 'daemon-reload'], check=False, capture_output=True)
+        attempt(['systemctl', '--user', 'daemon-reload'])
     return {'installed': False, 'removed': removed}
 
 

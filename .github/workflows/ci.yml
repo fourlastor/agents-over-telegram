@@ -51,9 +51,9 @@ jobs:
         run: |
           python=.venv/bin/python; [ -x "$python" ] || python=.venv/Scripts/python.exe
           if [ "$RUNNER_OS" = Windows ]; then
-            # Stop before the job limit so the log survives, and dump the stack
-            # of any test that runs for more than two minutes.
-            timeout 900 "$python" -m pytest -v -o faulthandler_timeout=120
+            # A test that hangs for two minutes dumps every thread and exits,
+            # so the log survives instead of running into the job limit.
+            AOT_TEST_HANG_SECONDS=120 "$python" -m pytest -v
           else
             "$python" -m pytest -q
           fi

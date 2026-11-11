@@ -234,3 +234,12 @@ def test_a_failed_start_leaves_a_line_in_the_log(tmp_path, monkeypatch):
     monkeypatch.setattr(serve, 'start_on_demand', lambda state, **kw: (_ for _ in ()).throw(PermissionError('sandbox')))
     hosts._start_collector(tmp_path)
     assert 'could not start aot serve on demand (PermissionError: sandbox)' in (tmp_path / serve.LOG).read_text()
+
+
+def test_uninstalling_the_service_also_stops_on_demand_starts(env, monkeypatch):
+    from agents_over_telegram.cli import parser, run
+    core, transport, clock = env
+    monkeypatch.setattr(serve, 'uninstall', lambda state, **kw: {'installed': False, 'removed': True})
+    result = run(parser().parse_args(['--state-dir', str(core.state_dir), '--fake', 'serve', '--uninstall']))
+    assert result == {'installed': False, 'removed': True, 'on_demand': False}
+    assert (core.state_dir / serve.NO_SERVE).exists()

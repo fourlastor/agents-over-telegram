@@ -509,7 +509,11 @@ def run(args):
         if args.install:
             return serve.install(state_dir)
         if args.uninstall:
-            return serve.uninstall(state_dir)
+            # Removing it on purpose also means no collector started on demand;
+            # serve --install or setup --serve turns collecting back on.
+            result = serve.uninstall(state_dir)
+            serve.opt_out(state_dir)
+            return {**result, 'on_demand': False}
         if args.status:
             return serve.status(state_dir)
         from .relay_api import Relay

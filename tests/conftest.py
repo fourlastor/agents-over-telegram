@@ -45,3 +45,22 @@ def _no_collector_started_on_demand(monkeypatch):
     # Tests must never leave a real process behind; its own tests use the real step.
     from agents_over_telegram import serve
     monkeypatch.setattr(serve, 'start_on_demand', lambda state, **kwargs: {'started': False, 'reason': 'test'})
+
+
+_HANG_SECONDS = int(os.environ.get('AOT_TEST_HANG_SECONDS') or 0)
+
+
+@pytest.fixture(autouse=True)
+def _hang_guard():
+    # CI sets AOT_TEST_HANG_SECONDS where a hung test would otherwise run into
+    # the job limit, which discards the whole log. faulthandler dumps every
+    # thread's stack and exits the process instead, so the log shows where.
+    if not _HANG_SECONDS:
+        yield
+        return
+    import faulthandler
+    faulthandler.dump_traceback_later(_HANG_SECONDS, exit=True)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()

@@ -403,6 +403,10 @@ def _serve_command(executable, state, option):
     return f'"{executable}" --state-dir "{state}" serve {option}'
 
 
+def _service_manager():
+    return {'darwin': 'launchd', 'win32': 'Task Scheduler'}.get(sys.platform, 'systemd')
+
+
 def _collector_choice(args, state, executable):
     """Install the always-on collector only when the human chose it.
 
@@ -412,20 +416,22 @@ def _collector_choice(args, state, executable):
     agent running setup) installs nothing and reports the offer, so the agent
     can ask the human first.
     """
+    import shutil
     from . import serve
     if serve.status(state)['installed']:
         return {'installed': True, 'already_installed': True, 'service': serve.name(state),
                 'remove_with': _serve_command(executable, state, '--uninstall')}
+    if sys.platform not in ('linux', 'darwin', 'win32') or (sys.platform == 'linux' and not shutil.which('systemctl')):
+        return {'installed': False, 'reason': 'unsupported_platform'}
     offer = {'installed': False,
              'offer': 'An always-on collector answers settings taps, approvals and /settings, and keeps '
                       'collecting messages, while no agent is running. It is installed as a login service '
-                      '(systemd, launchd or Task Scheduler). Ask the human; with a yes, rerun setup with --serve.',
+                      f"({_service_manager()}). Ask the human; with a yes, "
+                      'rerun setup with --serve.',
              'install_with': _serve_command(executable, state, '--install')}
     if getattr(args, 'no_serve', False):
         # Also keeps agents from starting a collector on demand.
-        marker = state / serve.NO_SERVE
-        if not marker.exists():
-            os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | compat.O_CLOEXEC, 0o600))
+        serve.opt_out(state)
         return {'installed': False, 'declined': True}
     chosen = getattr(args, 'serve', False)
     if not chosen and not args.prepare_only and sys.stdin.isatty():
