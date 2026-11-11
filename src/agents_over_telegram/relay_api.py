@@ -239,6 +239,23 @@ class Relay:
             self.notify()
         return {'protocol': PROTOCOL, 'ok': True, 'body': body}
 
+    def _record(self, request, answer, started):
+        """Log a call's duration and outcome; waits are not logged, they block by design."""
+        op = request.get('op') if isinstance(request, dict) else None
+        name = op or (request.get('tool') if isinstance(request, dict) else None)
+        body = answer.get('body') if isinstance(answer, dict) else None
+        if not isinstance(answer, dict) or not answer.get('ok'):
+            outcome = (answer or {}).get('error') or 'bad_request'
+        elif answer.get('error_code'):
+            outcome = answer['error_code']
+        elif isinstance(body, dict) and not body.get('ok'):
+            outcome = (body.get('error') or {}).get('code') or 'error'
+        else:
+            outcome = 'ok'
+        self.core.record_activity('relay', {'call': name if isinstance(name, str) else 'unknown',
+                                            'outcome': outcome,
+                                            'ms': round((time.monotonic() - started) * 1000)})
+
     def _node_op(self, op, client_id, request):
         """The inbox work of hooks and waiters, run here so agents never open the database."""
         from . import push
@@ -288,11 +305,14 @@ class Relay:
                 return
             try:
                 connection.settimeout(CALL_TIMEOUT)
+                started = time.monotonic()
                 try:
                     answer = self.answer(request)
                 except Exception:
                     answer = {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
                 _send(connection, answer)
+                if slot is self.active:
+                    self._record(request, answer, started)
             finally:
                 slot.release()
         except OSError:

@@ -55,6 +55,28 @@ def _version_key(text):
     return tuple(int(part) for part in match.groups()) if match else None
 
 
+@contextlib.contextmanager
+def _timed(into, name):
+    """Record how long the block took, in milliseconds, under ``name``."""
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        into[name] = round((time.monotonic() - started) * 1000)
+
+
+def _panel_answer_kind(data):
+    """What a settings panel answer was, for the activity log: view, warning, error or closed."""
+    try:
+        value = json.loads(data)
+    except (TypeError, ValueError):
+        return 'unknown'
+    if not isinstance(value, dict):
+        return 'unknown'
+    return next((name for key, name in (('e', 'error'), ('w', 'warning'), ('closed', 'closed'), ('s', 'view'))
+                 if key in value), 'unknown')
+
+
 def _integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -374,6 +396,8 @@ class Core:
             raise CoreError('insecure_state_directory') from None
         self.transport = transport
         self.clock = clock
+        # When the last fetch from Telegram returned (time.monotonic), for the activity log.
+        self._poll_end = None
         self.queue_limit = queue_limit
         # The model judge loads from the protected judge file on first use;
         # tests pass a callable, and None turns it off.
@@ -431,6 +455,10 @@ class Core:
                 CREATE TABLE IF NOT EXISTS panel_requests (
                     update_id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, status TEXT NOT NULL,
                     created REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS activity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, kind TEXT NOT NULL,
+                    detail TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS widget_answers (
                     query_id TEXT PRIMARY KEY, data TEXT NOT NULL, chat_id INTEGER,
@@ -1901,16 +1929,21 @@ class Core:
         with self._tx() as db:
             db.execute("UPDATE panel_requests SET status='expired' WHERE status='queued' AND created<?",
                        (self.clock() - 600,))
-            rows = db.execute("SELECT update_id,owner_id FROM panel_requests WHERE status='queued' "
+            rows = db.execute("SELECT update_id,owner_id,created FROM panel_requests WHERE status='queued' "
                               'ORDER BY update_id LIMIT 5').fetchall()
             for row in rows:
                 db.execute("UPDATE panel_requests SET status='sending' WHERE update_id=?", (row['update_id'],))
         for row in rows:
+            calls = {}
             try:
-                self._send_panel(row['owner_id'])
+                with _timed(calls, 'send_ms'):
+                    self._send_panel(row['owner_id'])
                 status = 'sent'
             except Exception:
                 status = 'failed'
+            self.record_activity('owner', {'action': 'settings_command', 'outcome': status,
+                                           'routed_to_answered_ms': round((self.clock() - row['created']) * 1000),
+                                           **calls})
             with self._tx() as db:
                 db.execute('UPDATE panel_requests SET status=? WHERE update_id=?', (status, row['update_id']))
 
@@ -2160,13 +2193,25 @@ class Core:
                 # from a runtime that predates it.
                 with self._tx() as db:
                     db.execute('UPDATE account SET legacy_intake_at=? WHERE singleton=1', (account['last_intake'],))
+            steps, started = {}, time.monotonic()
+            # Time since the last fetch returned: an update that arrives in
+            # that gap waits for this fetch.
+            gap = None if self._poll_end is None else round((started - self._poll_end) * 1000)
+
+            def step(name, since):
+                steps[name] = round((time.monotonic() - since) * 1000)
+                return time.monotonic()
             try:
+                mark = time.monotonic()
                 webhook = self.transport.get_webhook_info()
+                mark = step('webhook', mark)
                 if not isinstance(webhook, dict) or not isinstance(webhook.get('url'), str):
                     raise CoreError('invalid_transport_response')
                 if webhook.get('url'):
                     raise CoreError('webhook_conflict')
                 updates = self.transport.get_updates(offset=cursor, timeout=timeout)
+                self._poll_end = time.monotonic()
+                mark = step('poll', mark)
                 if not isinstance(updates, list) or len(updates) > 100:
                     raise CoreError('invalid_transport_response')
                 if any(not isinstance(u, dict) or not _integer(u.get('update_id')) or u['update_id'] < 0 for u in updates):
@@ -2188,6 +2233,7 @@ class Core:
                         # older long-poller, or nothing would long-poll meanwhile.
                         db.execute('UPDATE account SET collector_version=?,collector_seen=? WHERE singleton=1',
                                    (self.runtime_version, now))
+                mark = step('route', mark)
                 if routed is not None and accepted:
                     # Waiting agents hear about new deliveries now, not after
                     # the courtesy steps and the model judge below.
@@ -2196,35 +2242,42 @@ class Core:
                     except Exception:
                         pass
                 self._probe_bot_admin(account)
+                mark = step('admin_probe', mark)
                 try:
                     self._set_bot_menu()
                 except Exception:
                     # The command menu is a convenience; commands work without it.
                     pass
+                mark = step('menu', mark)
                 try:
                     self._expire_approvals()
                 except Exception:
                     # Telling agents about expired requests is best effort.
                     pass
+                mark = step('approvals', mark)
                 try:
                     self._answer_widget_queries()
                 except Exception:
                     # A widget answer is best effort; an unanswered one times out in the widget.
                     pass
+                mark = step('panel_answers', mark)
                 try:
                     self._send_panel_requests()
                 except Exception:
                     pass
+                mark = step('panel_sends', mark)
                 try:
                     self._answer_callbacks()
                 except Exception:
                     # Answering a button press is a courtesy too.
                     pass
+                mark = step('button_answers', mark)
                 try:
                     self._send_start_replies()
                 except Exception:
                     # A courtesy answer must never turn a good intake into a failure.
                     pass
+                mark = step('start_replies', mark)
                 try:
                     if judge:
                         before = self._delivery_count() if routed is not None else None
@@ -2235,12 +2288,29 @@ class Core:
                 except Exception:
                     # Neither may the optional model judge.
                     pass
+                step('judge', mark)
+                work = sum(ms for name, ms in steps.items() if name != 'poll')
+                if accepted or work >= self.SLOW_CYCLE_MS:
+                    kinds = {}
+                    for update in updates:
+                        kind = next((key for key in update if key != 'update_id'), 'unknown')
+                        kinds[kind] = kinds.get(kind, 0) + 1
+                    self.record_activity('cycle', {
+                        'updates': accepted, 'kinds': kinds, 'long_poll': timeout > 0,
+                        'gap_ms': gap, 'work_ms': work,
+                        'steps_ms': {name: ms for name, ms in steps.items() if ms}})
                 return {'status': 'ok', 'updates': accepted, 'cursor': cursor}
             except (TransportError, CoreError) as error:
                 code = error.code if isinstance(error, CoreError) else 'telegram_intake_failed'
                 with self._tx() as db:
                     db.execute('UPDATE account SET last_attempt=?,intake_error=? WHERE singleton=1', (self.clock(), code))
+                self.record_activity('cycle', {'error': code, 'steps_ms': steps,
+                                               'elapsed_ms': round((time.monotonic() - started) * 1000)})
                 raise CoreError(code) from None
+
+    # A collection whose work besides the long poll takes this long is logged
+    # even when it routed nothing.
+    SLOW_CYCLE_MS = 1000
 
     # How long a newer runtime's last collection keeps older runtimes from
     # collecting. Past it the newer one counts as gone, so nobody goes deaf.
@@ -2280,6 +2350,33 @@ class Core:
             return None
         ours, theirs = _version_key(self.runtime_version), _version_key(recorded)
         return recorded if ours is not None and theirs is not None and theirs > ours else None
+
+    # The activity log keeps this many entries of each kind.
+    ACTIVITY_KEEP = 100
+    ACTIVITY_KINDS = ('cycle', 'owner', 'relay', 'serve')
+
+    def record_activity(self, kind, detail):
+        """Append one entry to the bounded activity log; never fails the caller.
+
+        It records timings for diagnosing lag (collector cycles, owner actions,
+        relay requests, collector events), never message text or chat ids.
+        """
+        try:
+            with self._tx() as db:
+                db.execute('INSERT INTO activity(at,kind,detail) VALUES(?,?,?)',
+                           (self.clock(), kind, json.dumps(detail, separators=(',', ':'), sort_keys=True)))
+                db.execute('DELETE FROM activity WHERE kind=? AND id NOT IN '
+                           '(SELECT id FROM activity WHERE kind=? ORDER BY id DESC LIMIT ?)',
+                           (kind, kind, self.ACTIVITY_KEEP))
+        except Exception:
+            pass
+
+    def activity(self, limit=None):
+        """The activity log, oldest first."""
+        with self._db() as db:
+            rows = db.execute('SELECT at,kind,detail FROM activity ORDER BY id DESC LIMIT ?',
+                              (limit or self.ACTIVITY_KEEP * len(self.ACTIVITY_KINDS),)).fetchall()
+        return [{'at': row['at'], 'kind': row['kind'], **json.loads(row['detail'])} for row in reversed(rows)]
 
     def collector_status(self, db=None):
         """Which runtime collects for this bot, and whether this one stands aside."""
@@ -3392,14 +3489,18 @@ class Core:
             with self._tx() as db:
                 if not db.execute('DELETE FROM widget_answers WHERE query_id=?', (row['query_id'],)).rowcount:
                     continue
+            calls = {}
             if row['chat_data'] and row['chat_id'] and row['message_id']:
-                with contextlib.suppress(Exception):
+                with _timed(calls, 'edit_ms'), contextlib.suppress(Exception):
                     self.transport.edit_message_widget_data(row['chat_id'], row['message_id'], row['chat_data'])
-            with contextlib.suppress(Exception):
+            with _timed(calls, 'answer_ms'), contextlib.suppress(Exception):
                 self.transport.answer_widget_query(row['query_id'], row['data'])
             if row['remove'] and row['chat_id'] and row['message_id']:
-                with contextlib.suppress(Exception):
+                with _timed(calls, 'delete_ms'), contextlib.suppress(Exception):
                     self.transport.delete_message(row['chat_id'], row['message_id'])
+            self.record_activity('owner', {'action': 'panel_tap', 'answer': _panel_answer_kind(row['data']),
+                                           'routed_to_answered_ms': round((self.clock() - row['created']) * 1000),
+                                           **calls})
 
     def _answer_callbacks(self):
         """Answer recorded button presses and update their messages; never fails collection."""
@@ -3410,15 +3511,19 @@ class Core:
             with self._tx() as db:
                 if not db.execute('DELETE FROM callback_answers WHERE callback_id=?', (row['callback_id'],)).rowcount:
                     continue
-            with contextlib.suppress(Exception):
+            calls = {}
+            with _timed(calls, 'answer_ms'), contextlib.suppress(Exception):
                 self.transport.answer_callback_query(row['callback_id'], row['text'])
             if row['edit_text'] and row['chat_id'] and row['ephemeral_id'] and row['receiver_id']:
-                with contextlib.suppress(Exception):
+                with _timed(calls, 'edit_ms'), contextlib.suppress(Exception):
                     self.transport.edit_ephemeral_message_text(row['chat_id'], row['receiver_id'],
                                                                row['ephemeral_id'], row['edit_text'])
             elif row['edit_text'] and row['chat_id'] and row['message_id']:
-                with contextlib.suppress(Exception):
+                with _timed(calls, 'edit_ms'), contextlib.suppress(Exception):
                     self.transport.edit_message_text(row['chat_id'], row['message_id'], row['edit_text'])
+            self.record_activity('owner', {'action': 'button_press',
+                                           'routed_to_answered_ms': round((self.clock() - row['created']) * 1000),
+                                           **calls})
 
     def owner_notify(self, client_id, text, idempotency_key, forward_message_id=None, reply_to=None, choices=None):
         """Queue one low-volume notification to the owner's private chat with the bot.

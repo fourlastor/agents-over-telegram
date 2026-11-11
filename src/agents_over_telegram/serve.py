@@ -360,6 +360,15 @@ def start_on_demand(state, *, executable=None, spawn=subprocess.Popen, now=time.
 
 def _serve(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay, done=None):
     log(f'aot serve: collecting for {state}' + (' (started on demand)' if done is not None else ''))
+    from . import __version__
+    core.record_activity('serve', {'event': 'started', 'version': __version__, 'on_demand': done is not None})
+    plain = log
+
+    def log(text):
+        plain(text)
+        # Stops, restarts and failures go to the activity log too.
+        if not text.startswith('aot serve: collecting'):
+            core.record_activity('serve', {'event': text.removeprefix('aot serve: ')})
     if watchdog is not None:
         watchdog.start(log)
     if relay is not None:
@@ -418,11 +427,16 @@ def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay=N
             # Another collector holds the lock (an older one still stopping).
             sleep(BUSY_PAUSE)
             continue
+        started = time.monotonic()
         try:
             # Sends that waited for a rate limit go out without waiting for an agent.
             core.flush(limit=20)
         except Exception:
             pass
+        flushed = round((time.monotonic() - started) * 1000)
+        if flushed >= core.SLOW_CYCLE_MS:
+            # Time spent sending is time no fetch runs; taps arriving now wait.
+            core.record_activity('cycle', {'flush_ms': flushed})
     return 0
 
 
@@ -590,3 +604,21 @@ def status(state):
         serves_this = False
     return {'installed': current is not None and serves_this, 'service': name(state), 'unit': str(unit),
             'executable': str(current) if current else None}
+
+
+def activity_lines(entries):
+    """The activity log as one readable line per entry, oldest first, in local time."""
+    from datetime import datetime
+    lines = []
+    for entry in entries:
+        entry = dict(entry)
+        at = datetime.fromtimestamp(entry.pop('at')).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        kind = entry.pop('kind')
+        details = ' '.join(f'{key}={json_compact(value)}' for key, value in entry.items())
+        lines.append(f'{at}  {kind:<6} {details}')
+    return lines
+
+
+def json_compact(value):
+    import json
+    return value if isinstance(value, str) else json.dumps(value, separators=(',', ':'), sort_keys=True)

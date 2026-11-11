@@ -303,6 +303,8 @@ def parser():
     action.add_argument("--install", action="store_true", help="Run it as a user service (systemd or launchd)")
     action.add_argument("--uninstall", action="store_true", help="Stop and remove the user service")
     action.add_argument("--status", action="store_true", help="Show whether the user service is set up")
+    action.add_argument("--activity", action="store_true",
+                        help="Show the last collector cycles, owner actions, relay calls and collector events, with timings")
     action.add_argument("--on-demand", action="store_true",
                         help="Started by an agent: stop when idle, when the service is installed or a newer runtime takes over")
     flush = sub.add_parser("flush")
@@ -536,6 +538,10 @@ def run(args):
             return {**result, 'on_demand': False}
         if args.status:
             return serve.status(state_dir)
+        if args.activity:
+            for line in serve.activity_lines(core.activity()):
+                print(line)
+            return None
         from .relay_api import Relay
         raise SystemExit(serve.run(core, state_dir, watchdog=serve.Watchdog(), relay=Relay(core, state_dir),
                                    on_demand=args.on_demand))
