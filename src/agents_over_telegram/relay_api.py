@@ -34,6 +34,7 @@ import stat
 import struct
 import sys
 import threading
+import time
 from pathlib import Path
 
 from . import compat
@@ -52,6 +53,14 @@ CONNECT_TIMEOUT = 2.0
 WAIT_LIMIT = 50.0
 # Calls after which other agents may have something new (a peer delivery).
 _CHANGING_TOOLS = frozenset({'message_send'})
+# A request line must arrive within this, however slowly its bytes trickle in.
+REQUEST_DEADLINE = 10.0
+# At most this many requests are handled at once; more get "busy" and the
+# agents run those calls themselves.
+MAX_ACTIVE = 32
+# The relay records the socket it listens on here, inside the state
+# directory, so agents whose environment differs (another TMPDIR) find it.
+SOCKET_RECORD = 'relay-socket.json'
 
 
 class Unavailable(Exception):
@@ -116,10 +125,20 @@ def peer_uid(connection):
     return None
 
 
-def _read_line(connection, limit):
+def _read_line(connection, limit, deadline=None):
     chunks, size = [], 0
     while True:
-        chunk = connection.recv(65536)
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise ValueError('too_slow')
+            connection.settimeout(left)
+        try:
+            chunk = connection.recv(65536)
+        except TimeoutError:
+            if deadline is None:
+                raise
+            raise ValueError('too_slow') from None
         if not chunk:
             break
         chunks.append(chunk)
@@ -153,6 +172,11 @@ class Relay:
         self.generation = 0
         self.closing = False
         self.changed = threading.Condition()
+        self.path = None
+        self.active = threading.BoundedSemaphore(MAX_ACTIVE)
+        # When an agent last called or waited (time.monotonic), for a
+        # collector started on demand that stops when idle.
+        self.last_activity = None
 
     def notify(self):
         """Wake every waiting agent; each then checks its own inbox."""
@@ -190,25 +214,46 @@ class Relay:
                 return {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
             return {'protocol': PROTOCOL, 'ok': True,
                     'wait': self._wait(request.get('instance'), request.get('generation'), timeout)}
+        from .mcp_server import _TOOL_MAP, _VALIDATORS
+        if tool not in _TOOL_MAP or not isinstance(arguments, dict) or not _VALIDATORS[tool].is_valid(arguments):
+            # A newer agent may know a tool or argument this relay does not.
+            # Nothing ran, so it can run the call itself.
+            return {'protocol': PROTOCOL, 'ok': False, 'error': 'not_handled'}
         body = call_tool(self.core, client_id, tool, arguments)
         if tool in _CHANGING_TOOLS and body.get('ok'):
+            # A send can deliver to a peer agent; every waiter then checks its
+            # own inbox, which is cheap and finds nothing for most of them.
             self.notify()
         return {'protocol': PROTOCOL, 'ok': True, 'body': body}
 
     def handle(self, connection):
+        self.last_activity = time.monotonic()
+        if not self.active.acquire(blocking=False):
+            try:
+                _send(connection, {'protocol': PROTOCOL, 'ok': False, 'error': 'busy'})
+            except OSError:
+                pass
+            return
         try:
-            connection.settimeout(CALL_TIMEOUT)
-            if peer_uid(connection) not in (None, compat.getuid()):
+            # A peer whose user cannot be determined is refused, like another user.
+            if peer_uid(connection) != compat.getuid():
                 _send(connection, {'protocol': PROTOCOL, 'ok': False, 'error': 'forbidden'})
                 return
             try:
-                request = json.loads(_read_line(connection, MAX_REQUEST))
-            except (ValueError, UnicodeDecodeError):
+                request = json.loads(_read_line(connection, MAX_REQUEST, time.monotonic() + REQUEST_DEADLINE))
+            except (ValueError, UnicodeDecodeError, RecursionError):
                 _send(connection, {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'})
                 return
-            _send(connection, self.answer(request))
+            connection.settimeout(CALL_TIMEOUT)
+            try:
+                answer = self.answer(request)
+            except Exception:
+                answer = {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
+            _send(connection, answer)
         except OSError:
             pass
+        finally:
+            self.active.release()
 
     def start(self):
         """Listen on the socket; returns the server thread."""
@@ -233,8 +278,12 @@ class Relay:
             probe.settimeout(CONNECT_TIMEOUT)
             try:
                 probe.connect(str(path))
-            except OSError:
+            except ConnectionRefusedError:
+                # Nobody listens: a relay that stopped left it behind.
                 path.unlink()
+            except OSError:
+                # A timeout can be a busy relay with a full backlog; keep its socket.
+                raise OSError(errno.EADDRINUSE, 'the relay socket did not answer') from None
             else:
                 raise OSError(errno.EADDRINUSE, 'another relay answers on this socket')
             finally:
@@ -254,6 +303,10 @@ class Relay:
         finally:
             os.umask(previous)
         os.chmod(path, 0o600)
+        self.path = path
+        from .credentials import write_private_json
+        record = self.state / SOCKET_RECORD
+        write_private_json(record, {'version': 1, 'socket': str(path)}, overwrite=record.exists())
         thread = threading.Thread(target=self.server.serve_forever, name='aot-relay', daemon=True)
         thread.start()
         self.log(f'aot serve: answering agents on {path}')
@@ -266,18 +319,30 @@ class Relay:
         if self.server is not None:
             self.server.shutdown()
             self.server.server_close()
-            try:
-                socket_path(self.state).unlink()
-            except OSError:
-                pass
+            for leftover in (self.path or socket_path(self.state), self.state / SOCKET_RECORD):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
             self.server = None
+
+
+def recorded_socket(state):
+    """The socket the running relay recorded, or None."""
+    from .credentials import CredentialError, read_private_json
+    try:
+        value = read_private_json(Path(state) / SOCKET_RECORD).get('socket')
+    except (CredentialError, OSError):
+        return None
+    return Path(value) if isinstance(value, str) and os.path.isabs(value) else None
+
 
 
 def _request(state, request, timeout):
     """Send one request; its answer, None when the answer was lost, Unavailable when nobody took it."""
     if not hasattr(socket, 'AF_UNIX'):
         raise Unavailable('no_unix_sockets')
-    path = socket_path(state)
+    path = recorded_socket(state) or socket_path(state)
     try:
         info = path.parent.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != compat.getuid() or info.st_mode & 0o077:
@@ -291,7 +356,7 @@ def _request(state, request, timeout):
             connection.connect(str(path))
         except OSError:
             raise Unavailable('no_relay') from None
-        if peer_uid(connection) not in (None, compat.getuid()):
+        if peer_uid(connection) != compat.getuid():
             raise Unavailable('foreign_relay')
         connection.settimeout(timeout)
         try:
@@ -303,8 +368,9 @@ def _request(state, request, timeout):
         connection.close()
     if not isinstance(answer, dict):
         return None
-    if answer.get('error') == 'relay_too_old':
-        raise Unavailable('relay_too_old')
+    if answer.get('error') in ('relay_too_old', 'not_handled', 'busy'):
+        # Nothing ran on the relay; the agent runs the call itself.
+        raise Unavailable(answer['error'])
     return answer
 
 

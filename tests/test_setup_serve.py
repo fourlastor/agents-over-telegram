@@ -1,4 +1,4 @@
-"""Setup installs the always-on collector by default; --no-serve skips it."""
+"""Setup installs the always-on collector only when the human chooses it."""
 import subprocess
 import sys
 
@@ -6,7 +6,7 @@ import pytest
 
 from agents_over_telegram import cli, onboarding, serve
 from agents_over_telegram.transport import FakeTransport
-from conftest import REAL_INSTALL_COLLECTOR
+from conftest import REAL_ASK_SERVE, REAL_INSTALL_COLLECTOR
 
 
 @pytest.fixture
@@ -25,19 +25,27 @@ def ok(argv, **kw):
 
 
 def test_installs_the_service_once(home):
-    first = REAL_INSTALL_COLLECTOR(home, run_command=ok)
-    assert first['installed'] is True and first['remove_with'] == 'aot serve --uninstall'
+    first = REAL_INSTALL_COLLECTOR(home, run_command=ok, executable='/opt/aot/bin/aot')
+    assert first['installed'] is True
+    assert first['remove_with'] == f'"/opt/aot/bin/aot" --state-dir "{home}" serve --uninstall'
     assert serve.status(home)['installed'] is True
-    assert REAL_INSTALL_COLLECTOR(home, run_command=ok) == {'installed': True, 'already_installed': True,
-                                                             'service': serve.name(home)}
+    again = REAL_INSTALL_COLLECTOR(home, run_command=ok, executable='/opt/aot/bin/aot')
+    assert again['already_installed'] is True and again['service'] == serve.name(home)
 
 
 def test_a_failed_install_never_fails_setup(home):
+    commands = []
+
     def refuse(argv, **kw):
-        raise subprocess.CalledProcessError(1, argv)
-    result = REAL_INSTALL_COLLECTOR(home, run_command=refuse)
+        commands.append(argv)
+        if kw.get('check'):
+            raise subprocess.CalledProcessError(1, argv)
+        return subprocess.CompletedProcess(argv, 1)
+    result = REAL_INSTALL_COLLECTOR(home, run_command=refuse, executable='/opt/aot/bin/aot')
     assert result['installed'] is False and result['reason'] == 'CalledProcessError'
-    assert 'aot serve --install' in result['next_step']
+    assert f'"/opt/aot/bin/aot" --state-dir "{home}" serve --install' in result['next_step']
+    # The cleanup really asks the service manager to undo a partial install.
+    assert ['systemctl', '--user', 'disable', '--now', f'{serve.name(home)}.service'] in commands
     assert serve.pointer(home) is None and not (home / serve.LAUNCHER).exists()
     assert serve.status(home)['installed'] is False
 
@@ -50,10 +58,11 @@ def test_unsupported_platforms_are_skipped(home, monkeypatch):
     assert REAL_INSTALL_COLLECTOR(home, run_command=ok)['reason'] == 'unsupported_platform'
 
 
-def live_setup(tmp_path, monkeypatch, *extra):
+def live_setup(tmp_path, monkeypatch, *extra, ask=False):
     calls = []
-    monkeypatch.setattr(onboarding, '_install_collector', lambda state, run_command=None: calls.append(state) or
-                        {'installed': True, 'service': 'svc'})
+    monkeypatch.setattr(onboarding, '_install_collector', lambda state, run_command=None, executable=None:
+                        calls.append(state) or {'installed': True, 'service': 'svc'})
+    monkeypatch.setattr(onboarding, '_ask_serve', lambda: ask)
     monkeypatch.setattr(cli, 'TelegramTransport', lambda token: FakeTransport())
     monkeypatch.setattr(sys.stdin, 'isatty', lambda: True)
     monkeypatch.setattr(cli.getpass, 'getpass', lambda prompt: '123456:ABCDEFGHIJKLMNOPQRSTUVWXYZ_test_only')
@@ -62,19 +71,53 @@ def live_setup(tmp_path, monkeypatch, *extra):
     return cli.run(cli.parser().parse_args([str(x) for x in argv])), calls
 
 
-def test_live_setup_installs_the_collector(tmp_path, monkeypatch):
+def test_an_agent_running_setup_only_gets_the_offer(tmp_path, monkeypatch):
     result, calls = live_setup(tmp_path, monkeypatch)
+    collector = result['always_on_collector']
+    assert calls == [] and collector['installed'] is False
+    assert 'Ask the human' in collector['offer'] and '--state-dir' in collector['install_with']
+
+
+def test_serve_installs_the_collector(tmp_path, monkeypatch):
+    result, calls = live_setup(tmp_path, monkeypatch, '--serve')
     assert calls == [tmp_path / 'state'] and result['always_on_collector'] == {'installed': True, 'service': 'svc'}
 
 
-def test_no_serve_skips_the_install(tmp_path, monkeypatch):
+def test_no_serve_declines_without_asking(tmp_path, monkeypatch):
     result, calls = live_setup(tmp_path, monkeypatch, '--no-serve')
-    assert calls == [] and result['always_on_collector'] == {'installed': False, 'skipped': 'no_serve'}
+    assert calls == [] and result['always_on_collector'] == {'installed': False, 'declined': True}
+
+
+def test_serve_and_no_serve_exclude_each_other():
+    with pytest.raises(SystemExit):
+        cli.parser().parse_args(['setup', '--label', 'A', '--project-dir', '/p', '--serve', '--no-serve'])
+
+
+def test_the_wizard_asks_the_human(monkeypatch, capsys):
+    monkeypatch.setattr('builtins.input', lambda: 'yes')
+    assert REAL_ASK_SERVE() is True
+    monkeypatch.setattr('builtins.input', lambda: 'no')
+    assert REAL_ASK_SERVE() is False
+    assert 'login service' in capsys.readouterr().err
 
 
 def test_fake_setup_never_installs(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr(onboarding, '_install_collector', lambda state, run_command=None: calls.append(state))
+    monkeypatch.setattr(onboarding, '_install_collector', lambda state, **kw: calls.append(state))
     result = cli.run(cli.parser().parse_args(['--state-dir', str(tmp_path / 'state'), '--fake', 'setup', '--label',
-                                              'Alpha', '--project-dir', str(tmp_path / 'project'), '--prepare-only']))
+                                              'Alpha', '--project-dir', str(tmp_path / 'project'), '--prepare-only',
+                                              '--serve']))
     assert calls == [] and 'always_on_collector' not in result
+
+
+def test_the_service_never_moves_to_an_older_runtime(tmp_path, monkeypatch):
+    from agents_over_telegram.credentials import write_private_json
+    state = tmp_path / 'state'
+    state.mkdir(mode=0o700)
+    write_private_json(state / serve.POINTER, {'version': 1, 'executable': '/new/aot', 'aot_version': '99.0.0'})
+    assert serve.follow(state, tmp_path / 'old' / 'aot') is False
+    assert serve.pointer(state) == serve.Path('/new/aot')
+    write_private_json(state / serve.POINTER, {'version': 1, 'executable': '/older/aot', 'aot_version': '0.1.0'},
+                       overwrite=True)
+    assert serve.follow(state, tmp_path / 'this' / 'aot') is True
+    assert serve.pointer_version(state) == serve._pointer_value('x')['aot_version']

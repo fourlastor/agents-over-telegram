@@ -215,8 +215,14 @@ def _start_collector(state: Path) -> None:
     from . import serve
     try:
         serve.start_on_demand(state)
-    except Exception:
-        pass
+    except Exception as error:
+        # One line in serve.log, so a start that keeps failing (a sandbox
+        # around the agent, say) can be found.
+        try:
+            with open(Path(state) / serve.LOG, 'a', encoding='utf-8') as log:
+                log.write(f'aot: could not start aot serve on demand ({type(error).__name__}: {error})\n')
+        except OSError:
+            pass
 
 
 def _wake(args) -> int:

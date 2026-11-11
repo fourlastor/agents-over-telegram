@@ -40,11 +40,19 @@ NO_SERVE = 'no-serve'
 ON_DEMAND = 'serve-on-demand.json'
 # A collector started on demand that died is started again at most this often.
 ON_DEMAND_INTERVAL = 60.0
+# A collector started on demand stops after this long with no agent talking
+# to it (calls and waits), so it is a temporary helper, not a hidden service.
+ON_DEMAND_IDLE = 15 * 60.0
+# A collector started on demand waits at most this long for another one to
+# stop (a newer one replacing an older one), then gives up.
+ON_DEMAND_LOCK_WAIT = 60.0
+ON_DEMAND_LOCK = 'serve-on-demand.lock'
 LOG_LIMIT = 1_000_000  # bytes; a bigger log is moved to serve.log.1 when the service starts
 POLL_TIMEOUT = 20
 BUSY_PAUSE = 2.0
 BACKOFF = 2.0
-BACKOFF_MAX = 300.0
+# Well under WATCHDOG_LIMIT, so a long outage never looks like a stuck loop.
+BACKOFF_MAX = 120.0
 # A loop iteration takes at most a long poll plus a few requests; one that
 # runs past this is stuck, and the collector exits so the service restarts it.
 WATCHDOG_LIMIT = 300.0
@@ -113,17 +121,39 @@ def pointer(state):
     return Path(executable) if isinstance(executable, str) and os.path.isabs(executable) else None
 
 
+def _pointer_value(executable):
+    from . import __version__
+    return {'version': 1, 'executable': str(executable), 'aot_version': __version__}
+
+
+def pointer_version(state):
+    """The AOT release the pointer names, when the pointer records it."""
+    try:
+        value = read_private_json(Path(state) / POINTER)
+    except (CredentialError, OSError):
+        return None
+    version = value.get('aot_version') if isinstance(value, dict) else None
+    return version if isinstance(version, str) else None
+
+
 def follow(state, executable=None):
     """Point an installed service at this runtime; True when the pointer changed.
 
     Setup calls this, so moving a project to a new runtime also moves the
-    collector. Nothing happens when no service is installed.
+    collector. Nothing happens when no service is installed, and the service
+    never moves to an older release than the one it runs: rerunning setup in
+    a project that is still on an older runtime leaves it alone.
     """
+    from . import __version__
+    from .core import _version_key
     current = pointer(state)
     target = Path(executable or own_executable())
     if current is None or os.path.realpath(current) == os.path.realpath(target):
         return False
-    write_private_json(Path(state) / POINTER, {'version': 1, 'executable': str(target)}, overwrite=True)
+    recorded, ours = _version_key(pointer_version(state)), _version_key(__version__)
+    if recorded is not None and ours is not None and recorded > ours:
+        return False
+    write_private_json(Path(state) / POINTER, _pointer_value(target), overwrite=True)
     return True
 
 
@@ -166,24 +196,30 @@ class Watchdog:
 
 
 def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_running=None, log=None, watchdog=None,
-        relay=None):
+        relay=None, on_demand=False, clock=time.monotonic):
     """Collect without stopping; return 3 when the runtime moved, 0 when told to stop.
 
     With ``relay`` it also answers agents' tool calls on the state directory's
     socket (relay_api). Agents run calls themselves when it cannot listen.
+    ``on_demand`` is a collector an agent started (start_on_demand): it stops
+    when idle, when the service is installed, when the human opts out, or
+    when a newer runtime takes over (see _on_demand_done).
     """
     log = log or (lambda text: print(text, flush=True))
     rotate_log(state)
-    lock = _hold_serve_lock(state, sleep, keep_running, log)
+    give_up = clock() + ON_DEMAND_LOCK_WAIT if on_demand else None
+    lock = _hold_serve_lock(state, sleep, keep_running, log, give_up=give_up, clock=clock)
     if lock is None:
         return 0
     try:
-        return _serve(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay)
+        done = (lambda: _on_demand_done(state, relay, started, clock)) if on_demand else None
+        started = clock()
+        return _serve(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay, done)
     finally:
         os.close(lock)
 
 
-def _hold_serve_lock(state, sleep, keep_running, log):
+def _hold_serve_lock(state, sleep, keep_running, log, give_up=None, clock=time.monotonic):
     """Take this state directory's serve lock, waiting while another aot serve holds it."""
     fd = os.open(Path(state) / SERVE_LOCK, os.O_RDWR | os.O_CREAT | compat.O_CLOEXEC, 0o600)
     told = False
@@ -196,10 +232,34 @@ def _hold_serve_lock(state, sleep, keep_running, log):
         if not told:
             log('aot serve: another aot serve runs for this state directory; waiting until it stops')
             told = True
-        if keep_running is not None and not keep_running():
+        if (keep_running is not None and not keep_running()) or (give_up is not None and clock() >= give_up):
             os.close(fd)
             return None
         sleep(BUSY_PAUSE)
+
+
+def _on_demand_done(state, relay, started, clock):
+    """Why a collector started on demand should stop now, or None."""
+    state = Path(state)
+    if (state / NO_SERVE).exists():
+        return 'the human opted out (setup --no-serve)'
+    if status(state)['installed']:
+        return 'the always-on service is installed'
+    recorded = _on_demand_record(state).get('executable')
+    if isinstance(recorded, str) and os.path.realpath(recorded) != os.path.realpath(own_executable()):
+        return 'a newer runtime takes over'
+    last = max(started, getattr(relay, 'last_activity', None) or started)
+    if clock() - last >= ON_DEMAND_IDLE:
+        return 'no agent used it for a while'
+    return None
+
+
+def _on_demand_record(state):
+    try:
+        value = read_private_json(Path(state) / ON_DEMAND)
+    except (CredentialError, OSError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def running(state):
@@ -226,11 +286,19 @@ def start_on_demand(state, *, executable=None, spawn=subprocess.Popen, now=time.
     they start, so owner actions and messages are still handled. It starts
     nothing when the state directory is in fake mode, when setup --no-serve
     opted out, when the service is installed (its manager restarts it), when
-    an aot serve already runs, or when one was started less than a minute
-    ago (so a collector that dies at once is not restarted in a loop). The
-    process is detached from the agent's session, so it outlives it.
+    a collector of this runtime or a newer one already runs, or when one was
+    started less than a minute ago (so a collector that dies at once is not
+    restarted in a loop). An older collector started on demand is replaced:
+    the record names this runtime, the older one notices and stops, and the
+    new one takes the lock after it.
+
+    The collector is detached from the agent's session and stops by itself
+    after ON_DEMAND_IDLE without agents, so it is a temporary helper.
     """
+    from . import __version__
+    from .core import _version_key
     state = Path(state).absolute()
+    executable = Path(executable or own_executable())
     try:
         mode = read_private_json(state / 'mode.json').get('mode')
     except (CredentialError, OSError):
@@ -241,28 +309,46 @@ def start_on_demand(state, *, executable=None, spawn=subprocess.Popen, now=time.
         return {'started': False, 'reason': 'opted_out'}
     if status(state)['installed']:
         return {'started': False, 'reason': 'service_installed'}
-    if running(state):
-        return {'started': False, 'reason': 'running'}
-    record = state / ON_DEMAND
+    # Two agents starting at once must not both spawn one.
+    fd = os.open(state / ON_DEMAND_LOCK, os.O_RDWR | os.O_CREAT | compat.O_CLOEXEC, 0o600)
     try:
-        last = read_private_json(record).get('started')
-    except (CredentialError, OSError):
-        last = None
-    if isinstance(last, (int, float)) and 0 <= now() - last < ON_DEMAND_INTERVAL:
-        return {'started': False, 'reason': 'recently_started'}
-    write_private_json(record, {'version': 1, 'started': now()}, overwrite=record.exists())
-    rotate_log(state)
-    log = os.open(state / LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | compat.O_CLOEXEC, 0o600)
-    try:
-        process = spawn([str(executable or own_executable()), '--state-dir', str(state), 'serve'],
-                        stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+        try:
+            compat.lock(fd)
+        except OSError:
+            return {'started': False, 'reason': 'starting'}
+        record = _on_demand_record(state)
+        if running(state):
+            theirs, ours = _version_key(record.get('aot_version')), _version_key(__version__)
+            same = (isinstance(record.get('executable'), str)
+                    and os.path.realpath(record['executable']) == os.path.realpath(executable))
+            if same or theirs is None or ours is None or theirs >= ours:
+                return {'started': False, 'reason': 'running'}
+        else:
+            last = record.get('started')
+            if isinstance(last, (int, float)) and 0 <= now() - last < ON_DEMAND_INTERVAL:
+                return {'started': False, 'reason': 'recently_started'}
+        write_private_json(state / ON_DEMAND, {'version': 1, 'started': now(), 'executable': str(executable),
+                                               'aot_version': __version__}, overwrite=(state / ON_DEMAND).exists())
+        rotate_log(state)
+        log = os.open(state / LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | compat.O_CLOEXEC, 0o600)
+        try:
+            # Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, so it outlives the agent's console.
+            detached = {'creationflags': 0x00000008 | 0x00000200} if compat.WINDOWS else {}
+            process = spawn([str(executable), '--state-dir', str(state), 'serve', '--on-demand'],
+                            stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                            close_fds=True, **detached)
+        finally:
+            os.close(log)
     finally:
-        os.close(log)
+        os.close(fd)
+    # Reap it when it exits, so it never lingers as a zombie of a long-lived agent process.
+    if hasattr(process, 'wait'):
+        threading.Thread(target=process.wait, name='aot-serve-reaper', daemon=True).start()
     return {'started': True, 'pid': process.pid}
 
 
-def _serve(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay):
-    log(f'aot serve: collecting for {state}')
+def _serve(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay, done=None):
+    log(f'aot serve: collecting for {state}' + (' (started on demand)' if done is not None else ''))
     if watchdog is not None:
         watchdog.start(log)
     if relay is not None:
@@ -273,36 +359,45 @@ def _serve(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay)
             log(f'aot serve: not answering agents ({type(error).__name__}: {error}); they run their calls themselves')
             relay = None
     try:
-        return _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay)
+        return _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay, done)
     finally:
         if relay is not None:
             relay.stop()
 
 
-def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay=None):
+def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay=None, done=None):
     from .hosts import RUNTIME_MOVED_EXIT
     failures = 0
     while keep_running is None or keep_running():
         if watchdog is not None:
             watchdog.beat()
+        reason = done() if done is not None else None
+        if reason:
+            log(f'aot serve: stopping, {reason}')
+            return 0
         if moved(state):
             log('aot serve: a newer runtime is installed; restarting on it')
             return RUNTIME_MOVED_EXIT
         try:
-            result = core.collect(timeout=poll_timeout, judge=True)
+            result = core.collect(timeout=poll_timeout, judge=True,
+                                  routed=relay.notify if relay is not None else None)
         except Exception as error:  # the core records intake errors; keep going
             failures += 1
             code = getattr(error, 'code', type(error).__name__)
             pause = min(BACKOFF_MAX, BACKOFF * 2 ** min(failures - 1, 16))
             log(f'aot serve: collection failed ({code}); retrying in {pause:.0f}s')
+            # Waiting out a failure is progress: beat around the pause.
+            if watchdog is not None:
+                watchdog.beat()
             sleep(pause)
+            if watchdog is not None:
+                watchdog.beat()
             continue
+        if watchdog is not None:
+            watchdog.beat()
         if failures:
             log('aot serve: collecting again')
         failures = 0
-        if relay is not None and result.get('updates'):
-            # Waiting agents check their inboxes now instead of on their next poll.
-            relay.notify()
         if result.get('status') == 'busy':
             # Another collector holds the lock (an older one still stopping).
             sleep(BUSY_PAUSE)
@@ -406,7 +501,7 @@ def install(state, *, run_command=subprocess.run, python=None):
     (state / NO_SERVE).unlink(missing_ok=True)
     if python is None:
         python = _windows_python() if sys.platform == 'win32' else shutil.which('python3') or '/usr/bin/python3'
-    write_private_json(state / POINTER, {'version': 1, 'executable': str(own_executable())}, overwrite=True)
+    write_private_json(state / POINTER, _pointer_value(own_executable()), overwrite=True)
     launcher = state / LAUNCHER
     launcher.write_text(LAUNCHER_SOURCE, encoding='utf-8')
     launcher.chmod(0o600)

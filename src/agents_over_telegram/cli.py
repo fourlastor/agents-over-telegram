@@ -156,8 +156,11 @@ def parser():
     setup.add_argument("--client-file", type=Path, help="Reuse this existing protected client file")
     setup.add_argument("--receiver-handoff-confirmed", action="store_true")
     setup.add_argument("--prepare-only", action="store_true", help="Prepare profile and pairing without collecting or confirming")
-    setup.add_argument("--no-serve", action="store_true",
-                       help="Do not install the always-on collector (aot serve) as a user service")
+    serve_choice = setup.add_mutually_exclusive_group()
+    serve_choice.add_argument("--serve", action="store_true",
+                              help="Install the always-on collector (aot serve) as a login service; ask the human first")
+    serve_choice.add_argument("--no-serve", action="store_true",
+                              help="Do not install the always-on collector, and do not ask")
     setup.add_argument("--host", choices=["codex", "claude", "pi", "amp"], default="codex",
                        help="Agent host to prepare; codex writes .codex/config.toml, plugin hosts use the runtime pointer")
     register = sub.add_parser("account-register", help="Prompt privately for one bot token, validate without polling")
@@ -287,6 +290,8 @@ def parser():
     action.add_argument("--install", action="store_true", help="Run it as a user service (systemd or launchd)")
     action.add_argument("--uninstall", action="store_true", help="Stop and remove the user service")
     action.add_argument("--status", action="store_true", help="Show whether the user service is set up")
+    action.add_argument("--on-demand", action="store_true",
+                        help="Started by an agent: stop when idle, when the service is installed or a newer runtime takes over")
     flush = sub.add_parser("flush")
     flush.add_argument("--client-file", type=Path)
     peer = sub.add_parser("configure-peer")
@@ -508,7 +513,8 @@ def run(args):
         if args.status:
             return serve.status(state_dir)
         from .relay_api import Relay
-        raise SystemExit(serve.run(core, state_dir, watchdog=serve.Watchdog(), relay=Relay(core, state_dir)))
+        raise SystemExit(serve.run(core, state_dir, watchdog=serve.Watchdog(), relay=Relay(core, state_dir),
+                                   on_demand=args.on_demand))
     if args.command == "flush":
         return core.flush(client_id=_client(core, args.client_file, args.expected_client_id) if args.client_file else None)
     if args.command == "account-status":
