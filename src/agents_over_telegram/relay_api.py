@@ -361,6 +361,11 @@ def _request(state, request, timeout):
         connection.settimeout(timeout)
         try:
             _send(connection, {'protocol': PROTOCOL, **request})
+        except OSError:
+            # A busy relay answers and closes before reading the request, so
+            # the send can fail; its answer may still be waiting to be read.
+            pass
+        try:
             answer = json.loads(_read_line(connection, MAX_RESPONSE))
         except (OSError, ValueError, UnicodeDecodeError):
             return None
