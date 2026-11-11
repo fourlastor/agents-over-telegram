@@ -624,23 +624,25 @@ def test_wake_collects_from_telegram_while_waiting(tmp_path):
     assert '1 new Telegram message' in err and 'arrives later' not in err
 
 
-def wait_for_owner(result, session, process, timeout=30):
-    """Wait until a waiter has registered as its session's owner.
+def wait_for_owner(result, session, process, previous=None, timeout=30):
+    """Wait until a waiter has registered as its session's owner; return its token.
 
     A waiter writes its owner token as it starts; one started after it takes
     over. Starting the next waiter before that would make the order of the two
-    a race on a slow machine.
+    a race on a slow machine. The token is compared with the previous owner's,
+    not with the process id: on Windows the venv's aot.exe runs Python as a
+    child process, so the waiter's own pid differs from the one started here.
     """
     from agents_over_telegram.hosts import wake_key
     owner = Path(result['state_dir']) / 'wake-locks' / f"{wake_key(result['client_id'], session)}.owner"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if owner.exists() and owner.read_text(encoding='utf-8').startswith(f'{process.pid}-'):
-            return
+        token = owner.read_text(encoding='utf-8').strip() if owner.exists() else ''
+        if token and token != previous:
+            return token
         assert process.poll() is None, process.communicate()
         time.sleep(0.05)
     pytest.fail('the waiter never registered as its session owner')
-
 
 def start_wake(project, session, duration=60):
     return subprocess.Popen([str(RUNTIME), 'wake', '--host', 'claude', '--project-dir', project,
@@ -655,14 +657,14 @@ def test_newest_waiter_takes_over_its_session(tmp_path):
     other = start_wake(project, 'other')
     second = None
     try:
-        wait_for_owner(result, 'abc', first)
+        first_token = wait_for_owner(result, 'abc', first)
         wait_for_owner(result, 'other', other)
         assert first.poll() is None
         # A turn end starts a new waiter; the running one hands over and exits quietly.
         second = start_wake(project, 'abc')
         out, err = first.communicate(timeout=30)
         assert (first.returncode, out, err) == (0, '', '')
-        wait_for_owner(result, 'abc', second)
+        wait_for_owner(result, 'abc', second, previous=first_token)
         assert second.poll() is None
         # Another session keeps its own waiter.
         assert other.poll() is None
