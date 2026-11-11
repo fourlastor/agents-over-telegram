@@ -74,17 +74,39 @@ def pointer(state):
     return Path(executable) if isinstance(executable, str) and os.path.isabs(executable) else None
 
 
+def _pointer_value(executable):
+    from . import __version__
+    return {'version': 1, 'executable': str(executable), 'aot_version': __version__}
+
+
+def pointer_version(state):
+    """The AOT release the pointer names, when the pointer records it."""
+    try:
+        value = read_private_json(Path(state) / POINTER)
+    except (CredentialError, OSError):
+        return None
+    version = value.get('aot_version') if isinstance(value, dict) else None
+    return version if isinstance(version, str) else None
+
+
 def follow(state, executable=None):
     """Point an installed service at this runtime; True when the pointer changed.
 
     Setup calls this, so moving a project to a new runtime also moves the
-    collector. Nothing happens when no service is installed.
+    collector. Nothing happens when no service is installed, and the service
+    never moves to an older release than the one it runs: rerunning setup in
+    a project that is still on an older runtime leaves it alone.
     """
+    from . import __version__
+    from .core import _version_key
     current = pointer(state)
     target = Path(executable or own_executable())
     if current is None or os.path.realpath(current) == os.path.realpath(target):
         return False
-    write_private_json(Path(state) / POINTER, {'version': 1, 'executable': str(target)}, overwrite=True)
+    recorded, ours = _version_key(pointer_version(state)), _version_key(__version__)
+    if recorded is not None and ours is not None and recorded > ours:
+        return False
+    write_private_json(Path(state) / POINTER, _pointer_value(target), overwrite=True)
     return True
 
 
@@ -218,7 +240,7 @@ def install(state, *, run_command=subprocess.run, python=None):
     """Write the pointer, the launcher and the user service, then start it."""
     state = Path(state).absolute()
     python = python or shutil.which('python3') or '/usr/bin/python3'
-    write_private_json(state / POINTER, {'version': 1, 'executable': str(own_executable())}, overwrite=True)
+    write_private_json(state / POINTER, _pointer_value(own_executable()), overwrite=True)
     launcher = state / LAUNCHER
     launcher.write_text(LAUNCHER_SOURCE, encoding='utf-8')
     launcher.chmod(0o600)
@@ -239,20 +261,33 @@ def install(state, *, run_command=subprocess.run, python=None):
 
 
 def uninstall(state, *, run_command=subprocess.run):
-    """Stop and remove the user service, the launcher and the pointer."""
+    """Stop and remove the user service, the launcher and the pointer.
+
+    The files are removed even when the service manager cannot be reached
+    (a sandbox refusing launchctl or systemctl), so nothing is left that
+    makes the service look installed.
+    """
     state = Path(state).absolute()
     unit = _unit_path(state)
+
+    def attempt(argv):
+        try:
+            run_command(argv, check=False, capture_output=True)
+        except (OSError, subprocess.SubprocessError):
+            pass
     if sys.platform == 'darwin':
-        run_command(['launchctl', 'bootout', f'gui/{os.getuid()}', str(unit)], check=False, capture_output=True)
+        attempt(['launchctl', 'bootout', f'gui/{os.getuid()}', str(unit)])
     else:
-        run_command(['systemctl', '--user', 'disable', '--now', f'{name(state)}.service'], check=False,
-                    capture_output=True)
+        attempt(['systemctl', '--user', 'disable', '--now', f'{name(state)}.service'])
     removed = unit.exists()
     for path in (unit, state / LAUNCHER, state / POINTER):
-        if path.exists() or path.is_symlink():
-            path.unlink()
+        try:
+            if path.exists() or path.is_symlink():
+                path.unlink()
+        except OSError:
+            pass
     if sys.platform != 'darwin':
-        run_command(['systemctl', '--user', 'daemon-reload'], check=False, capture_output=True)
+        attempt(['systemctl', '--user', 'daemon-reload'])
     return {'installed': False, 'removed': removed}
 
 
