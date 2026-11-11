@@ -12,8 +12,10 @@ import sys
 
 import pytest
 
+from agents_over_telegram import compat
+
 ROOT = Path(__file__).resolve().parents[1]
-AOT = Path(sys.executable).parent / 'aot'
+AOT = compat.own_aot()
 HARNESS = ROOT / 'scripts' / 'e2e_fake.py'
 
 

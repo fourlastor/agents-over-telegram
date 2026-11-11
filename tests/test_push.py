@@ -7,6 +7,7 @@ import sqlite3
 
 import pytest
 
+from agents_over_telegram import compat
 from agents_over_telegram import push
 from agents_over_telegram.core import Core, CoreError
 from agents_over_telegram.credentials import CredentialError
@@ -280,7 +281,7 @@ def test_notice_text_never_includes_more_than_counts_and_labels():
 def test_notice_names_this_runtimes_shell_fallback():
     import sys
     from pathlib import Path
-    executable = Path(sys.executable).absolute().parent / 'aot'
+    executable = compat.own_aot()
     plain = push.notice_text(1, 1, [])
     # Codex, Pi and Amp load their tools from project configuration: no fallback.
     assert 'tool messages_poll' not in plain

@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from agents_over_telegram import compat
 from agents_over_telegram import cli
 from agents_over_telegram.credentials import read_private_json, write_private_json
 from agents_over_telegram.hosts import RUNTIME_POINTER, read_runtime_pointer, runtime_pointer
@@ -21,7 +22,7 @@ from conftest import posix_only
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / 'scripts' / 'aot_host_launch.py'
 SYSTEM_PYTHON = '/usr/bin/python3'
-RUNTIME = Path(sys.executable).absolute().parent / 'aot'
+RUNTIME = compat.own_aot()
 HOSTS = ['codex', 'claude', 'pi', 'amp']
 
 
@@ -1015,12 +1016,13 @@ def test_setup_from_a_newer_runtime_moves_a_paired_project_to_it(tmp_path, monke
     project = Path(result['project_dir'])
     newer = tmp_path / 'newer' / 'bin'
     newer.mkdir(parents=True)
-    (newer / 'aot').write_text('#!/bin/sh\n', encoding='utf-8', newline='\n')
-    os.chmod(newer / 'aot', 0o700)
+    aot = newer / compat.executable_name('aot')
+    aot.write_text('#!/bin/sh\n', encoding='utf-8', newline='\n')
+    os.chmod(aot, 0o700)
     monkeypatch.setattr(sys, 'executable', str(newer / 'python'))
     again = invoke('--state-dir', tmp_path / 'state', '--fake', 'setup', '--label', 'Alpha',
                    '--project-dir', project, '--prepare-only', '--host', 'claude')
-    assert read_runtime_pointer(project) == newer / 'aot'
+    assert read_runtime_pointer(project) == aot
     assert again['connected'] and 'pairing_command' not in again
     assert again['client_id'] == result['client_id']
 

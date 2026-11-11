@@ -10,6 +10,7 @@ import tomllib
 
 import pytest
 
+from agents_over_telegram import compat
 from agents_over_telegram import cli
 from agents_over_telegram.core import Core
 from agents_over_telegram.credentials import CredentialError, read_private_json, write_private_json
@@ -85,7 +86,7 @@ def test_two_projects_share_bot_but_have_distinct_identity_and_fake_mcp_flags(tm
     for result in (alpha, beta):
         entry = tomllib.loads(Path(result['config_file']).read_text(encoding='utf-8'))['mcp_servers']['telegram']
         assert entry['args'] == ['--state-dir', result['state_dir'], '--fake', 'mcp', '--client-file', result['client_file']]
-        assert entry['command'] == str(Path(sys.executable).absolute().parent / 'aot')
+        assert entry['command'] == str(compat.own_aot())
     with sqlite3.connect(Path(alpha['state_dir']) / 'state.sqlite3') as db:
         assert db.execute('select count(*) from account').fetchone()[0] == 1
 
