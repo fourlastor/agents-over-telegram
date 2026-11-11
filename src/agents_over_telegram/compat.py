@@ -132,3 +132,9 @@ def refuse_link(path):
     """
     if WINDOWS and os.path.islink(path):
         raise OSError('symlink refused')
+
+
+def own_aot():
+    """This runtime's aot executable: next to its Python, aot.exe on Windows."""
+    import sys
+    return Path(sys.executable).absolute().parent / executable_name('aot')

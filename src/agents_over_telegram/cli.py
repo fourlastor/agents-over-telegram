@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 
+from . import compat
 from .credentials import CredentialError, private_directory, read_private_json, validate_token, write_private_json
 from .transport import FakeTransport, TelegramTransport, TransportError, make_transport
 
@@ -126,7 +127,7 @@ def render_plugin(state_dir, client_file, output, name):
         elif src.is_file():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
-    executable = str(Path(sys.executable).parent / "aot")
+    executable = str(compat.own_aot())
     entry = {"type": "stdio", "command": executable,
              "args": ["--state-dir", str(state_dir), "mcp", "--client-file", str(Path(client_file).absolute())]}
     (output / ".mcp.json").write_text(json.dumps({"mcpServers": {"telegram": entry}}, indent=2) + "\n", encoding='utf-8')

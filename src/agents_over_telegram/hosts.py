@@ -38,7 +38,7 @@ def runtime_moved(project: Path) -> bool:
     pointer = read_runtime_pointer(project)
     if pointer is None:
         return False
-    own = Path(sys.executable).absolute().parent / 'aot'
+    own = compat.own_aot()
     return os.path.realpath(pointer) != os.path.realpath(own)
 
 

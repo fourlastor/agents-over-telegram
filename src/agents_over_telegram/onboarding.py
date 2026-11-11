@@ -130,7 +130,7 @@ def _entry(state, client, fake):
     if fake:
         args.append('--fake')
     args += ['mcp', '--client-file', str(client)]
-    return {'command': str(Path(sys.executable).absolute().parent / 'aot'), 'args': args}
+    return {'command': str(compat.own_aot()), 'args': args}
 
 
 # The tools that handle pushed Telegram work: read the inbox, reply in the bound

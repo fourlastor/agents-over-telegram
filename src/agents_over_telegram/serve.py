@@ -101,7 +101,7 @@ while os.path.exists(pointer):
 
 
 def own_executable():
-    return Path(sys.executable).absolute().parent / compat.executable_name('aot')
+    return compat.own_aot()
 
 
 def _task_name(state):
