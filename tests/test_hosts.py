@@ -938,7 +938,7 @@ def alive(pid):
 
 
 @needs_system_python
-@pytest.mark.parametrize('signum', [signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize('signum', [signal.SIGTERM, getattr(signal, 'SIGHUP', signal.SIGTERM)])
 def test_relay_stops_the_runtime_when_the_host_stops_it(tmp_path, signum):
     project, session, _ = relay_project(tmp_path)
     session.send(2, 'hang')

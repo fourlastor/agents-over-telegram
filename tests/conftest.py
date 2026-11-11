@@ -1,4 +1,15 @@
+import os
+
 import pytest
+
+# The Codex desktop integrations (the desktop listener, the app-server client,
+# the shared-backend wrapper and the relay watcher) drive Unix processes,
+# sockets and signals and are not supported on Windows.
+collect_ignore = ([
+    'test_appserver_client.py', 'test_desktop_dispatcher.py', 'test_dispatcher.py',
+    'test_macos_desktop_queue.py', 'test_native_desktop_queue.py', 'test_relay_watch.py',
+    'test_shared_backend_wrapper.py',
+] if os.name == 'nt' else [])
 
 from agents_over_telegram import onboarding as _onboarding
 from agents_over_telegram import serve as _serve
