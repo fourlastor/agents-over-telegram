@@ -125,10 +125,10 @@ def test_another_users_socket_path_is_never_replaced(env):
     core, transport, clock = env
     path = relay_api.socket_path(core.state_dir)
     path.parent.mkdir(mode=0o700)
-    path.write_text('not a socket')
+    path.write_text('not a socket', encoding='utf-8', newline='\n')
     with pytest.raises(OSError):
         relay_api.Relay(core, core.state_dir).start()
-    assert path.read_text() == 'not a socket'
+    assert path.read_text(encoding='utf-8') == 'not a socket'
 
 
 def test_serve_answers_agents_while_it_collects(env, monkeypatch):

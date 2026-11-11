@@ -14,6 +14,7 @@ from agents_over_telegram.credentials import CredentialError
 from agents_over_telegram.judge import DecisionJudge, JudgeUnavailable
 from agents_over_telegram.push import claim_new, ensure_tables
 from test_core import append, bind, env, rows  # noqa: F401 (env is a fixture)
+from conftest import posix_only
 
 
 class FakeJudge:
@@ -227,13 +228,14 @@ def test_a_full_queue_keeps_the_message_as_context(judged, monkeypatch):
 
 # The configuration file.
 
+@posix_only
 def test_the_config_is_stored_privately_and_the_key_never_reported(tmp_path):
     state = tmp_path / 'state'
     assert judge_module.config_status(state) == {'configured': False}
     judge_module.store_config(state, 'https://api.typesafe.ai/v1/systemone', 'jev-latest', ' tk-secret \n')
     path = judge_module.judge_path(state)
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
-    assert json.loads(path.read_text())['api_key'] == 'tk-secret'
+    assert json.loads(path.read_text(encoding='utf-8'))['api_key'] == 'tk-secret'
     assert judge_module.config_status(state) == {
         'configured': True, 'endpoint': 'https://api.typesafe.ai/v1/systemone', 'model': 'jev-latest',
         'key': True, 'threshold': 0.5}
@@ -260,6 +262,7 @@ def test_unsafe_or_invalid_settings_are_refused(tmp_path, endpoint, model, key, 
         judge_module.store_config(tmp_path / 'state', endpoint, model, key, threshold)
 
 
+@posix_only
 def test_a_config_file_others_can_read_is_ignored(tmp_path):
     state = tmp_path / 'state'
     judge_module.store_config(state, 'https://judge.example/', 'clef', 'tk-secret')
@@ -401,7 +404,7 @@ def test_turning_the_judge_on_without_a_terminal_asks_the_owner(env, monkeypatch
     core, transport, clock = env
     client, credentials = bind(core, transport)
     client_file = core.state_dir / 'client.json'
-    client_file.write_text(json.dumps(credentials))
+    client_file.write_text(json.dumps(credentials), encoding='utf-8', newline='\n')
     client_file.chmod(0o600)
     args = parser().parse_args(['--state-dir', str(core.state_dir), '--fake', 'delivery-settings',
                                 '--client-file', str(client_file), '--model-judge', 'on'])

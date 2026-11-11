@@ -121,7 +121,7 @@ def test_install_and_uninstall_a_systemd_user_service(home):
     service = serve.name(home)
     unit = home.parent / 'home' / '.config' / 'systemd' / 'user' / f'{service}.service'
     assert result['unit'] == str(unit) and result['service'] == service
-    text = unit.read_text()
+    text = unit.read_text(encoding='utf-8')
     assert f'ExecStart="/usr/bin/python3" "{home / serve.LAUNCHER}"' in text and 'Restart=always' in text
     assert serve.pointer(home) == serve.own_executable()
     if os.name != 'nt':
@@ -153,12 +153,12 @@ def test_the_launcher_runs_the_recorded_executable(tmp_path):
     state.mkdir(mode=0o700)
     fake = tmp_path / 'aot'
     out = tmp_path / 'argv.json'
-    fake.write_text(f'#!{sys.executable}\nimport json, sys\nopen({str(out)!r}, "w").write(json.dumps(sys.argv[1:]))\n')
+    fake.write_text(f'#!{sys.executable}\nimport json, sys\nopen({str(out)!r}, "w").write(json.dumps(sys.argv[1:]))\n', encoding='utf-8', newline='\n')
     fake.chmod(0o700)
-    (state / serve.LAUNCHER).write_text(serve.LAUNCHER_SOURCE)
+    (state / serve.LAUNCHER).write_text(serve.LAUNCHER_SOURCE, encoding='utf-8', newline='\n')
     write_private_json(state / serve.POINTER, {'version': 1, 'executable': str(fake)})
     subprocess.run([sys.executable, str(state / serve.LAUNCHER)], check=True, timeout=30)
-    assert json.loads(out.read_text()) == ['--state-dir', str(state), 'serve']
+    assert json.loads(out.read_text(encoding='utf-8')) == ['--state-dir', str(state), 'serve']
 
 
 def test_the_cli_reports_status(env):
@@ -187,7 +187,7 @@ def test_status_needs_a_unit_that_starts_this_launcher(home):
     assert serve.status(home)['installed'] is False
     unit = Path(serve.status(home)['unit'])
     unit.parent.mkdir(parents=True)
-    unit.write_text('ExecStart=/usr/bin/python3 /elsewhere/serve_launch.py')
+    unit.write_text('ExecStart=/usr/bin/python3 /elsewhere/serve_launch.py', encoding='utf-8', newline='\n')
     assert serve.status(home)['installed'] is False
 
 

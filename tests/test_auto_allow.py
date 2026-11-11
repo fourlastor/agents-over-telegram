@@ -174,7 +174,7 @@ def cli(env):
     core, transport, clock = env
     client, credentials = bind(core, transport)
     client_file = core.state_dir / 'client.json'
-    client_file.write_text(json.dumps(credentials))
+    client_file.write_text(json.dumps(credentials), encoding='utf-8', newline='\n')
     client_file.chmod(0o600)
 
     def call(*args):

@@ -21,13 +21,13 @@ def package(tmp_path):
     root = tmp_path / "plugin-cache"
     source = root / "src" / "agents_over_telegram"
     source.mkdir(parents=True)
-    (root / "pyproject.toml").write_text('[project]\nname = "agents-over-telegram"\nversion = "0.7.0"\n')
-    (root / "uv.lock").write_text("version = 1\n")
-    (root / "LICENSE").write_text("License fixture\n")
+    (root / "pyproject.toml").write_text('[project]\nname = "agents-over-telegram"\nversion = "0.7.0"\n', encoding='utf-8', newline='\n')
+    (root / "uv.lock").write_text("version = 1\n", encoding='utf-8', newline='\n')
+    (root / "LICENSE").write_text("License fixture\n", encoding='utf-8', newline='\n')
     (root / "requirements").mkdir()
-    (root / "requirements" / "runtime.txt").write_text("# hashed runtime requirements\n")
-    (root / "requirements" / "build.txt").write_text("# hashed build requirements\n")
-    (source / "__init__.py").write_text('__version__ = "0.7.0"\n')
+    (root / "requirements" / "runtime.txt").write_text("# hashed runtime requirements\n", encoding='utf-8', newline='\n')
+    (root / "requirements" / "build.txt").write_text("# hashed build requirements\n", encoding='utf-8', newline='\n')
+    (source / "__init__.py").write_text('__version__ = "0.7.0"\n', encoding='utf-8', newline='\n')
     return root
 
 
@@ -46,7 +46,7 @@ for name, output in (("aot", "usage: aot setup relay-desktop"), ("python", "0.7.
     path = binary / name
     path.write_text("#!{sys.executable}\\nprint(" + repr(output) + ")\\n")
     path.chmod(0o700)
-''')
+''', encoding='utf-8', newline='\n')
     executable.chmod(0o700)
     return executable
 
@@ -63,7 +63,7 @@ def test_install_isolated_and_stable_after_plugin_cache_removal(tmp_path, packag
     assert result["status"] == "ready" and result["version"] == "0.7.0"
     assert result["reused"] is False
     runtime = Path(result["runtime_dir"])
-    observation = json.loads((runtime / "uv-observation.json").read_text())
+    observation = json.loads((runtime / "uv-observation.json").read_text(encoding='utf-8'))
     args, env = observation["args"], observation["env"]
     for flag in ("--frozen", "--no-dev", "--no-default-groups", "--no-editable", "--offline", "--no-config", "--no-python-downloads", "--no-managed-python"):
         assert flag in args
@@ -90,7 +90,7 @@ def test_identical_repeat_reuses_without_uv(tmp_path, package, fake_uv):
 
 def test_new_source_preserves_old_runtime(tmp_path, package, fake_uv):
     first = bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
-    (package / "src" / "agents_over_telegram" / "new.py").write_text("VALUE = 1\n")
+    (package / "src" / "agents_over_telegram" / "new.py").write_text("VALUE = 1\n", encoding='utf-8', newline='\n')
     second = bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
     assert first["runtime_dir"] != second["runtime_dir"]
     assert Path(first["executable"]).is_file() and Path(second["executable"]).is_file()
@@ -99,10 +99,10 @@ def test_new_source_preserves_old_runtime(tmp_path, package, fake_uv):
 def test_only_allowlisted_files_are_copied(tmp_path, package, fake_uv):
     source = package / "src" / "agents_over_telegram"
     (source / "__pycache__").mkdir()
-    (source / "__pycache__" / "cache.py").write_text("PRIVATE")
-    (source / "tokens.json").write_text("PRIVATE")
-    (package / ".env").write_text("PRIVATE")
-    (package / "state.sqlite").write_text("PRIVATE")
+    (source / "__pycache__" / "cache.py").write_text("PRIVATE", encoding='utf-8', newline='\n')
+    (source / "tokens.json").write_text("PRIVATE", encoding='utf-8', newline='\n')
+    (package / ".env").write_text("PRIVATE", encoding='utf-8', newline='\n')
+    (package / "state.sqlite").write_text("PRIVATE", encoding='utf-8', newline='\n')
     result = bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
     runtime = Path(result["runtime_dir"])
     assert not (runtime / ".env").exists()
@@ -150,13 +150,13 @@ def test_explicit_missing_uv_is_actionable_without_fallback(tmp_path, package):
 
 
 def test_failed_install_can_resume_same_directory(tmp_path, package, fake_uv):
-    original = fake_uv.read_text()
-    fake_uv.write_text(f"#!{sys.executable}\nraise SystemExit(1)\n")
+    original = fake_uv.read_text(encoding='utf-8')
+    fake_uv.write_text(f"#!{sys.executable}\nraise SystemExit(1)\n", encoding='utf-8', newline='\n')
     with pytest.raises(bootstrap.BootstrapError, match="installation failed"):
         bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
     runtimes = [path for path in (tmp_path / "runtimes").iterdir() if path.is_dir()]
     assert len(runtimes) == 1 and not (runtimes[0] / ".ready.json").exists()
-    fake_uv.write_text(original)
+    fake_uv.write_text(original, encoding='utf-8', newline='\n')
     result = bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
     assert result["runtime_dir"] == str(runtimes[0]) and result["reused"] is False
 
@@ -175,15 +175,15 @@ def test_partial_copy_is_replaced_on_resume(tmp_path):
 def test_source_mismatch_preserves_existing_runtime(tmp_path, package, fake_uv):
     result = bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
     lock = Path(result["runtime_dir"]) / "uv.lock"
-    lock.write_text("changed")
+    lock.write_text("changed", encoding='utf-8', newline='\n')
     with pytest.raises(bootstrap.BootstrapError, match="differs"):
         bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
-    assert lock.read_text() == "changed" and Path(result["executable"]).exists()
+    assert lock.read_text(encoding='utf-8') == "changed" and Path(result["executable"]).exists()
 
 
 def test_invalid_receipt_is_not_trusted(tmp_path, package, fake_uv):
     result = bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
-    (Path(result["runtime_dir"]) / ".ready.json").write_text('{}')
+    (Path(result["runtime_dir"]) / ".ready.json").write_text('{}', encoding='utf-8', newline='\n')
     with pytest.raises(bootstrap.BootstrapError, match="receipt is invalid"):
         bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
 
@@ -198,14 +198,14 @@ def test_symlink_receipt_is_not_read(tmp_path, package, fake_uv):
 
 
 def test_runtime_validation_failure_does_not_write_receipt(tmp_path, package, fake_uv):
-    fake_uv.write_text(fake_uv.read_text().replace('(\"python\", \"0.7.0\")', '(\"python\", \"wrong\")'))
+    fake_uv.write_text(fake_uv.read_text(encoding='utf-8').replace('(\"python\", \"0.7.0\")', '(\"python\", \"wrong\")'), encoding='utf-8', newline='\n')
     with pytest.raises(bootstrap.BootstrapError, match="failed validation"):
         bootstrap.bootstrap(package, tmp_path / "runtimes", environ=environment(fake_uv))
     assert not list((tmp_path / "runtimes").rglob(".ready.json"))
 
 
 def test_install_output_never_appears_in_errors(tmp_path, package, fake_uv):
-    fake_uv.write_text(f'#!{sys.executable}\nimport sys\nprint("DO_NOT_ECHO", file=sys.stderr)\nraise SystemExit(1)\n')
+    fake_uv.write_text(f'#!{sys.executable}\nimport sys\nprint("DO_NOT_ECHO", file=sys.stderr)\nraise SystemExit(1)\n', encoding='utf-8', newline='\n')
     with pytest.raises(bootstrap.BootstrapError) as exc:
         bootstrap.bootstrap(package, tmp_path / "runtimes", offline=True, environ=environment(fake_uv))
     assert "DO_NOT_ECHO" not in str(exc.value)
@@ -238,12 +238,12 @@ def test_install_lock_blocks_other_installer_with_bounded_wait(tmp_path, monkeyp
 
 def test_lock_link_is_rejected(tmp_path):
     target = tmp_path / "target"
-    target.write_text("untouched")
+    target.write_text("untouched", encoding='utf-8', newline='\n')
     (tmp_path / ".test.lock").symlink_to(target)
     with pytest.raises(bootstrap.BootstrapError, match="install lock"):
         with bootstrap.install_lock(tmp_path, "test"):
             pytest.fail("must not follow a lock link")
-    assert target.read_text() == "untouched"
+    assert target.read_text(encoding='utf-8') == "untouched"
 
 
 def test_default_directory_uses_xdg_and_rejects_relative(tmp_path):
@@ -286,10 +286,10 @@ def fake_pip(monkeypatch):
             binary = cwd / ".venv" / "bin"
             binary.mkdir(parents=True, mode=0o700)
             binary.parent.chmod(0o700)
-            (binary / "python").write_text("fake Python for mocked subprocess")
+            (binary / "python").write_text("fake Python for mocked subprocess", encoding='utf-8', newline='\n')
         elif "pip" in command and "install" in command and "--no-build-isolation" in command:
             executable = cwd / ".venv" / "bin" / "aot"
-            executable.write_text("fake CLI for mocked subprocess")
+            executable.write_text("fake CLI for mocked subprocess", encoding='utf-8', newline='\n')
             executable.chmod(0o700)
         elif "-c" in command:
             return "0.7.0\n"
@@ -404,7 +404,7 @@ def test_pip_runtime_reuse_does_not_need_wheelhouse_or_installers(tmp_path, pack
 
 def test_requirement_lock_change_gets_new_runtime_address(package):
     before, _ = bootstrap.snapshot_source(package)
-    (package / "requirements" / "runtime.txt").write_text("changed locked dependency hashes\n")
+    (package / "requirements" / "runtime.txt").write_text("changed locked dependency hashes\n", encoding='utf-8', newline='\n')
     after, _ = bootstrap.snapshot_source(package)
     assert bootstrap.content_address(before) != bootstrap.content_address(after)
     assert "requirements/build.txt" in before and "requirements/runtime.txt" in before
@@ -433,6 +433,6 @@ def test_invalid_wheelhouse_rejected_before_installer(tmp_path, package, fake_pi
 def test_license_is_snapshotted_and_changes_runtime_address(package):
     before, _ = bootstrap.snapshot_source(package)
     assert before["LICENSE"] == (package / "LICENSE").read_bytes()
-    (package / "LICENSE").write_text("Updated license fixture\n")
+    (package / "LICENSE").write_text("Updated license fixture\n", encoding='utf-8', newline='\n')
     after, _ = bootstrap.snapshot_source(package)
     assert bootstrap.content_address(before) != bootstrap.content_address(after)

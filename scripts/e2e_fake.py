@@ -31,7 +31,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-AOT = ROOT / ".venv" / "bin" / "aot"
+AOT = ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("aot.exe" if os.name == "nt" else "aot")
 CHAT_ID, THREAD_ID, OWNER_ID = -100777, 42, 4242
 
 
@@ -86,7 +86,7 @@ def sent(root: Path) -> list:
     path = _fake(root / "state")
     if not path.exists():
         return []
-    return json.loads(path.read_text()).get("sent", [])
+    return json.loads(path.read_text(encoding='utf-8')).get("sent", [])
 
 
 def inbox(root: Path) -> dict:

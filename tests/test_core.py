@@ -10,6 +10,7 @@ import pytest
 
 from agents_over_telegram.core import Core, CoreError
 from agents_over_telegram.transport import FakeTransport, TransportError, UnknownSend
+from conftest import posix_only
 
 
 class Clock:
@@ -83,6 +84,7 @@ def rows(core, sql, args=()):
         return db.execute(sql, args).fetchall()
 
 
+@posix_only
 def test_account_once_many_clients_private_hashes(env):
     core, transport, clock = env
     a, credential_a = bind(core, transport)
@@ -656,6 +658,7 @@ def test_image_caption_limit_covers_the_whole_publication(env, tmp_path):
     assert len(transport.sent[0]['caption']) == 1024
 
 
+@posix_only
 def test_image_retry_uses_stored_copy_and_deletes_it_when_sent(env, tmp_path):
     core, transport, clock = env
     a, _ = bind(core, transport)
@@ -760,6 +763,7 @@ def test_image_send_to_authorized_peer_publishes_photo_with_caption_only_deliver
     assert delivery['publication']['status'] == 'sent'
 
 
+@posix_only
 def test_image_read_survives_a_fifo_swapped_in_after_stat(env, tmp_path, monkeypatch):
     core, transport, clock = env
     a, _ = bind(core, transport)
@@ -1002,6 +1006,7 @@ def test_replies_must_belong_to_destination_and_inherit_conversation(env):
     assert core.poll(a)['deliveries'][0]['conversation_id'] == result['conversation_id']
 
 
+@posix_only
 def test_invalid_state_permissions_and_symlink_rejected(tmp_path):
     insecure = tmp_path / 'insecure'
     insecure.mkdir(mode=0o755)

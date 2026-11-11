@@ -129,7 +129,7 @@ def mac_adapter(tmp_path, monkeypatch):
     main = contents / 'MacOS/ChatGPT'
     for path in (binary, main):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('#!/bin/sh\nexit 99\n')
+        path.write_text('#!/bin/sh\nexit 99\n', encoding='utf-8', newline='\n')
         path.chmod(0o700)
     (contents / 'Info.plist').write_bytes(plistlib.dumps(
         {'CFBundleIdentifier': 'com.openai.codex', 'CFBundleExecutable': 'ChatGPT'}))
@@ -249,7 +249,7 @@ def test_mac_registered_wrapper_alias_is_accepted_only_inside_selected_app(mac_a
 def test_mac_short_bundle_layout_supported(mac_adapter):
     q, _, _ = mac_adapter
     binary = q.bundle / 'Contents/Resources/codex'
-    binary.write_text('#!/bin/sh\nexit 99\n')
+    binary.write_text('#!/bin/sh\nexit 99\n', encoding='utf-8', newline='\n')
     binary.chmod(0o700)
     fresh = desktop.NativeDesktopQueue(binary, q.home)
     assert fresh.bundle == q.bundle and fresh.desktop == q.desktop

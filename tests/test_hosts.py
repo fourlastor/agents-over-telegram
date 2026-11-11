@@ -76,7 +76,7 @@ def isolated_cwd(tmp_path, monkeypatch):
 # ------------------------------------------------------------ setup --host
 
 def secret_free_json_has_telegram(path, host):
-    value = json.loads(path.read_text())
+    value = json.loads(path.read_text(encoding='utf-8'))
     servers = value['mcpServers' if host == 'pi' else 'amp.mcpServers']
     return servers['telegram']['args'][-2] == '--client-file' and path.stat().st_mode & 0o077 == 0
 
@@ -89,14 +89,14 @@ def test_setup_host_writes_private_runtime_pointer(tmp_path, host):
     pointer = project / RUNTIME_POINTER
     assert result['host'] == host
     assert result['runtime_pointer'] == str(pointer)
-    assert json.loads(pointer.read_text()) == {'version': 1, 'executable': str(RUNTIME)}
-    assert pointer.read_text() == runtime_pointer(RUNTIME)
+    assert json.loads(pointer.read_text(encoding='utf-8')) == {'version': 1, 'executable': str(RUNTIME)}
+    assert pointer.read_text(encoding='utf-8') == runtime_pointer(RUNTIME)
     assert pointer.stat().st_mode & 0o077 == 0
     assert read_runtime_pointer(project) == RUNTIME
     codex_config = project / '.codex' / 'config.toml'
     if host == 'codex':
         assert result['config_file'] == str(codex_config)
-        assert '[mcp_servers.telegram]' in codex_config.read_text()
+        assert '[mcp_servers.telegram]' in codex_config.read_text(encoding='utf-8')
     else:
         assert not (project / '.codex').exists()
         expected = {'claude': None, 'pi': project / '.pi' / 'mcp.json',
@@ -105,7 +105,7 @@ def test_setup_host_writes_private_runtime_pointer(tmp_path, host):
         if expected is not None:
             assert secret_free_json_has_telegram(expected, host)
     secret = read_private_json(Path(result['client_file']))['client_secret']
-    assert secret not in pointer.read_text()
+    assert secret not in pointer.read_text(encoding='utf-8')
     # Rerunning setup is idempotent and keeps the same identity and files.
     before = {p: p.read_bytes() for p in project.rglob('*') if p.is_file()}
     again = prepare(tmp_path, host)
@@ -126,7 +126,7 @@ def test_setup_host_next_step_matches_host(tmp_path, host, marker):
 def test_setup_host_replaces_group_writable_pointer_and_refuses_world_writable(tmp_path):
     result = prepare(tmp_path, 'claude')
     pointer = Path(result['project_dir']) / RUNTIME_POINTER
-    pointer.write_text(json.dumps({'version': 1, 'executable': '/elsewhere/aot'}))
+    pointer.write_text(json.dumps({'version': 1, 'executable': '/elsewhere/aot'}), encoding='utf-8', newline='\n')
     os.chmod(pointer, 0o660)
     assert read_runtime_pointer(Path(result['project_dir'])) is None
     prepare(tmp_path, 'claude')
@@ -147,7 +147,7 @@ def test_setup_host_replaces_group_writable_pointer_and_refuses_world_writable(t
     [1, 2],
 ])
 def test_read_runtime_pointer_rejects_malformed_content(tmp_path, content):
-    (tmp_path / RUNTIME_POINTER).write_text(json.dumps(content))
+    (tmp_path / RUNTIME_POINTER).write_text(json.dumps(content), encoding='utf-8', newline='\n')
     os.chmod(tmp_path / RUNTIME_POINTER, 0o600)
     assert read_runtime_pointer(tmp_path) is None
 
@@ -155,7 +155,7 @@ def test_read_runtime_pointer_rejects_malformed_content(tmp_path, content):
 def test_read_runtime_pointer_rejects_symlinks_and_missing(tmp_path):
     assert read_runtime_pointer(tmp_path) is None
     target = tmp_path / 'target.json'
-    target.write_text(runtime_pointer(RUNTIME))
+    target.write_text(runtime_pointer(RUNTIME), encoding='utf-8', newline='\n')
     os.chmod(target, 0o600)
     (tmp_path / RUNTIME_POINTER).symlink_to(target)
     assert read_runtime_pointer(tmp_path) is None
@@ -360,7 +360,7 @@ def write_pointer(project, content, mode=0o600):
     path = Path(project) / RUNTIME_POINTER
     if path.exists() or path.is_symlink():
         path.unlink()
-    path.write_text(content if isinstance(content, str) else json.dumps(content))
+    path.write_text(content if isinstance(content, str) else json.dumps(content), encoding='utf-8', newline='\n')
     os.chmod(path, mode)
     return path
 
@@ -369,7 +369,7 @@ def stub_runtime(tmp_path, mode=0o700):
     """An executable that records its arguments and working folder."""
     path = tmp_path / 'bin' / 'aot-stub'
     path.parent.mkdir(exist_ok=True)
-    path.write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$@"\n')
+    path.write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$@"\n', encoding='utf-8', newline='\n')
     os.chmod(path, mode)
     return path
 
@@ -495,7 +495,7 @@ def test_launcher_exec_failure_messages(tmp_path):
     project = Path(result['project_dir'])
     broken = tmp_path / 'bin' / 'broken'
     broken.parent.mkdir()
-    broken.write_text('#!/nonexistent/interpreter\n')
+    broken.write_text('#!/nonexistent/interpreter\n', encoding='utf-8', newline='\n')
     os.chmod(broken, 0o700)
     write_pointer(project, {'version': 1, 'executable': str(broken)})
     mcp = launch(project, 'mcp')
@@ -534,9 +534,9 @@ def test_rendered_codex_plugin_has_no_dangling_hooks(tmp_path):
     result = connected(tmp_path, 'codex')
     output = tmp_path / 'rendered'
     cli.render_plugin(result['state_dir'], result['client_file'], output, 'aot-rendered')
-    manifest = json.loads((output / '.codex-plugin' / 'plugin.json').read_text())
+    manifest = json.loads((output / '.codex-plugin' / 'plugin.json').read_text(encoding='utf-8'))
     assert 'hooks' not in manifest
-    assert json.loads((ROOT / '.codex-plugin' / 'plugin.json').read_text())['hooks'] == './codex/hooks.json'
+    assert json.loads((ROOT / '.codex-plugin' / 'plugin.json').read_text(encoding='utf-8'))['hooks'] == './codex/hooks.json'
 
 
 # ----------------------------------------------------------------- aot wake
@@ -680,7 +680,7 @@ def test_wake_is_silent_in_unconfigured_folders_and_on_bad_arguments(tmp_path):
 def wake_stub(tmp_path, body):
     path = tmp_path / 'bin' / 'aot-wake-stub'
     path.parent.mkdir(exist_ok=True)
-    path.write_text('#!/bin/sh\n' + body)
+    path.write_text('#!/bin/sh\n' + body, encoding='utf-8', newline='\n')
     os.chmod(path, 0o700)
     return path
 
@@ -760,7 +760,7 @@ def test_waiting_waiter_keeps_waiting_until_replaced(tmp_path):
             time.sleep(2.0)
             assert waiting.poll() is None
             # A newer owner replaces the waiting one, which then exits quietly.
-            (locks / f'{key}.owner').write_text('newer')
+            (locks / f'{key}.owner').write_text('newer', encoding='utf-8', newline='\n')
             out, err = waiting.communicate(timeout=10)
             assert (waiting.returncode, out, err) == (0, '', '')
         finally:
@@ -807,7 +807,7 @@ def fake_mcp_runtime(tmp_path, version):
     path = tmp_path / 'bin' / ('aot-' + version)
     path.parent.mkdir(exist_ok=True)
     path.write_text(FAKE_MCP.format(python=sys.executable, log=str(tmp_path / 'mcp.log'),
-                                    pids=str(tmp_path / 'pids'), version=version))
+                                    pids=str(tmp_path / 'pids'), version=version), encoding='utf-8', newline='\n')
     os.chmod(path, 0o700)
     return path
 
@@ -852,7 +852,7 @@ class RelaySession:
 
 
 def relay_log(tmp_path):
-    return [json.loads(line) for line in (tmp_path / 'mcp.log').read_text().splitlines()]
+    return [json.loads(line) for line in (tmp_path / 'mcp.log').read_text(encoding='utf-8').splitlines()]
 
 
 def relay_project(tmp_path):
@@ -940,7 +940,7 @@ def alive(pid):
         return False
     # A zombie still answers kill(0); it is gone once its parent reaped it.
     try:
-        return Path(f'/proc/{pid}/stat').read_text().split()[2] != 'Z'
+        return Path(f'/proc/{pid}/stat').read_text(encoding='utf-8').split()[2] != 'Z'
     except OSError:
         return False
 
@@ -951,7 +951,7 @@ def test_relay_stops_the_runtime_when_the_host_stops_it(tmp_path, signum):
     project, session, _ = relay_project(tmp_path)
     session.send(2, 'hang')
     time.sleep(0.3)
-    [pid] = [int(line) for line in (tmp_path / 'pids').read_text().split()]
+    [pid] = [int(line) for line in (tmp_path / 'pids').read_text(encoding='utf-8').split()]
     session.process.send_signal(signum)
     assert session.process.wait(timeout=10) == 128 + signum
     deadline = time.monotonic() + 10
@@ -1015,7 +1015,7 @@ def test_setup_from_a_newer_runtime_moves_a_paired_project_to_it(tmp_path, monke
     project = Path(result['project_dir'])
     newer = tmp_path / 'newer' / 'bin'
     newer.mkdir(parents=True)
-    (newer / 'aot').write_text('#!/bin/sh\n')
+    (newer / 'aot').write_text('#!/bin/sh\n', encoding='utf-8', newline='\n')
     os.chmod(newer / 'aot', 0o700)
     monkeypatch.setattr(sys, 'executable', str(newer / 'python'))
     again = invoke('--state-dir', tmp_path / 'state', '--fake', 'setup', '--label', 'Alpha',
@@ -1062,7 +1062,7 @@ def test_idle_monitor_starts_watching_once_the_folder_is_set_up(tmp_path):
         time.sleep(1.0)
         assert process.poll() is None
         profile = plain / '.aot-profile.json'
-        profile.write_text('{}')
+        profile.write_text('{}', encoding='utf-8', newline='\n')
         os.chmod(profile, 0o600)
         write_pointer(plain, {'version': 1, 'executable': str(stub_runtime(tmp_path))})
         out, err = process.communicate(timeout=20)
@@ -1074,7 +1074,7 @@ def test_idle_monitor_starts_watching_once_the_folder_is_set_up(tmp_path):
 
 
 def relay_starts(tmp_path):
-    return len((tmp_path / 'pids').read_text().split())
+    return len((tmp_path / 'pids').read_text(encoding='utf-8').split())
 
 
 def notices_until(session, seconds):
@@ -1243,7 +1243,7 @@ def moving_stub(tmp_path, project, name, then):
     path.write_text('#!/bin/sh\n[ "$AOT_FOLLOW_RUNTIME" = 1 ] || exit 1\n'
                     f'rm -f "{pointer}"\n'
                     f'printf \'{{"version": 1, "executable": "%s"}}\' "{then}" > "{pointer}"\n'
-                    f'chmod 600 "{pointer}"\nexit 3\n')
+                    f'chmod 600 "{pointer}"\nexit 3\n', encoding='utf-8', newline='\n')
     os.chmod(path, 0o700)
     return path
 

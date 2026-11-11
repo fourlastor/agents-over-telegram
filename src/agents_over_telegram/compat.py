@@ -51,6 +51,7 @@ def lock(fd, *, blocking=False):
     POSIX uses flock. Windows locks the file's first byte with msvcrt, which
     works past the end of an empty file and is released when the file closes.
     """
+    fd = fd.fileno() if hasattr(fd, 'fileno') else fd
     if WINDOWS:
         import msvcrt
         os.lseek(fd, 0, os.SEEK_SET)
@@ -68,6 +69,7 @@ def lock(fd, *, blocking=False):
 
 
 def unlock(fd):
+    fd = fd.fileno() if hasattr(fd, 'fileno') else fd
     if WINDOWS:
         import msvcrt
         os.lseek(fd, 0, os.SEEK_SET)

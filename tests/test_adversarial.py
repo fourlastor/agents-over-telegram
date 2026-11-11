@@ -119,7 +119,7 @@ def test_private_credentials_roundtrip_and_modes(tmp_path):
 @pytest.mark.parametrize("mode", [0o604, 0o640, 0o666])
 def test_credentials_reject_group_or_other_readability(tmp_path, mode):
     path = tmp_path / "credentials.json"
-    path.write_text(json.dumps({"token": FAKE_TOKEN}))
+    path.write_text(json.dumps({"token": FAKE_TOKEN}), encoding='utf-8', newline='\n')
     path.chmod(mode)
     with pytest.raises(CredentialError) as caught:
         read_private_json(path)
@@ -128,7 +128,7 @@ def test_credentials_reject_group_or_other_readability(tmp_path, mode):
 
 def test_credentials_reject_symlink_and_hardlink(tmp_path):
     target = tmp_path / "target.json"
-    target.write_text(json.dumps({"token": FAKE_TOKEN}))
+    target.write_text(json.dumps({"token": FAKE_TOKEN}), encoding='utf-8', newline='\n')
     target.chmod(0o600)
     symlink = tmp_path / "symlink.json"
     symlink.symlink_to(target)
@@ -170,7 +170,7 @@ def test_existing_secret_is_not_overwritten_without_opt_in(tmp_path):
 
 def test_malformed_credentials_error_is_secret_safe(tmp_path):
     path = tmp_path / "credentials.json"
-    path.write_text(FAKE_TOKEN)
+    path.write_text(FAKE_TOKEN, encoding='utf-8', newline='\n')
     path.chmod(0o600)
     with pytest.raises(CredentialError) as caught:
         read_private_json(path)

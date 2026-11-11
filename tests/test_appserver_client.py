@@ -396,7 +396,7 @@ def test_unsafe_unix_paths_rejected(kind):
                 path = link / "rpc.sock"
             else:
                 path.unlink()
-                path.write_text("not a socket")
+                path.write_text("not a socket", encoding='utf-8', newline='\n')
                 path.chmod(0o600)
             with pytest.raises(AppServerError, match="unsafe_appserver_socket"):
                 AppServerConnection("unix://" + str(path)).connect()

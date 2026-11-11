@@ -184,19 +184,19 @@ def test_revoked_client_can_inspect_and_remove_relay_but_not_rebind(relay):
 def test_profile_drift_blocks_wake_without_losing_work(relay):
     profile, core, store = relay
     config = Path(profile['config_file'])
-    saved = config.read_text()
+    saved = config.read_text(encoding='utf-8')
     # Drift the server command itself. The checkout path need not contain any
     # particular name, so a replacement that might not match would test nothing.
     drifted = saved.replace('/aot"', '/wrong-runtime"')
     assert drifted != saved
-    config.write_text(drifted)
+    config.write_text(drifted, encoding='utf-8', newline='\n')
     add_update(profile)
     core.collect()
     process = launch(profile, '--once', '--duration', '.2')
     out, err = process.communicate(timeout=3)
     assert process.returncode == 0, err
     assert 'telegram_wake' not in out
-    config.write_text(saved)
+    config.write_text(saved, encoding='utf-8', newline='\n')
     process = launch(profile, '--once', '--duration', '.5')
     out, err = process.communicate(timeout=3)
     assert process.returncode == 0, err

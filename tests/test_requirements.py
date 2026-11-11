@@ -30,7 +30,7 @@ def test_export_validation_works_without_uv_or_subprocesses(package, monkeypatch
 @pytest.mark.parametrize("name", ["pyproject.toml", "uv.lock"])
 def test_source_changes_require_regenerated_exports(package, name):
     path = package / name
-    path.write_text(path.read_text() + "\n")
+    path.write_text(path.read_text(encoding='utf-8') + "\n", encoding='utf-8', newline='\n')
     with pytest.raises(ValueError, match="requirements are stale"):
         exports.validate_exports(package)
 
@@ -38,9 +38,9 @@ def test_source_changes_require_regenerated_exports(package, name):
 @pytest.mark.parametrize("kind", ["runtime", "build"])
 def test_changed_artifact_hash_is_rejected(package, kind):
     path = package / "requirements" / f"{kind}.txt"
-    contents = path.read_text()
+    contents = path.read_text(encoding='utf-8')
     start = contents.index("--hash=sha256:") + len("--hash=sha256:")
-    path.write_text(contents[:start] + "0" * 64 + contents[start + 64:])
+    path.write_text(contents[:start] + "0" * 64 + contents[start + 64:], encoding='utf-8', newline='\n')
     with pytest.raises(ValueError, match="hashes differ from the lock"):
         exports.validate_exports(package)
 
@@ -48,24 +48,24 @@ def test_changed_artifact_hash_is_rejected(package, kind):
 @pytest.mark.parametrize("replacement", ["hatchling>=1.27.0", "hatchling==1.27.0 --extra-index-url https://example.invalid"])
 def test_unpinned_or_option_bearing_requirements_are_rejected(package, replacement):
     path = package / "requirements" / "build.txt"
-    path.write_text(path.read_text().replace("hatchling==1.27.0", replacement))
+    path.write_text(path.read_text(encoding='utf-8').replace("hatchling==1.27.0", replacement), encoding='utf-8', newline='\n')
     with pytest.raises(ValueError, match="only exact pins"):
         exports.validate_exports(package)
 
 
 def test_missing_transitive_build_dependency_is_rejected(package):
     path = package / "requirements" / "build.txt"
-    contents = path.read_text()
+    contents = path.read_text(encoding='utf-8')
     start = contents.index("pathspec==")
     end = contents.index("pluggy==", start)
-    path.write_text(contents[:start] + contents[end:])
+    path.write_text(contents[:start] + contents[end:], encoding='utf-8', newline='\n')
     with pytest.raises(ValueError, match="omit or add locked dependencies"):
         exports.validate_exports(package)
 
 
 def test_build_group_cannot_drift_from_backend_requirement(package):
     path = package / "pyproject.toml"
-    path.write_text(path.read_text().replace('bootstrap-build = ["hatchling==1.27.0"]', 'bootstrap-build = ["hatchling==1.26.0"]'))
+    path.write_text(path.read_text(encoding='utf-8').replace('bootstrap-build = ["hatchling==1.27.0"]', 'bootstrap-build = ["hatchling==1.26.0"]'), encoding='utf-8', newline='\n')
     with pytest.raises(ValueError, match="must match the project build requirements"):
         exports.validate_exports(package)
 

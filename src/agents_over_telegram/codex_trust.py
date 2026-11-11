@@ -109,7 +109,7 @@ def status(home: Path | None = None) -> dict:
         return {'status': 'not_installed'}
     result = {'plugin_version': root.name}
     try:
-        config = tomllib.loads((home / 'config.toml').read_text())
+        config = tomllib.loads((home / 'config.toml').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return {**result, 'status': 'unknown', 'reason': 'codex_config_unreadable'}
     if not config.get('plugins', {}).get(PLUGIN_ID, {}).get('enabled', False):
@@ -141,7 +141,7 @@ def _legacy_baseline(home: Path) -> str | None:
         digest.update(struct.pack('<Q', len(part)))
         digest.update(part)
     try:
-        return (home / '.hook-trust' / digest.hexdigest()).read_text().strip() or None
+        return (home / '.hook-trust' / digest.hexdigest()).read_text(encoding='utf-8').strip() or None
     except OSError:
         return None
 
@@ -153,7 +153,7 @@ def codex_project_uses(client_file: Path, project: Path | None = None) -> bool:
     # Codex starts the server in the session folder, which may be below the project.
     for folder in (start, *list(start.parents)[:4]):
         try:
-            config = tomllib.loads((folder / '.codex' / 'config.toml').read_text())
+            config = tomllib.loads((folder / '.codex' / 'config.toml').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             continue
         args = config.get('mcp_servers', {}).get('telegram', {}).get('args', [])

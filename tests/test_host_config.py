@@ -31,13 +31,13 @@ def test_pi_entry_uses_direct_exposure():
 def test_unrelated_settings_and_servers_are_preserved(tmp_path, host, relative, key):
     path = tmp_path / relative
     path.parent.mkdir(mode=0o700)
-    path.write_text(json.dumps({'other.setting': True, key: {'docs': {'command': 'docs-mcp'}}}))
+    path.write_text(json.dumps({'other.setting': True, key: {'docs': {'command': 'docs-mcp'}}}), encoding='utf-8', newline='\n')
     _, current, proposed = json_config_plan(tmp_path, host, ENTRY)
     value = json.loads(proposed)
     assert value['other.setting'] is True
     assert value[key]['docs'] == {'command': 'docs-mcp'}
     assert value[key]['telegram'] == expected_entry(host, ENTRY)
-    assert current == path.read_text()
+    assert current == path.read_text(encoding='utf-8')
 
 
 @pytest.mark.parametrize('host,relative,key', [('pi', '.pi/mcp.json', 'mcpServers'),
@@ -45,10 +45,10 @@ def test_unrelated_settings_and_servers_are_preserved(tmp_path, host, relative, 
 def test_identical_entry_is_a_no_op_and_a_different_one_conflicts(tmp_path, host, relative, key):
     path = tmp_path / relative
     path.parent.mkdir(mode=0o700)
-    path.write_text(json.dumps({key: {'telegram': expected_entry(host, ENTRY)}}))
+    path.write_text(json.dumps({key: {'telegram': expected_entry(host, ENTRY)}}), encoding='utf-8', newline='\n')
     _, current, proposed = json_config_plan(tmp_path, host, ENTRY)
     assert current == proposed
-    path.write_text(json.dumps({key: {'telegram': {'command': '/elsewhere/aot', 'args': []}}}))
+    path.write_text(json.dumps({key: {'telegram': {'command': '/elsewhere/aot', 'args': []}}}), encoding='utf-8', newline='\n')
     with pytest.raises(CredentialError) as error:
         json_config_plan(tmp_path, host, ENTRY)
     assert error.value.code == 'project_mcp_config_conflict'
@@ -58,7 +58,7 @@ def test_identical_entry_is_a_no_op_and_a_different_one_conflicts(tmp_path, host
 def test_invalid_existing_file_is_refused(tmp_path, text):
     path = tmp_path / '.pi' / 'mcp.json'
     path.parent.mkdir(mode=0o700)
-    path.write_text(text)
+    path.write_text(text, encoding='utf-8', newline='\n')
     with pytest.raises(CredentialError) as error:
         json_config_plan(tmp_path, 'pi', ENTRY)
     assert error.value.code == 'invalid_project_config'

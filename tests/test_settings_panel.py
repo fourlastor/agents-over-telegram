@@ -183,7 +183,7 @@ def test_the_cli_sends_the_panel(env):
     core, transport, clock = env
     client, credentials = bind(core, transport)
     client_file = core.state_dir / 'client.json'
-    client_file.write_text(json.dumps(credentials))
+    client_file.write_text(json.dumps(credentials), encoding='utf-8', newline='\n')
     client_file.chmod(0o600)
     result = run(parser().parse_args(['--state-dir', str(core.state_dir), '--fake', 'settings-panel',
                                       '--client-file', str(client_file)]))

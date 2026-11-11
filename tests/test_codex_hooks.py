@@ -45,9 +45,9 @@ def payload(root, event, **fields):
 
 
 def test_plugin_manifest_points_at_codex_hooks():
-    manifest = json.loads((ROOT / '.codex-plugin' / 'plugin.json').read_text())
+    manifest = json.loads((ROOT / '.codex-plugin' / 'plugin.json').read_text(encoding='utf-8'))
     assert manifest['hooks'] == './codex/hooks.json'
-    hooks = json.loads((ROOT / 'codex' / 'hooks.json').read_text())['hooks']
+    hooks = json.loads((ROOT / 'codex' / 'hooks.json').read_text(encoding='utf-8'))['hooks']
     assert set(hooks) == {'SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'}
     for entries in hooks.values():
         for entry in entries:
@@ -74,10 +74,10 @@ def test_codex_hook_collection_is_rate_limited(env):
     inject(env, 'Second message')
     # The last attempt was just now, so this hook does not contact Telegram again.
     assert hook(env, payload(env, 'PostToolUse', tool_name='shell'), '--collect-interval', '10') is None
-    fake = json.loads((env / 'state' / 'fake-transport.json').read_text())
+    fake = json.loads((env / 'state' / 'fake-transport.json').read_text(encoding='utf-8'))
     polls_before = len(fake['poll_offsets'])
     hook(env, payload(env, 'PostToolUse', tool_name='shell'), '--collect-interval', '10')
-    fake = json.loads((env / 'state' / 'fake-transport.json').read_text())
+    fake = json.loads((env / 'state' / 'fake-transport.json').read_text(encoding='utf-8'))
     assert len(fake['poll_offsets']) == polls_before
 
 

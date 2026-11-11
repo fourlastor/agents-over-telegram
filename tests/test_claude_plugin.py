@@ -8,12 +8,12 @@ LAUNCH = '"${CLAUDE_PLUGIN_ROOT}/scripts/aot_host_launch.py"'
 
 
 def load(relative):
-    return json.loads((ROOT / relative).read_text())
+    return json.loads((ROOT / relative).read_text(encoding='utf-8'))
 
 
 def test_manifest_identity_matches_the_other_packages():
     manifest = load('.claude-plugin/plugin.json')
-    version = tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['version']
+    version = tomllib.loads((ROOT / 'pyproject.toml').read_text(encoding='utf-8'))['project']['version']
     assert manifest['name'] == load('.codex-plugin/plugin.json')['name'] == 'agents-over-telegram'
     assert manifest['version'] == load('.codex-plugin/plugin.json')['version'] == version
 

@@ -205,7 +205,7 @@ def test_answering_failures_never_break_intake(owner):
 def test_the_cli_asks_the_owner_without_a_terminal(owner, monkeypatch):
     core, transport, clock, client, credentials = owner
     client_file = core.state_dir / 'client.json'
-    client_file.write_text(json.dumps(credentials))
+    client_file.write_text(json.dumps(credentials), encoding='utf-8', newline='\n')
     client_file.chmod(0o600)
     monkeypatch.setattr('sys.stdin', types.SimpleNamespace(isatty=lambda: False))
     result = run(parser().parse_args(['--state-dir', str(core.state_dir), '--fake', 'delivery-settings',
@@ -293,7 +293,7 @@ def test_an_old_owners_button_does_not_apply_after_a_new_owner(owner):
 def test_keep_alive_needs_the_owner_and_applies_on_approval(owner, monkeypatch):
     core, transport, clock, client, credentials = owner
     client_file = core.state_dir / 'client.json'
-    client_file.write_text(json.dumps(credentials))
+    client_file.write_text(json.dumps(credentials), encoding='utf-8', newline='\n')
     client_file.chmod(0o600)
     monkeypatch.setattr('sys.stdin', types.SimpleNamespace(isatty=lambda: False))
     args = ['--state-dir', str(core.state_dir), '--fake', 'delivery-settings', '--client-file', str(client_file)]

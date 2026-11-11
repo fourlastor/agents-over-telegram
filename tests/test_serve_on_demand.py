@@ -190,12 +190,13 @@ def test_a_newer_runtime_replaces_an_older_on_demand_collector(live):
     compat.lock(fd, blocking=True)
     try:
         spawn = Spawned()
-        result = REAL_START_ON_DEMAND(live, executable='/new/aot', spawn=spawn, now=lambda: 10.0)
+        new = str(serve.Path('/new/aot'))
+        result = REAL_START_ON_DEMAND(live, executable=new, spawn=spawn, now=lambda: 10.0)
         assert result['started'] is True
         # The record now names the new runtime, so the old collector stops.
-        assert serve._on_demand_record(live)['executable'] == '/new/aot'
+        assert serve._on_demand_record(live)['executable'] == new
         # The same runtime again, or an older one, starts nothing.
-        assert REAL_START_ON_DEMAND(live, executable='/new/aot', spawn=spawn, now=lambda: 500.0)['reason'] == 'running'
+        assert REAL_START_ON_DEMAND(live, executable=new, spawn=spawn, now=lambda: 500.0)['reason'] == 'running'
         assert REAL_START_ON_DEMAND(live, executable='/old/aot', spawn=spawn, now=lambda: 900.0)['reason'] == 'running'
     finally:
         os.close(fd)
@@ -230,7 +231,7 @@ def test_a_failed_start_leaves_a_line_in_the_log(tmp_path, monkeypatch):
     from agents_over_telegram import hosts
     monkeypatch.setattr(serve, 'start_on_demand', lambda state, **kw: (_ for _ in ()).throw(PermissionError('sandbox')))
     hosts._start_collector(tmp_path)
-    assert 'could not start aot serve on demand (PermissionError: sandbox)' in (tmp_path / serve.LOG).read_text()
+    assert 'could not start aot serve on demand (PermissionError: sandbox)' in (tmp_path / serve.LOG).read_text(encoding='utf-8')
 
 
 def test_uninstalling_the_service_also_stops_on_demand_starts(env, monkeypatch):

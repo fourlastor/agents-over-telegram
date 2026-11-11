@@ -168,7 +168,7 @@ def _write_owner(path: Path, token: str) -> None:
 
 def _read_owner(path: Path) -> str | None:
     try:
-        return path.read_text()[:64]
+        return path.read_text(encoding='utf-8')[:64]
     except OSError:
         return None
 

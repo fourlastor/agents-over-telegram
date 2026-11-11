@@ -209,7 +209,7 @@ class NativeDesktopQueue:
                 if executable not in (self.desktop.resolve(), self.binary.resolve()):
                     continue
                 args = (entry / 'cmdline').read_bytes().split(b'\0')
-                fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+                fields = (entry / 'stat').read_text(encoding='utf-8').rsplit(')', 1)[1].split()
                 pid, parent, start = int(entry.name), int(fields[1]), fields[19]
                 if executable == self.desktop.resolve():
                     # Some Electron helpers expose their entire command line

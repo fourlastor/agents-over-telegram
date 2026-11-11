@@ -129,9 +129,9 @@ def render_plugin(state_dir, client_file, output, name):
     executable = str(Path(sys.executable).parent / "aot")
     entry = {"type": "stdio", "command": executable,
              "args": ["--state-dir", str(state_dir), "mcp", "--client-file", str(Path(client_file).absolute())]}
-    (output / ".mcp.json").write_text(json.dumps({"mcpServers": {"telegram": entry}}, indent=2) + "\n")
+    (output / ".mcp.json").write_text(json.dumps({"mcpServers": {"telegram": entry}}, indent=2) + "\n", encoding='utf-8')
     path = output / ".codex-plugin" / "plugin.json"
-    manifest = json.loads(path.read_text())
+    manifest = json.loads(path.read_text(encoding='utf-8'))
     manifest["name"] = name
     # A rendered profile is already wired. Its setup action must not
     # create a second, project-native connection for the same client.
@@ -140,7 +140,7 @@ def render_plugin(state_dir, client_file, output, name):
     # Push hooks need a project's runtime pointer and the host
     # launcher; a rendered profile is a fixed client, so it ships neither.
     manifest.pop("hooks", None)
-    path.write_text(json.dumps(manifest, indent=2) + "\n")
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding='utf-8')
     return {"plugin_directory": str(output), "name": name, "installed": False,
             "scope": "One client identity per server process; separate chat isolation requires host support."}
 

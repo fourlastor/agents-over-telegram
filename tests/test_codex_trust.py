@@ -4,14 +4,15 @@ import os
 
 from agents_over_telegram import codex_trust
 from agents_over_telegram.codex_trust import EVENTS, PLUGIN_ID, plugin_content_hash, status
+from conftest import posix_only
 
 
 def make_plugin(home, version='1.0.0'):
     root = home / 'plugins' / 'cache' / 'agents-over-telegram' / 'agents-over-telegram' / version
     (root / '.codex-plugin').mkdir(parents=True)
-    (root / '.codex-plugin' / 'plugin.json').write_text(json.dumps({'version': version}))
+    (root / '.codex-plugin' / 'plugin.json').write_text(json.dumps({'version': version}), encoding='utf-8', newline='\n')
     (root / 'codex').mkdir()
-    (root / 'codex' / 'hooks.json').write_text('{"hooks": {}}')
+    (root / 'codex' / 'hooks.json').write_text('{"hooks": {}}', encoding='utf-8', newline='\n')
     return root
 
 
@@ -23,9 +24,10 @@ def write_config(home, content_hash=None, events=EVENTS, enabled=True):
         if content_hash:
             lines.append(f'trusted_content_hash = "{content_hash}"')
         lines.append('')
-    (home / 'config.toml').write_text('\n'.join(lines))
+    (home / 'config.toml').write_text('\n'.join(lines), encoding='utf-8', newline='\n')
 
 
+@posix_only
 def test_folder_hash_matches_codex_for_a_fixed_tree(tmp_path):
     # Value computed by this port, which matched Codex's stored hash for a real
     # installed plugin; it guards the byte layout against regressions.
@@ -48,7 +50,7 @@ def test_status_follows_the_stored_approval(tmp_path):
     root = make_plugin(home)
     write_config(home, content_hash=plugin_content_hash(root))
     assert status(home) == {'plugin_version': '1.0.0', 'status': 'approved'}
-    (root / '.codex-plugin' / 'plugin.json').write_text(json.dumps({'version': '1.0.1'}))
+    (root / '.codex-plugin' / 'plugin.json').write_text(json.dumps({'version': '1.0.1'}), encoding='utf-8', newline='\n')
     assert status(home)['status'] == 'needs_approval'
     assert status(home)['reason'] == 'plugin_changed_since_approval'
 
@@ -83,10 +85,10 @@ def test_an_older_approval_uses_the_legacy_baseline(tmp_path):
         digest.update(struct.pack('<Q', len(part)))
         digest.update(part)
     (home / '.hook-trust').mkdir()
-    (home / '.hook-trust' / digest.hexdigest()).write_text('sha256:older')
+    (home / '.hook-trust' / digest.hexdigest()).write_text('sha256:older', encoding='utf-8', newline='\n')
     assert baseline(home) == 'sha256:older'
     assert status(home)['status'] == 'needs_approval'
-    (home / '.hook-trust' / digest.hexdigest()).write_text(plugin_content_hash(root))
+    (home / '.hook-trust' / digest.hexdigest()).write_text(plugin_content_hash(root), encoding='utf-8', newline='\n')
     assert status(home)['status'] == 'approved'
 
 
@@ -95,7 +97,8 @@ def test_project_detection_reads_the_codex_mcp_entry(tmp_path):
     (project / '.codex').mkdir(parents=True)
     client = tmp_path / 'client.json'
     (project / '.codex' / 'config.toml').write_text(
-        f'[mcp_servers.telegram]\ncommand = "aot"\nargs = ["mcp", "--client-file", "{client}"]\n')
+        # TOML literal strings, so a Windows path's backslashes stay as they are.
+        f"[mcp_servers.telegram]\ncommand = 'aot'\nargs = ['mcp', '--client-file', '{client}']\n", encoding='utf-8', newline='\n')
     assert codex_trust.codex_project_uses(client, project)
     assert codex_trust.codex_project_uses(client, project / 'src' / 'deep')
     assert not codex_trust.codex_project_uses(tmp_path / 'other.json', project)
