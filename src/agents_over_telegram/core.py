@@ -45,7 +45,12 @@ def _digest(value: str) -> str:
 
 
 def _version_key(text):
-    """(major, minor, patch) for a release version such as 0.9.24, or None."""
+    """(major, minor, patch) for a release version such as 0.9.24, or None.
+
+    A suffix (0.9.24rc1, 0.9.24.dev0) is ignored, so such a build counts as
+    the release it precedes; runtimes of equal versions never defer to each
+    other, which keeps that harmless.
+    """
     match = re.match(r'(\d+)\.(\d+)\.(\d+)', text) if isinstance(text, str) else None
     return tuple(int(part) for part in match.groups()) if match else None
 
@@ -543,7 +548,7 @@ class Core:
             # The newest runtime that collected, so older ones stand aside (see collect).
             account_columns = {row['name'] for row in db.execute('PRAGMA table_info(account)')}
             for column, kind in (('collector_version', 'TEXT'), ('collector_seen', 'REAL'),
-                                 ('legacy_intake_at', 'REAL')):
+                                 ('legacy_intake_at', 'REAL'), ('aware_intake', 'REAL')):
                 if column not in account_columns:
                     db.execute(f'ALTER TABLE account ADD COLUMN {column} {kind}')
             if 'event_at' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
@@ -2136,16 +2141,19 @@ class Core:
         with self._lock('collector') as acquired:
             if not acquired:
                 return {'status': 'busy', 'updates': 0}
-            with self._tx() as db:
+            with self._db() as db:
                 account = self._account(db)
                 cursor = account['cursor']
-                newer = self._newer_collector(account)
-                if newer is not None:
-                    # A newer runtime collects for this bot; its routing wins.
-                    return {'status': 'busy', 'updates': 0, 'reason': 'newer_runtime', 'collector_version': newer}
-                if (account['collector_seen'] is not None and account['last_intake'] is not None
-                        and account['last_intake'] > account['collector_seen']):
-                    # A runtime that predates the version record collected since.
+            newer = self._newer_collector(account)
+            if newer is not None:
+                # A newer runtime collects for this bot; its routing wins.
+                return {'status': 'busy', 'updates': 0, 'reason': 'newer_runtime', 'collector_version': newer}
+            if (account['aware_intake'] is not None and account['last_intake'] is not None
+                    and account['last_intake'] > account['aware_intake']):
+                # Every collection by a runtime that knows the record sets
+                # aware_intake with last_intake; a later last_intake came
+                # from a runtime that predates it.
+                with self._tx() as db:
                     db.execute('UPDATE account SET legacy_intake_at=? WHERE singleton=1', (account['last_intake'],))
             try:
                 webhook = self.transport.get_webhook_info()
@@ -2168,7 +2176,13 @@ class Core:
                         accepted += 1
                     self._prune_context(db, self.clock())
                     now = self.clock()
-                    db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL,collector_version=?,collector_seen=? WHERE singleton=1', (cursor, now, now, now, now, self.runtime_version, now))
+                    db.execute('UPDATE account SET cursor=?,last_gap_at=CASE WHEN last_intake IS NOT NULL AND ?-last_intake>=86400 THEN ? ELSE last_gap_at END,last_intake=?,last_attempt=?,intake_error=NULL,aware_intake=? WHERE singleton=1', (cursor, now, now, now, now, now))
+                    if timeout > 0 or judge:
+                        # Only long-running collectors claim the floor. A one-shot
+                        # poll from a newer hook or tool call must not silence an
+                        # older long-poller, or nothing would long-poll meanwhile.
+                        db.execute('UPDATE account SET collector_version=?,collector_seen=? WHERE singleton=1',
+                                   (self.runtime_version, now))
                 self._probe_bot_admin(account)
                 try:
                     self._set_bot_menu()
@@ -2223,7 +2237,8 @@ class Core:
     def _newer_collector(self, account):
         """The version of a newer runtime that collected recently, or None."""
         recorded, seen = account['collector_version'], account['collector_seen']
-        if recorded is None or seen is None or self.clock() - seen >= self.COLLECTOR_STALE:
+        # A clock that went backwards makes the record stale, not fresh forever.
+        if recorded is None or seen is None or not 0 <= self.clock() - seen < self.COLLECTOR_STALE:
             return None
         ours, theirs = _version_key(self.runtime_version), _version_key(recorded)
         return recorded if ours is not None and theirs is not None and theirs > ours else None

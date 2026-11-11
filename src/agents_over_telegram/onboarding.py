@@ -442,7 +442,8 @@ def human_status(value):
     if collector.get('legacy_intake_at'):
         when = datetime.fromtimestamp(collector['legacy_intake_at'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         lines.append(f'Collector: a runtime older than 0.9.24 fetched from Telegram at {when} and routed updates '
-                     'with its older code. Rerun setup in the projects that still use an older runtime.')
+                     "with its older code. Each project's .aot-runtime.json names its runtime; rerun setup in the "
+                     'projects still on an older one.')
     wake = value.get('unresolved_wake') or {}
     if wake.get('notification_id'):
         since = datetime.fromtimestamp(wake['since'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
