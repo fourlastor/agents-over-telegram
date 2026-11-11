@@ -213,21 +213,32 @@ def short_tmp(monkeypatch):
 
 def test_a_long_state_path_gets_a_short_private_socket(tmp_path, monkeypatch, short_tmp):
     monkeypatch.delenv('XDG_RUNTIME_DIR', raising=False)
+    monkeypatch.delenv('TMPDIR', raising=False)
     deep = tmp_path / ('d' * 60) / ('e' * 60) / 'state'
     path = relay_api.socket_path(deep)
     assert path.parent.parent == short_tmp / 'u' and len(str(path)) <= relay_api.MAX_SOCKET_PATH
     assert relay_api.socket_path(deep) == path
-    # A runtime directory is preferred when its path is short enough, and skipped when not.
-    monkeypatch.setenv('XDG_RUNTIME_DIR', str(short_tmp / 'run'))
-    assert relay_api.socket_path(deep).parent.parent == short_tmp / 'run'
-    monkeypatch.setenv('XDG_RUNTIME_DIR', str(tmp_path / ('r' * 80)))
-    assert relay_api.socket_path(deep).parent.parent == short_tmp / 'u'
+    # A private runtime directory is preferred when it is short enough.
+    run = short_tmp / 'run'
+    run.mkdir(mode=0o700)
+    for name in ('XDG_RUNTIME_DIR', 'TMPDIR'):
+        monkeypatch.setenv(name, str(run))
+        assert relay_api.socket_path(deep).parent.parent == run
+        monkeypatch.delenv(name)
+    # Not when it is shared, missing or too long.
+    shared = short_tmp / 'shared'
+    shared.mkdir()
+    shared.chmod(0o777)
+    for value in (shared, short_tmp / 'missing', tmp_path / ('r' * 80)):
+        monkeypatch.setenv('TMPDIR', str(value))
+        assert relay_api.socket_path(deep).parent.parent == short_tmp / 'u'
     short_state = short_tmp / 's'
     assert relay_api.socket_path(short_state) == short_state / 'relay' / 'relay.sock'
 
 
 def test_a_relay_works_for_a_long_state_path(tmp_path, monkeypatch, short_tmp):
     monkeypatch.delenv('XDG_RUNTIME_DIR', raising=False)
+    monkeypatch.delenv('TMPDIR', raising=False)
     from test_core import Clock
     from agents_over_telegram.transport import FakeTransport
     transport = FakeTransport()
