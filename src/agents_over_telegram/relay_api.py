@@ -173,6 +173,9 @@ class Relay:
         self.changed = threading.Condition()
         self.path = None
         self.active = threading.BoundedSemaphore(MAX_ACTIVE)
+        # When an agent last called or waited (time.monotonic), for a
+        # collector started on demand that stops when idle.
+        self.last_activity = None
 
     def notify(self):
         """Wake every waiting agent; each then checks its own inbox."""
@@ -223,6 +226,7 @@ class Relay:
         return {'protocol': PROTOCOL, 'ok': True, 'body': body}
 
     def handle(self, connection):
+        self.last_activity = time.monotonic()
         if not self.active.acquire(blocking=False):
             try:
                 _send(connection, {'protocol': PROTOCOL, 'ok': False, 'error': 'busy'})
