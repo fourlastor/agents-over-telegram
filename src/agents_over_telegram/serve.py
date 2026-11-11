@@ -17,7 +17,6 @@ the new runtime.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
 import plistlib
@@ -28,6 +27,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import compat
 from .credentials import CredentialError, read_private_json, write_private_json
 
 POINTER = 'serve-runtime.json'
@@ -51,21 +51,53 @@ WATCHDOG_LIMIT = 300.0
 STUCK_EXIT = 4
 
 # Started by the service manager with the system Python: it only reads the
-# pointer and replaces itself with the recorded AOT executable.
+# pointer and replaces itself with the recorded AOT executable. Windows has no
+# exec and Task Scheduler does not restart a task that exits, so there the
+# launcher stays and restarts the collector itself, on the runtime the
+# pointer names at that moment, until the service is uninstalled.
 LAUNCHER_SOURCE = '''"""Start AOT's collector on the runtime named in serve-runtime.json (written by aot serve --install)."""
 import json
 import os
 import sys
 
 state = os.path.dirname(os.path.abspath(__file__))
-with open(os.path.join(state, 'serve-runtime.json'), encoding='utf-8') as stream:
-    executable = json.load(stream)['executable']
-os.execv(executable, [executable, '--state-dir', state, 'serve'])
+pointer = os.path.join(state, 'serve-runtime.json')
+
+
+def executable():
+    with open(pointer, encoding='utf-8') as stream:
+        return json.load(stream)['executable']
+
+
+if os.name != 'nt':
+    program = executable()
+    os.execv(program, [program, '--state-dir', state, 'serve'])
+
+import subprocess
+import time
+
+log = os.path.join(state, 'serve.log')
+while os.path.exists(pointer):
+    try:
+        if os.path.getsize(log) > 1000000:
+            os.replace(log, log + '.1')
+    except OSError:
+        pass
+    with open(log, 'ab') as output:
+        # CREATE_NO_WINDOW: no console window for the collector.
+        code = subprocess.call([executable(), '--state-dir', state, 'serve'], stdin=subprocess.DEVNULL,
+                               stdout=output, stderr=output, creationflags=0x08000000)
+    # 3: a newer runtime is installed; start it at once. Anything else: wait a little.
+    time.sleep(1 if code == 3 else 5)
 '''
 
 
 def own_executable():
-    return Path(sys.executable).absolute().parent / 'aot'
+    return Path(sys.executable).absolute().parent / compat.executable_name('aot')
+
+
+def _task_name(state):
+    return '\\' + name(state)
 
 
 def pointer(state):
@@ -153,11 +185,11 @@ def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_runnin
 
 def _hold_serve_lock(state, sleep, keep_running, log):
     """Take this state directory's serve lock, waiting while another aot serve holds it."""
-    fd = os.open(Path(state) / SERVE_LOCK, os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    fd = os.open(Path(state) / SERVE_LOCK, os.O_RDWR | os.O_CREAT | compat.O_CLOEXEC, 0o600)
     told = False
     while True:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            compat.lock(fd)
             return fd
         except OSError:
             pass
@@ -173,15 +205,15 @@ def _hold_serve_lock(state, sleep, keep_running, log):
 def running(state):
     """True when an aot serve holds this state directory's serve lock."""
     try:
-        fd = os.open(Path(state) / SERVE_LOCK, os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600)
+        fd = os.open(Path(state) / SERVE_LOCK, os.O_RDWR | os.O_CREAT | compat.O_CLOEXEC, 0o600)
     except OSError:
         return False
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        compat.lock(fd)
     except OSError:
         return True
     else:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        compat.unlock(fd)
         return False
     finally:
         os.close(fd)
@@ -220,7 +252,7 @@ def start_on_demand(state, *, executable=None, spawn=subprocess.Popen, now=time.
         return {'started': False, 'reason': 'recently_started'}
     write_private_json(record, {'version': 1, 'started': now()}, overwrite=record.exists())
     rotate_log(state)
-    log = os.open(state / LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    log = os.open(state / LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | compat.O_CLOEXEC, 0o600)
     try:
         process = spawn([str(executable or own_executable()), '--state-dir', str(state), 'serve'],
                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
@@ -294,14 +326,56 @@ def _label(state):
 
 
 def _unit_path(state):
+    if sys.platform == 'win32':
+        # The task definition handed to schtasks; Task Scheduler keeps its own copy.
+        return Path(state).absolute() / 'serve-task.xml'
     if sys.platform == 'darwin':
         return Path.home() / 'Library' / 'LaunchAgents' / f'{_label(state)}.plist'
     base = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
     return base / 'systemd' / 'user' / f'{name(state)}.service'
 
 
+def _unit_encoding():
+    # schtasks /XML reads UTF-16.
+    return 'utf-16' if sys.platform == 'win32' else 'utf-8'
+
+
+def _task_xml(state, python):
+    from xml.sax.saxutils import escape
+    launcher = Path(state) / LAUNCHER
+    user = escape(os.environ.get('USERDOMAIN', '') + '\\' + os.environ.get('USERNAME', '')
+                  if os.environ.get('USERDOMAIN') else os.environ.get('USERNAME', ''))
+    return ('<?xml version="1.0" encoding="UTF-16"?>\n'
+            '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n'
+            f'  <RegistrationInfo><Description>Agents over Telegram collector ({escape(str(state))})</Description>'
+            '</RegistrationInfo>\n'
+            f'  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger></Triggers>\n'
+            f'  <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType>'
+            '<RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n'
+            '  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>'
+            '<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>'
+            '<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>'
+            '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>'
+            '<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>'
+            '<StartWhenAvailable>true</StartWhenAvailable><Hidden>true</Hidden></Settings>\n'
+            f'  <Actions Context="Author"><Exec><Command>{escape(str(python))}</Command>'
+            f'<Arguments>"{escape(str(launcher))}"</Arguments></Exec></Actions>\n'
+            '</Task>\n')
+
+
+def _windows_python():
+    """pythonw.exe of the base interpreter: no console window, and not tied to one runtime's venv."""
+    base = Path(getattr(sys, '_base_executable', sys.executable))
+    for candidate in (base.with_name('pythonw.exe'), Path(shutil.which('pythonw') or '')):
+        if candidate.name and candidate.is_file():
+            return str(candidate)
+    return str(base)
+
+
 def _unit(state, python):
     launcher = Path(state) / LAUNCHER
+    if sys.platform == 'win32':
+        return _task_xml(state, python)
     if sys.platform == 'darwin':
         return plistlib.dumps({'Label': _label(state), 'ProgramArguments': [str(python), str(launcher)],
                                'RunAtLoad': True, 'KeepAlive': True,
@@ -330,15 +404,21 @@ def install(state, *, run_command=subprocess.run, python=None):
     state = Path(state).absolute()
     # Installing it is the opposite of setup --no-serve.
     (state / NO_SERVE).unlink(missing_ok=True)
-    python = python or shutil.which('python3') or '/usr/bin/python3'
+    if python is None:
+        python = _windows_python() if sys.platform == 'win32' else shutil.which('python3') or '/usr/bin/python3'
     write_private_json(state / POINTER, {'version': 1, 'executable': str(own_executable())}, overwrite=True)
     launcher = state / LAUNCHER
     launcher.write_text(LAUNCHER_SOURCE, encoding='utf-8')
     launcher.chmod(0o600)
     unit = _unit_path(state)
     unit.parent.mkdir(parents=True, exist_ok=True)
-    unit.write_text(_unit(state, python), encoding='utf-8')
-    if sys.platform == 'darwin':
+    unit.write_text(_unit(state, python), encoding=_unit_encoding())
+    if sys.platform == 'win32':
+        task = _task_name(state)
+        run_command(['schtasks', '/End', '/TN', task], check=False, capture_output=True)
+        run_command(['schtasks', '/Create', '/TN', task, '/XML', str(unit), '/F'], check=True, capture_output=True)
+        run_command(['schtasks', '/Run', '/TN', task], check=True, capture_output=True)
+    elif sys.platform == 'darwin':
         uid = os.getuid()
         run_command(['launchctl', 'bootout', f'gui/{uid}', str(unit)], check=False, capture_output=True)
         run_command(['launchctl', 'bootstrap', f'gui/{uid}', str(unit)], check=True, capture_output=True)
@@ -355,7 +435,11 @@ def uninstall(state, *, run_command=subprocess.run):
     """Stop and remove the user service, the launcher and the pointer."""
     state = Path(state).absolute()
     unit = _unit_path(state)
-    if sys.platform == 'darwin':
+    if sys.platform == 'win32':
+        task = _task_name(state)
+        run_command(['schtasks', '/End', '/TN', task], check=False, capture_output=True)
+        run_command(['schtasks', '/Delete', '/TN', task, '/F'], check=False, capture_output=True)
+    elif sys.platform == 'darwin':
         run_command(['launchctl', 'bootout', f'gui/{os.getuid()}', str(unit)], check=False, capture_output=True)
     else:
         run_command(['systemctl', '--user', 'disable', '--now', f'{name(state)}.service'], check=False,
@@ -364,7 +448,7 @@ def uninstall(state, *, run_command=subprocess.run):
     for path in (unit, state / LAUNCHER, state / POINTER):
         if path.exists() or path.is_symlink():
             path.unlink()
-    if sys.platform != 'darwin':
+    if sys.platform not in ('darwin', 'win32'):
         run_command(['systemctl', '--user', 'daemon-reload'], check=False, capture_output=True)
     return {'installed': False, 'removed': removed}
 
@@ -375,8 +459,10 @@ def status(state):
     current = pointer(state)
     unit = _unit_path(state)
     try:
-        serves_this = str(state / LAUNCHER) in unit.read_text(encoding='utf-8')
-    except OSError:
+        text = unit.read_text(encoding=_unit_encoding())
+        from xml.sax.saxutils import escape
+        serves_this = str(state / LAUNCHER) in text or escape(str(state / LAUNCHER)) in text
+    except (OSError, UnicodeError):
         serves_this = False
     return {'installed': current is not None and serves_this, 'service': name(state), 'unit': str(unit),
             'executable': str(current) if current else None}

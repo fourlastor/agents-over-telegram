@@ -43,7 +43,7 @@ def test_a_failed_install_never_fails_setup(home):
 
 
 def test_unsupported_platforms_are_skipped(home, monkeypatch):
-    monkeypatch.setattr(sys, 'platform', 'win32')
+    monkeypatch.setattr(sys, 'platform', 'freebsd14')
     assert REAL_INSTALL_COLLECTOR(home, run_command=ok) == {'installed': False, 'reason': 'unsupported_platform'}
     monkeypatch.setattr(sys, 'platform', 'linux')
     monkeypatch.setattr('shutil.which', lambda name: None)

@@ -132,9 +132,22 @@ def _session(hook_input):
     return None
 
 
+WINDOWS = os.name == "nt"
+
+
+def _owned(info, *, root=False):
+    # Windows has no file owners or meaningful mode bits; project and runtime
+    # files there are protected by the user's profile and folder ACLs.
+    return WINDOWS or info.st_uid == os.getuid() or (root and info.st_uid == 0)
+
+
+def _private(info, mask):
+    return WINDOWS or not info.st_mode & mask
+
+
 def _safe_owned(info):
-    return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
-            and not info.st_mode & 0o022 and info.st_nlink == 1)
+    return (stat.S_ISREG(info.st_mode) and _owned(info)
+            and _private(info, 0o022) and info.st_nlink == 1)
 
 
 def _owned_regular(path):
@@ -147,7 +160,7 @@ def _owned_regular(path):
 
 def _read_pointer(path):
     """Read the pointer without following a symlink, checking the opened file itself."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0))
     with os.fdopen(fd, "r", encoding="utf-8") as stream:
         if not _safe_owned(os.fstat(stream.fileno())):
             raise ValueError("unsafe pointer")
@@ -159,8 +172,6 @@ def _read_pointer(path):
 
 def _executable(project):
     """Return (executable, problem). problem is None, 'missing' or 'unusable'."""
-    if not hasattr(os, "getuid"):
-        return None, "unusable"
     path = os.path.join(project, POINTER)
     if not os.path.lexists(path):
         return None, "missing"
@@ -181,8 +192,8 @@ def _executable(project):
     except (OSError, ValueError):
         return None, "unusable"
     # The runtime belongs to this user (or root) and nobody else can replace it.
-    if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (os.getuid(), 0)
-            or info.st_mode & 0o002 or not os.access(executable, os.X_OK)):
+    if (not stat.S_ISREG(info.st_mode) or not _owned(info, root=True)
+            or not _private(info, 0o002) or not os.access(executable, os.X_OK)):
         return None, "unusable"
     return executable, None
 
@@ -618,6 +629,11 @@ def main(argv):
         # The Claude Code monitor runs for the whole session; follow updates.
         return _follow(args, project)
     try:
+        if WINDOWS:
+            # Windows has no exec: os.execv starts a new process and returns at
+            # once, so the host would see this launcher exit. Wait for it instead.
+            import subprocess
+            return subprocess.call(args)
         os.execv(executable, args)
     except OSError:
         sys.stderr.write("The prepared Agents over Telegram runtime could not be started.\n")

@@ -29,6 +29,10 @@ def build_command(env: Mapping[str, str]) -> list[str]:
 def main() -> int:
     try:
         command = build_command(os.environ)
+        if os.name == "nt":
+            # No exec on Windows: run the server as a child that shares this stdio.
+            import subprocess
+            return subprocess.call(command)
         os.execv(command[0], command)
     except ProfileError as exc:
         print(str(exc), file=sys.stderr)

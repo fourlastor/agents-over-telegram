@@ -13,6 +13,7 @@ import sys
 import tempfile
 import tomllib
 
+from . import compat
 from .credentials import CredentialError, private_directory, read_private_json, write_private_json
 
 PROFILE_NAME = '.aot-profile.json'
@@ -45,16 +46,19 @@ HOST_NEXT_STEPS = {
 
 
 def default_state_dir():
+    if compat.WINDOWS and not os.environ.get('XDG_DATA_HOME') and os.environ.get('LOCALAPPDATA'):
+        # The user's local profile folder, which other users cannot read.
+        return Path(os.environ['LOCALAPPDATA']) / 'agents-over-telegram'
     return Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'agents-over-telegram'
 
 
 def _read_local(path):
     """Read bounded owner-controlled configuration, never follow file symlinks."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | compat.O_NOFOLLOW | compat.O_BINARY | compat.O_CLOEXEC)
         with os.fdopen(fd, 'r', encoding='utf-8') as stream:
             info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & (0o022 if Path(path).name == PROFILE_NAME else 0o002):
+            if not stat.S_ISREG(info.st_mode) or not compat.owned(info) or info.st_nlink != 1 or not compat.private(info, 0o022 if Path(path).name == PROFILE_NAME else 0o002):
                 raise CredentialError('unsafe_project_config')
             raw = stream.read(262145)
             if len(raw) > 262144:
@@ -67,7 +71,7 @@ def _read_local(path):
 def _check_directory(path):
     if path.exists() or path.is_symlink():
         info = path.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o002:
+        if not stat.S_ISDIR(info.st_mode) or not compat.owned(info) or not compat.private(info, 0o002):
             raise CredentialError('unsafe_project_directory')
 
 
@@ -336,7 +340,7 @@ def setup(args):
             # Also keeps agents from starting a collector on demand.
             marker = state / serve.NO_SERVE
             if not marker.exists():
-                os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600))
+                os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | compat.O_CLOEXEC, 0o600))
             collector = {'installed': serve.pointer(state) is not None, 'skipped': 'no_serve'}
         else:
             collector = _install_collector(state)
@@ -411,7 +415,7 @@ def _install_collector(state, run_command=None):
     from . import serve
     if serve.status(state)['installed']:
         return {'installed': True, 'already_installed': True, 'service': serve.name(state)}
-    if sys.platform not in ('linux', 'darwin') or (sys.platform == 'linux' and not shutil.which('systemctl')):
+    if sys.platform not in ('linux', 'darwin', 'win32') or (sys.platform == 'linux' and not shutil.which('systemctl')):
         return {'installed': False, 'reason': 'unsupported_platform'}
     try:
         installed = serve.install(state, run_command=run_command or subprocess.run)

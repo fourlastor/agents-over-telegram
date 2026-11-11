@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import copy
-import fcntl
 import base64
 import hashlib
 import json
@@ -15,6 +14,7 @@ import threading
 import urllib.error
 import urllib.request
 
+from . import compat
 from .credentials import load_token, private_directory, read_private_json, validate_token, write_private_json
 
 
@@ -481,9 +481,9 @@ class FileFakeTransport:
 
     @contextmanager
     def _data(self):
-        fd = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        fd = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR | compat.O_NOFOLLOW | compat.O_BINARY, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            compat.lock(fd, blocking=True)
             data = read_private_json(self.path) if self.path.exists() else {
                 "bot_id": 900001, "username": "aot_test_bot", "updates": [], "sent": [], "reactions": [], "outcomes": [], "poll_offsets": []}
             data.setdefault("reactions", [])

@@ -13,6 +13,7 @@ from pathlib import Path
 import sys
 import time
 
+from . import compat
 from .credentials import CredentialError
 
 RUNTIME_POINTER = '.aot-runtime.json'
@@ -49,7 +50,7 @@ def read_runtime_pointer(project: Path) -> Path | None:
         return None
     try:
         # Same rule as the plugin launcher: owned, single link, not group or world writable.
-        if path.lstat().st_mode & 0o022:
+        if not compat.private(path.lstat(), 0o022):
             return None
         value = json.loads(_read_local(path))
         if not isinstance(value, dict) or set(value) != {'version', 'executable'}:
@@ -159,7 +160,7 @@ WAKE_DURATION = 82800
 
 def _write_owner(path: Path, token: str) -> None:
     tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | compat.O_CLOEXEC, 0o600)
     with os.fdopen(fd, 'w') as stream:
         stream.write(token)
     os.replace(tmp, path)
@@ -219,7 +220,6 @@ def _start_collector(state: Path) -> None:
 
 
 def _wake(args) -> int:
-    import fcntl
     import hashlib
     from .cli import LazyTransport, _client, _mode
     from .core import Core
@@ -247,7 +247,7 @@ def _wake(args) -> int:
     owner = locks / f'{key}.owner'
     token = f'{os.getpid()}-{time.time_ns()}'
     _write_owner(owner, token)
-    fd = os.open(locks / f'{key}.lock', os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    fd = os.open(locks / f'{key}.lock', os.O_RDWR | os.O_CREAT | compat.O_CLOEXEC, 0o600)
     parent = os.getppid()
     host = getattr(args, 'host_pid', None)
 
@@ -273,7 +273,7 @@ def _wake(args) -> int:
             os.close(fd)
             return 0
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            compat.lock(fd)
             break
         except OSError:
             time.sleep(0.2)

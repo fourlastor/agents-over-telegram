@@ -29,6 +29,11 @@ jobs:
             python: "3.13"
           - os: macos-latest
             python: "3.13"
+          - os: windows-latest
+            python: "3.13"
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,10 +48,14 @@ jobs:
         run: uv sync --frozen --extra dev --python ${{ matrix.python }}
 
       - name: Run the test suite
-        run: .venv/bin/python -m pytest -q
+        run: |
+          python=.venv/bin/python; [ -x "$python" ] || python=.venv/Scripts/python.exe
+          "$python" -m pytest -q
 
       - name: Validate the plugin package
-        run: .venv/bin/python scripts/validate_package.py
+        run: |
+          python=.venv/bin/python; [ -x "$python" ] || python=.venv/Scripts/python.exe
+          "$python" scripts/validate_package.py
 
       - name: Run the offline demo
         run: .venv/bin/aot demo

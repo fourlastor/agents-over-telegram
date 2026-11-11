@@ -36,6 +36,7 @@ import sys
 import threading
 from pathlib import Path
 
+from . import compat
 from .credentials import private_directory
 
 PROTOCOL = 1
@@ -94,12 +95,12 @@ def _private_runtime_dirs():
             info = os.lstat(value)
         except OSError:
             continue
-        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077:
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == compat.getuid() and not info.st_mode & 0o077:
             yield Path(value)
 
 
 def _short_base():
-    return Path('/tmp') / f'aot-{os.getuid()}'
+    return Path('/tmp') / f'aot-{compat.getuid()}'
 
 
 def peer_uid(connection):
@@ -197,7 +198,7 @@ class Relay:
     def handle(self, connection):
         try:
             connection.settimeout(CALL_TIMEOUT)
-            if peer_uid(connection) not in (None, os.getuid()):
+            if peer_uid(connection) not in (None, compat.getuid()):
                 _send(connection, {'protocol': PROTOCOL, 'ok': False, 'error': 'forbidden'})
                 return
             try:
@@ -211,6 +212,9 @@ class Relay:
 
     def start(self):
         """Listen on the socket; returns the server thread."""
+        if not hasattr(socket, 'AF_UNIX'):
+            # Python on Windows has no Unix sockets; agents run their calls themselves.
+            raise OSError(errno.EAFNOSUPPORT, 'Unix sockets are not available on this platform')
         path = socket_path(self.state)
         if self.state.absolute() not in path.parents:
             # The short path's runtime directory must be ours too, not one
@@ -223,7 +227,7 @@ class Relay:
             pass
         else:
             # Only a socket of ours, left by a relay that stopped, is replaced.
-            if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+            if not stat.S_ISSOCK(info.st_mode) or info.st_uid != compat.getuid():
                 raise OSError(errno.EEXIST, 'relay socket path is taken')
             probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             probe.settimeout(CONNECT_TIMEOUT)
@@ -271,10 +275,12 @@ class Relay:
 
 def _request(state, request, timeout):
     """Send one request; its answer, None when the answer was lost, Unavailable when nobody took it."""
+    if not hasattr(socket, 'AF_UNIX'):
+        raise Unavailable('no_unix_sockets')
     path = socket_path(state)
     try:
         info = path.parent.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != compat.getuid() or info.st_mode & 0o077:
             raise Unavailable('unsafe_relay_directory')
     except FileNotFoundError:
         raise Unavailable('no_relay') from None
@@ -285,7 +291,7 @@ def _request(state, request, timeout):
             connection.connect(str(path))
         except OSError:
             raise Unavailable('no_relay') from None
-        if peer_uid(connection) not in (None, os.getuid()):
+        if peer_uid(connection) not in (None, compat.getuid()):
             raise Unavailable('foreign_relay')
         connection.settimeout(timeout)
         try:

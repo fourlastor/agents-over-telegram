@@ -17,6 +17,26 @@ import time
 from typing import Mapping
 
 FORMAT_VERSION = 2
+WINDOWS = os.name == "nt"
+# Windows has neither file owners nor meaningful mode bits; private state lives
+# in the user's profile there, so these checks hold only on POSIX.
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+
+
+def owned(info: os.stat_result) -> bool:
+    return WINDOWS or info.st_uid == os.getuid()
+
+
+def private(info: os.stat_result, mask: int = 0o077) -> bool:
+    return WINDOWS or not info.st_mode & mask
+
+
+def venv_scripts(venv: Path) -> Path:
+    return venv / ("Scripts" if WINDOWS else "bin")
+
+
+def venv_program(venv: Path, name: str) -> Path:
+    return venv_scripts(venv) / (name + ".exe" if WINDOWS else name)
 INSTALL_TIMEOUT = 300
 VALIDATE_TIMEOUT = 20
 LOCK_TIMEOUT = 30
@@ -57,6 +77,8 @@ def default_runtime_root(environ: Mapping[str, str]) -> Path:
         base = Path(data_home)
         if not base.is_absolute():
             raise BootstrapError("XDG_DATA_HOME must be absolute, or pass --runtime-root with an absolute path.")
+    elif WINDOWS and environ.get("LOCALAPPDATA") and Path(environ["LOCALAPPDATA"]).is_absolute():
+        base = Path(environ["LOCALAPPDATA"])
     else:
         base = Path.home() / ".local" / "share"
     return base / "agents-over-telegram" / "runtimes"
@@ -64,7 +86,7 @@ def default_runtime_root(environ: Mapping[str, str]) -> Path:
 
 def regular_bytes(path: Path) -> bytes:
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | O_NOFOLLOW)
         with os.fdopen(fd, "rb") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_SOURCE_BYTES:
@@ -130,10 +152,10 @@ def private_directory(path: Path) -> None:
             info = current.lstat()
             if not stat.S_ISDIR(info.st_mode):
                 raise BootstrapError("The runtime directory contains a link or non-directory; choose a private directory.")
-            if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+            if not WINDOWS and info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
                 raise BootstrapError("A runtime parent directory is writable by other users; choose a private directory.")
         info = path.lstat()
-        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+        if not owned(info) or not private(info):
             raise BootstrapError("The runtime directory must be owned by you and have permissions 0700.")
     except OSError:
         raise BootstrapError("Cannot create the private runtime directory; check its location and permissions.") from None
@@ -142,29 +164,41 @@ def private_directory(path: Path) -> None:
 def checked_private_file(path: Path) -> bytes:
     try:
         info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077:
+        if not stat.S_ISREG(info.st_mode) or not owned(info) or info.st_nlink != 1 or not private(info):
             raise BootstrapError("The saved runtime metadata is unsafe; choose a new private runtime directory.")
         return regular_bytes(path)
     except OSError:
         raise BootstrapError("Cannot read the saved runtime metadata; choose a new private runtime directory.") from None
 
 
+def _try_lock(fd: int) -> None:
+    """An exclusive lock on an open file; BlockingIOError while another process holds it."""
+    if WINDOWS:
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            raise BlockingIOError() from None
+        return
+    import fcntl
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 @contextmanager
 def install_lock(root: Path, address: str):
-    import fcntl
-
     try:
-        fd = os.open(root / f".{address}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        fd = os.open(root / f".{address}.lock", os.O_CREAT | os.O_RDWR | O_NOFOLLOW, 0o600)
     except OSError:
         raise BootstrapError("Cannot open the runtime install lock; check the private runtime directory.") from None
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077:
+        if not stat.S_ISREG(info.st_mode) or not owned(info) or info.st_nlink != 1 or not private(info):
             raise BootstrapError("The runtime install lock is unsafe; choose a new private runtime directory.")
         deadline = time.monotonic() + LOCK_TIMEOUT
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _try_lock(fd)
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
@@ -189,7 +223,7 @@ def write_snapshot(runtime: Path, files: dict[str, bytes]) -> None:
             checked_private_file(temporary)
             temporary.unlink()
         try:
-            fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(contents)
                 stream.flush()
@@ -211,12 +245,12 @@ def run_checked(command: list[str], *, env: dict[str, str], cwd: Path, timeout: 
 
 def validate_runtime(runtime: Path, version: str, env: dict[str, str]) -> Path:
     private_directory(runtime / ".venv")
-    private_directory(runtime / ".venv" / "bin")
-    executable = runtime / ".venv" / "bin" / "aot"
-    python = runtime / ".venv" / "bin" / "python"
+    private_directory(venv_scripts(runtime / ".venv"))
+    executable = venv_program(runtime / ".venv", "aot")
+    python = venv_program(runtime / ".venv", "python")
     try:
         info = executable.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or not os.access(executable, os.X_OK):
+        if not stat.S_ISREG(info.st_mode) or not owned(info) or not os.access(executable, os.X_OK):
             raise OSError
     except OSError:
         raise BootstrapError("The prepared runtime executable is unavailable; choose a new --runtime-root to prepare a replacement. Existing runtimes were preserved.") from None
@@ -265,8 +299,8 @@ def install_with_pip(runtime: Path, env: dict[str, str], *, offline: bool, wheel
     run_checked([python, "-I", "-m", "venv", "--without-pip", str(venv)],
                 env=env, cwd=runtime, timeout=INSTALL_TIMEOUT, error=prerequisite_error)
     private_directory(venv)
-    private_directory(venv / "bin")
-    venv_python = str(venv / "bin" / "python")
+    private_directory(venv_scripts(venv))
+    venv_python = str(venv_program(venv, "python"))
     run_checked([venv_python, "-I", "-m", "ensurepip", "--upgrade", "--default-pip"],
                 env=env, cwd=runtime, timeout=INSTALL_TIMEOUT, error=prerequisite_error)
     # --isolated alone still loads global/site pip configuration. os.devnull
@@ -294,8 +328,8 @@ def bootstrap(plugin_root: Path, runtime_root: Path, *, offline: bool = False, i
               wheelhouse: Path | None = None, environ: Mapping[str, str] | None = None) -> dict[str, object]:
     if sys.version_info < (3, 11):
         raise BootstrapError("Runtime setup requires Python 3.11 or newer. Rerun this script with a compatible Python interpreter.")
-    if os.name != "posix":
-        raise BootstrapError("This runtime bootstrap currently supports POSIX systems; use a Linux or macOS Python interpreter.")
+    if os.name not in ("posix", "nt"):
+        raise BootstrapError("This runtime bootstrap supports Linux, macOS and Windows Python interpreters.")
     if installer not in {"auto", "uv", "pip"}:
         raise BootstrapError("Choose --installer auto, uv or pip.")
     if installer == "uv" and wheelhouse is not None:
