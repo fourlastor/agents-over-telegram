@@ -74,10 +74,17 @@ def socket_path(state):
     if len(os.fsencode(path)) <= MAX_SOCKET_PATH:
         return path
     import hashlib
-    runtime = os.environ.get('XDG_RUNTIME_DIR')
-    base = Path(runtime) if runtime and Path(runtime).is_absolute() else Path('/tmp') / f'aot-{os.getuid()}'
     digest = hashlib.sha256(os.fsencode(os.path.realpath(state))).hexdigest()[:16]
-    return base / f'aot-relay-{digest}' / SOCKET_NAME
+    runtime = os.environ.get('XDG_RUNTIME_DIR')
+    for base in ([Path(runtime)] if runtime and Path(runtime).is_absolute() else []) + [_short_base()]:
+        short = base / f'aot-relay-{digest}' / SOCKET_NAME
+        if len(os.fsencode(short)) <= MAX_SOCKET_PATH:
+            return short
+    return short
+
+
+def _short_base():
+    return Path('/tmp') / f'aot-{os.getuid()}'
 
 
 def peer_uid(connection):
