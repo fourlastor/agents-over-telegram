@@ -47,7 +47,7 @@ def test_serve_judges_and_flushes(env, monkeypatch):
     monkeypatch.setattr(core, 'collect', lambda **kw: calls.append(('collect', kw)) or {'status': 'ok'})
     monkeypatch.setattr(core, 'flush', lambda **kw: calls.append(('flush', kw)))
     loop(core, core.state_dir, 2)
-    assert calls == [('collect', {'timeout': 0, 'judge': True}), ('flush', {'limit': 20})] * 2
+    assert calls == [('collect', {'timeout': 0, 'judge': True, 'routed': None}), ('flush', {'limit': 20})] * 2
 
 
 def test_serve_waits_while_another_collector_holds_the_lock(env, monkeypatch):

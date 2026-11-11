@@ -275,7 +275,11 @@ def _wake(args) -> int:
             raise _Woken()
 
     try:
-        result = watch(core, client_id, emit, collect=True, duration=args.duration, keep_running=keep_running)
+        from .credentials import read_private_json
+        from .relay_api import Waiter
+        waiter = Waiter(state, read_private_json(Path(profile['client_file']))['client_secret'])
+        result = watch(core, client_id, emit, collect=True, duration=args.duration, keep_running=keep_running,
+                       wait_for_change=waiter)
     except _Woken:
         from .push import with_shell_fallback
         # The asyncRewake waiter runs only for Claude Code.

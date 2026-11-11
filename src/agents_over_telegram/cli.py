@@ -648,9 +648,11 @@ def run(args):
                 return False
             return True
 
+        from .relay_api import Waiter
+        waiter = Waiter(state_dir, read_private_json(args.client_file)["client_secret"])
         watch(core, client_id, emit, collect=args.collect, duration=args.duration, interval=args.interval,
               poll_timeout=args.poll_timeout, announce_backlog=not args.no_backlog,
-              keep_running=keep_running)
+              keep_running=keep_running, wait_for_change=waiter)
         if moved:
             raise SystemExit(RUNTIME_MOVED_EXIT)
         return None

@@ -168,13 +168,13 @@ def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_runnin
             log(f'aot serve: not answering agents ({type(error).__name__}: {error}); they run their calls themselves')
             relay = None
     try:
-        return _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog)
+        return _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay)
     finally:
         if relay is not None:
             relay.stop()
 
 
-def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog):
+def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay=None):
     from .hosts import RUNTIME_MOVED_EXIT
     failures = 0
     while keep_running is None or keep_running():
@@ -184,7 +184,8 @@ def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog):
             log('aot serve: a newer runtime is installed; restarting on it')
             return RUNTIME_MOVED_EXIT
         try:
-            result = core.collect(timeout=poll_timeout, judge=True)
+            result = core.collect(timeout=poll_timeout, judge=True,
+                                  routed=relay.notify if relay is not None else None)
         except Exception as error:  # the core records intake errors; keep going
             failures += 1
             code = getattr(error, 'code', type(error).__name__)

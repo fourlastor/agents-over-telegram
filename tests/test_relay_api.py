@@ -201,6 +201,120 @@ def test_the_mcp_server_falls_back_only_when_no_relay_took_the_call():
     assert relayed(lambda name, arguments: body, 'message_send', {}) is body
 
 
+def test_a_waiter_without_a_relay_falls_back(env):
+    core, transport, clock = env
+    assert relay_api.Waiter(core.state_dir, 'secret')(1) is False
+
+
+def test_a_waiter_blocks_until_the_relay_has_news(env, relay):
+    import threading
+    import time
+    core, transport, clock = env
+    client, credentials = bind(core, transport)
+    waiter = relay_api.Waiter(core.state_dir, credentials['client_secret'])
+    # The first wait only learns the relay's position.
+    assert waiter(5) is True and waiter.instance == relay.instance
+    threading.Timer(0.2, relay.notify).start()
+    started = time.monotonic()
+    assert waiter(10) is True
+    assert time.monotonic() - started < 5 and waiter.generation == relay.generation
+    started = time.monotonic()
+    assert waiter(0.3) is True and time.monotonic() - started >= 0.25
+
+
+def test_a_wait_needs_the_client_secret(env, relay):
+    core, transport, clock = env
+    bind(core, transport)
+    assert relay_api.Waiter(core.state_dir, 'wrong')(1) is False
+
+
+def test_stopping_the_relay_releases_waiters(env):
+    import threading
+    import time
+    core, transport, clock = env
+    client, credentials = bind(core, transport)
+    running = relay_api.Relay(core, core.state_dir)
+    running.start()
+    waiter = relay_api.Waiter(core.state_dir, credentials['client_secret'])
+    waiter(1)
+    threading.Timer(0.2, running.stop).start()
+    started = time.monotonic()
+    waiter(30)
+    assert time.monotonic() - started < 10
+
+
+def test_a_send_through_the_relay_wakes_waiters(env, relay):
+    core, transport, clock = env
+    client, credentials = bind(core, transport)
+    before = relay.generation
+    body = relay_api.call(core.state_dir, credentials['client_secret'], 'message_send',
+                          {'text': 'hi', 'idempotency_key': 'k1'})
+    assert body['ok'] is True and relay.generation == before + 1
+
+
+def test_serve_wakes_waiters_after_routing_updates(env, monkeypatch):
+    core, transport, clock = env
+    outcomes = [{'status': 'ok', 'updates': 0}, {'status': 'ok', 'updates': 2}]
+
+    def collect(**kw):
+        outcome = outcomes.pop(0)
+        if outcome['updates']:
+            kw['routed']()
+        return outcome
+    monkeypatch.setattr(core, 'collect', collect)
+    monkeypatch.setattr(core, 'flush', lambda **kw: None)
+    notified = []
+
+    class Recorder:
+        log = None
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def notify(self):
+            notified.append(1)
+    left = [2]
+
+    def keep_running():
+        left[0] -= 1
+        return left[0] >= 0
+    serve.run(core, core.state_dir, poll_timeout=0, sleep=lambda s: None, keep_running=keep_running,
+              log=lambda t: None, relay=Recorder())
+    assert notified == [1]
+
+
+def test_a_relayed_watcher_neither_collects_nor_sleeps(env, monkeypatch):
+    from agents_over_telegram.push import watch
+    core, transport, clock = env
+    client, _ = bind(core, transport)
+    append(transport, 'hello')
+    core.collect()
+    monkeypatch.setattr(core, 'collect', lambda **kw: (_ for _ in ()).throw(AssertionError('collected')))
+    events, waits = [], []
+    result = watch(core, client, events.append, collect=True, duration=0, sleep=lambda s: (_ for _ in ()).throw(
+        AssertionError('slept')), keep_running=lambda: len(waits) < 2, wait_for_change=lambda t: waits.append(t) or True)
+    assert result['reason'] == 'parent_exited' and len(events) == 1 and 'telegram_messages' == events[0]['type']
+
+
+def test_a_watcher_collects_again_when_the_relay_is_gone(env, monkeypatch):
+    from agents_over_telegram.push import watch
+    core, transport, clock = env
+    client, _ = bind(core, transport)
+    collected = []
+    monkeypatch.setattr(core, 'collect', lambda **kw: collected.append(kw) or {'status': 'ok'})
+    runs = [0]
+
+    def keep_running():
+        runs[0] += 1
+        return runs[0] <= 2
+    watch(core, client, lambda e: None, collect=True, duration=0, sleep=lambda s: None,
+          keep_running=keep_running, wait_for_change=lambda t: False)
+    assert len(collected) == 2
+
+
 @pytest.fixture
 def short_tmp(monkeypatch):
     import shutil
@@ -321,3 +435,27 @@ def test_image_sends_stay_with_the_agent():
     assert relayed(lambda name, arguments: called.append(name), 'message_send',
                    {'text': 'x', 'idempotency_key': 'k', 'image_path': '/tmp/a.png'}) is None
     assert called == []
+
+
+def test_collect_announces_routed_updates_before_the_judge(env, monkeypatch):
+    core, transport, clock = env
+    client, _ = bind(core, transport)
+    order = []
+    monkeypatch.setattr(core, '_judge_pending', lambda: order.append('judge'))
+    core.collect(judge=True, routed=lambda: order.append('routed'))
+    assert order == ['judge']  # nothing routed, nothing announced
+    order.clear()
+    append(transport, 'hello')
+    core.collect(judge=True, routed=lambda: order.append('routed'))
+    assert order == ['routed', 'judge']
+
+
+def test_a_judge_yes_is_announced(env, monkeypatch):
+    core, transport, clock = env
+    client, _ = bind(core, transport)
+    counts = iter([3, 4])
+    monkeypatch.setattr(core, '_delivery_count', lambda: next(counts))
+    monkeypatch.setattr(core, '_judge_pending', lambda: None)
+    announced = []
+    core.collect(judge=True, routed=lambda: announced.append(1))
+    assert announced == [1]

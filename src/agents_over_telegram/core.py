@@ -2038,6 +2038,10 @@ class Core:
             except Exception:
                 pass
 
+    def _delivery_count(self):
+        with self._db() as db:
+            return db.execute('SELECT count(*) FROM inbox WHERE context=0').fetchone()[0]
+
     def _judge_pending(self):
         """Ask the model about queued context messages; never fails collection.
 
@@ -2130,7 +2134,7 @@ class Core:
                    (json.dumps(payload, ensure_ascii=False), self.clock(), inbox_id))
         return 'yes', None
 
-    def collect(self, *, timeout=0, judge=False):
+    def collect(self, *, timeout=0, judge=False, routed=None):
         """Fetch and route one page of Telegram updates.
 
         ``judge`` also runs the optional model judge afterwards. Only
@@ -2184,6 +2188,13 @@ class Core:
                         # older long-poller, or nothing would long-poll meanwhile.
                         db.execute('UPDATE account SET collector_version=?,collector_seen=? WHERE singleton=1',
                                    (self.runtime_version, now))
+                if routed is not None and accepted:
+                    # Waiting agents hear about new deliveries now, not after
+                    # the courtesy steps and the model judge below.
+                    try:
+                        routed()
+                    except Exception:
+                        pass
                 self._probe_bot_admin(account)
                 try:
                     self._set_bot_menu()
@@ -2216,7 +2227,11 @@ class Core:
                     pass
                 try:
                     if judge:
+                        before = self._delivery_count() if routed is not None else None
                         self._judge_pending()
+                        if before is not None and self._delivery_count() != before:
+                            # A "yes" made a context message a delivery.
+                            routed()
                 except Exception:
                     # Neither may the optional model judge.
                     pass
