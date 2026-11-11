@@ -19,7 +19,7 @@ import time
 from typing import Any, Callable
 
 from .core import CoreError, _mapping
-from .relay_api import Unavailable
+from .relay_api import Lost, Unavailable
 from . import compat
 from .credentials import CredentialError
 from .transport import TransportError
@@ -205,6 +205,14 @@ def pending_summary(core, client_id: str) -> dict[str, Any] | None:
             f'for this agent. {NOTICE_GUIDANCE}'}
 
 
+_NO_RELAY = object()
+# Announced when the collector took a claim but its answer was lost: the
+# deliveries it recorded would otherwise never be announced.
+LOST_CLAIM_EVENT = {
+    'type': 'telegram_messages', 'new': None, 'pending': None, 'delivery_ids': [], 'senders': [],
+    'notice': '[Agents over Telegram] New Telegram messages may be waiting for this agent. ' + NOTICE_GUIDANCE,
+}
+
 # How long one wait on the always-on collector lasts before the watcher checks
 # its host is still there, and its inbox for deliveries the collector did not
 # announce (a held batch whose interval ended, a lease that expired).
@@ -298,19 +306,24 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
         if relayed and remote is not None:
             try:
                 event = remote.claim('watch')
+            except Lost:
+                # The relay may have recorded the claim already; a local claim
+                # would find nothing. Announce that work may be waiting.
+                event = LOST_CLAIM_EVENT
             except Unavailable:
-                relayed = False
+                event = _NO_RELAY
             except CoreError as error:
                 if error.code in FATAL_CODES:
                     return stopped(error.code)
                 event = None
-            else:
+            if event is not _NO_RELAY:
                 if event is not None:
                     emit(event)
                     events += 1
                 if deadline is not None and clock() >= deadline:
                     return {'events': events, 'reason': 'duration_elapsed'}
                 continue
+            relayed = False
         ready_locally()
         if collect and not relayed and clock() >= next_collect:
             timeout = poll_timeout

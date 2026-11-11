@@ -120,3 +120,50 @@ def test_without_a_relay_agents_still_work_locally(tmp_path):
     args = argparse.Namespace(host='claude', project_dir=result['project_dir'], collect_interval=0)
     answer = hosts.hook_answer(args, json.dumps({'hook_event_name': 'UserPromptSubmit'}))
     assert '1 new Telegram message' in answer['hookSpecificOutput']['additionalContext']
+
+
+def test_a_lost_claim_is_announced_not_claimed_again(project, monkeypatch):
+    result, relay = project
+    receive(result, 'hello')
+    node = relay_api.Node(result['state_dir'], secret(result))
+    # The relay claims, then the answer is lost on the way back.
+    original = relay._node_op
+
+    def claim_then_lose(op, client_id, request):
+        original(op, client_id, request)
+        return None
+    monkeypatch.setattr(relay, '_node_op', claim_then_lose)
+    opened = []
+    core = relay_api.LazyCore(lambda: opened.append(1))
+    events, rounds = [], [0]
+
+    def keep_running():
+        rounds[0] += 1
+        return rounds[0] <= 1
+    monkeypatch.setattr(node, 'prepare_watch', lambda announce_backlog: None)
+    push.watch(core, result['client_id'], events.append, collect=True, duration=0, keep_running=keep_running,
+               remote=node)
+    assert events == [push.LOST_CLAIM_EVENT] and opened == []
+
+
+def test_a_lost_hook_answer_is_not_redone_locally(project, monkeypatch):
+    result, relay = project
+    monkeypatch.setattr(relay_api, '_request', lambda state, request, timeout: None)
+    no_local_database(monkeypatch)
+    assert hosts._relayed_hook(Path(result['state_dir']), Path(result['client_file']), 'UserPromptSubmit', {}) is None
+
+
+def test_hooks_and_claims_give_up_quickly():
+    assert relay_api.NODE_TIMEOUT <= 5
+
+
+def test_waits_have_their_own_slots(project):
+    result, relay = project
+    for _ in range(relay_api.MAX_ACTIVE):
+        relay.active.acquire()
+    try:
+        # Calls are busy, but a wait still gets through.
+        assert relay_api.Waiter(result['state_dir'], secret(result))(0.1) is True
+    finally:
+        for _ in range(relay_api.MAX_ACTIVE):
+            relay.active.release()

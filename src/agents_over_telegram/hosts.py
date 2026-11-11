@@ -124,12 +124,16 @@ _HOOK_FIELDS = ('tool_name', 'stop_hook_active')
 def _relayed_hook(state: Path, client_file: Path, event: str, payload: dict):
     """The hook's answer from the always-on collector, or _NO_RELAY when none took it."""
     from .credentials import read_private_json
-    from .relay_api import Node, Unavailable
+    from .relay_api import Lost, Node, Unavailable
     try:
         secret = read_private_json(client_file)['client_secret']
         return Node(state, secret).hook(event, {k: payload[k] for k in _HOOK_FIELDS if k in payload})
     except Unavailable:
         return _NO_RELAY
+    except Lost:
+        # The relay may already have recorded this notice as given; doing it
+        # again here would find nothing. The next prompt names pending work.
+        return None
 
 
 def _maybe_collect(core, state: Path, fake: bool, interval) -> None:

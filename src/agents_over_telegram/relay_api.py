@@ -60,6 +60,10 @@ REQUEST_DEADLINE = 10.0
 # At most this many requests are handled at once; more get "busy" and the
 # agents run those calls themselves.
 MAX_ACTIVE = 32
+# Waiting agents (one per session) have their own slots.
+MAX_WAITS = 64
+# Hooks and inbox claims run inside host hooks with short time limits.
+NODE_TIMEOUT = 4.0
 # The relay records the socket it listens on here, inside the state
 # directory, so agents whose environment differs (another TMPDIR) find it.
 SOCKET_RECORD = 'relay-socket.json'
@@ -176,6 +180,8 @@ class Relay:
         self.changed = threading.Condition()
         self.path = None
         self.active = threading.BoundedSemaphore(MAX_ACTIVE)
+        self.waits = threading.BoundedSemaphore(MAX_WAITS)
+        self.connections = threading.BoundedSemaphore(MAX_ACTIVE + MAX_WAITS)
         # When an agent last called or waited (time.monotonic), for a
         # collector started on demand that stops when idle.
         self.last_activity = None
@@ -254,11 +260,17 @@ class Relay:
 
     def handle(self, connection):
         self.last_activity = time.monotonic()
-        if not self.active.acquire(blocking=False):
+
+        def busy():
             try:
                 _send(connection, {'protocol': PROTOCOL, 'ok': False, 'error': 'busy'})
             except OSError:
                 pass
+        # A connection slot covers reading the request (bounded by
+        # REQUEST_DEADLINE); then a call slot or, for a wait, a wait slot, so
+        # waiting agents cannot use up the slots calls need.
+        if not self.connections.acquire(blocking=False):
+            busy()
             return
         try:
             # A peer whose user cannot be determined is refused, like another user.
@@ -270,16 +282,23 @@ class Relay:
             except (ValueError, UnicodeDecodeError, RecursionError):
                 _send(connection, {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'})
                 return
-            connection.settimeout(CALL_TIMEOUT)
+            slot = self.waits if isinstance(request, dict) and request.get('op') == 'wait' else self.active
+            if not slot.acquire(blocking=False):
+                busy()
+                return
             try:
-                answer = self.answer(request)
-            except Exception:
-                answer = {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
-            _send(connection, answer)
+                connection.settimeout(CALL_TIMEOUT)
+                try:
+                    answer = self.answer(request)
+                except Exception:
+                    answer = {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
+                _send(connection, answer)
+            finally:
+                slot.release()
         except OSError:
             pass
         finally:
-            self.active.release()
+            self.connections.release()
 
     def start(self):
         """Listen on the socket; returns the server thread."""
@@ -450,6 +469,14 @@ class Waiter:
         return True
 
 
+class Lost(Exception):
+    """The relay took the request but its answer never arrived.
+
+    The work may have run there (a claim may have recorded announcements), so
+    the agent must not run it a second time on its own database handle.
+    """
+
+
 class Node:
     """An agent's side of the relay: hook answers, inbox claims, waits and status.
 
@@ -464,9 +491,11 @@ class Node:
         self.waiter = Waiter(state, secret)
 
     def _op(self, op, **fields):
-        answer = _request(self.state, {'op': op, 'secret': self.secret, **fields}, CALL_TIMEOUT)
+        answer = _request(self.state, {'op': op, 'secret': self.secret, **fields}, NODE_TIMEOUT)
+        if answer is None:
+            raise Lost(op)
         if not isinstance(answer, dict) or not answer.get('ok'):
-            raise Unavailable((answer or {}).get('error') or 'no_answer')
+            raise Unavailable(answer.get('error') or 'no_answer')
         if answer.get('error_code'):
             from .core import CoreError
             raise CoreError(answer['error_code'])
@@ -485,7 +514,7 @@ class Node:
         return self.waiter(timeout)
 
     def status(self):
-        body = call(self.state, self.secret, 'connection_status', {})
+        body = call(self.state, self.secret, 'connection_status', {}, timeout=NODE_TIMEOUT * 2)
         if not body.get('ok'):
             from .core import CoreError
             raise CoreError((body.get('error') or {}).get('code') or 'relay_refused')
