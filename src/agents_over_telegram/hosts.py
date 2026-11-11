@@ -249,8 +249,13 @@ def _start_collector(state: Path) -> None:
             pass
 
 
-def _wake(args) -> int:
+def wake_key(client_id: str, session: str | None) -> str:
+    """The name of a session's wake lock and owner files in wake-locks."""
     import hashlib
+    return hashlib.sha256(f'{client_id}\0{session or ""}'.encode()).hexdigest()[:24]
+
+
+def _wake(args) -> int:
     from .cli import LazyTransport, _client, _mode
     from .core import Core
     from .onboarding import read_profile
@@ -281,7 +286,7 @@ def _wake(args) -> int:
     _start_collector(state)
     locks = state / 'wake-locks'
     locks.mkdir(mode=0o700, exist_ok=True)
-    key = hashlib.sha256(f'{client_id}\0{args.session or ""}'.encode()).hexdigest()[:24]
+    key = wake_key(client_id, args.session)
     # The newest waiter for a session takes over, so the time limit counts
     # from the latest turn end, not from the first waiter. It records itself
     # as the owner; the running waiter sees that and exits, freeing the lock.

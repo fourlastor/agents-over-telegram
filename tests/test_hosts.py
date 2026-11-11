@@ -631,9 +631,8 @@ def wait_for_owner(result, session, process, timeout=30):
     over. Starting the next waiter before that would make the order of the two
     a race on a slow machine.
     """
-    import hashlib
-    key = hashlib.sha256(f"{result['client_id']}\0{session}".encode()).hexdigest()[:24]
-    owner = Path(result['state_dir']) / 'wake-locks' / f'{key}.owner'
+    from agents_over_telegram.hosts import wake_key
+    owner = Path(result['state_dir']) / 'wake-locks' / f"{wake_key(result['client_id'], session)}.owner"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if owner.exists() and owner.read_text(encoding='utf-8').startswith(f'{process.pid}-'):
@@ -770,7 +769,8 @@ def test_waiting_waiter_keeps_waiting_until_replaced(tmp_path):
     from agents_over_telegram import compat
     import hashlib
     result = connected(tmp_path)
-    key = hashlib.sha256(f"{result['client_id']}\0abc".encode()).hexdigest()[:24]
+    from agents_over_telegram.hosts import wake_key
+    key = wake_key(result['client_id'], 'abc')
     locks = Path(result['state_dir']) / 'wake-locks'
     locks.mkdir(mode=0o700, exist_ok=True)
     # Stand in for an old waiter that is slow to notice the handover.
