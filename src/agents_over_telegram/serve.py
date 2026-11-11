@@ -148,14 +148,34 @@ class Watchdog:
         return thread
 
 
-def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_running=None, log=None, watchdog=None):
-    """Collect without stopping; return 3 when the runtime moved, 0 when told to stop."""
-    from .hosts import RUNTIME_MOVED_EXIT
+def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_running=None, log=None, watchdog=None,
+        relay=None):
+    """Collect without stopping; return 3 when the runtime moved, 0 when told to stop.
+
+    With ``relay`` it also answers agents' tool calls on the state directory's
+    socket (relay_api). Agents run calls themselves when it cannot listen.
+    """
     log = log or (lambda text: print(text, flush=True))
     rotate_log(state)
     log(f'aot serve: collecting for {state}')
     if watchdog is not None:
         watchdog.start(log)
+    if relay is not None:
+        relay.log = log
+        try:
+            relay.start()
+        except Exception as error:
+            log(f'aot serve: not answering agents ({type(error).__name__}: {error}); they run their calls themselves')
+            relay = None
+    try:
+        return _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog)
+    finally:
+        if relay is not None:
+            relay.stop()
+
+
+def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog):
+    from .hosts import RUNTIME_MOVED_EXIT
     failures = 0
     while keep_running is None or keep_running():
         if watchdog is not None:
