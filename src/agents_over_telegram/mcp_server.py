@@ -544,6 +544,11 @@ def relayed(forward: Any, name: str, arguments: dict[str, Any], client_file: Any
     from .relay_api import Unavailable
     if forward is None:
         return None
+    if name == "message_send" and arguments.get("image_path"):
+        # The image is read by whoever runs the send. The agent may reach
+        # files the collector's service cannot (macOS privacy folders), so
+        # image sends stay with the agent.
+        return None
     try:
         body = forward(name, arguments)
     except Unavailable:

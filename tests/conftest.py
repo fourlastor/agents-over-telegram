@@ -6,6 +6,7 @@ from agents_over_telegram import serve as _serve
 # The real steps, for the tests that check them with fakes.
 REAL_INSTALL_COLLECTOR = _onboarding._install_collector
 REAL_START_ON_DEMAND = _serve.start_on_demand
+REAL_ASK_SERVE = _onboarding._ask_serve
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +23,9 @@ def _no_real_collector_service(monkeypatch):
     # touch this machine's systemd or launchd; tests of that step patch it back.
     from agents_over_telegram import onboarding
     monkeypatch.setattr(onboarding, '_install_collector',
-                        lambda state, run_command=None: {'installed': False, 'reason': 'test'})
+                        lambda state, run_command=None, executable=None: {'installed': False, 'reason': 'test'})
+    # The interactive wizard asks the human about it; tests answer no.
+    monkeypatch.setattr(onboarding, '_ask_serve', lambda: False)
 
 
 @pytest.fixture(autouse=True)
