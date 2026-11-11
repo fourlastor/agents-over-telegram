@@ -507,7 +507,8 @@ def run(args):
             return serve.uninstall(state_dir)
         if args.status:
             return serve.status(state_dir)
-        raise SystemExit(serve.run(core, state_dir, watchdog=serve.Watchdog()))
+        from .relay_api import Relay
+        raise SystemExit(serve.run(core, state_dir, watchdog=serve.Watchdog(), relay=Relay(core, state_dir)))
     if args.command == "flush":
         return core.flush(client_id=_client(core, args.client_file, args.expected_client_id) if args.client_file else None)
     if args.command == "account-status":
@@ -539,8 +540,16 @@ def run(args):
         raise CredentialError("client_file_required")
     client_id = _client(core, args.client_file, args.expected_client_id)
     if args.command == "tool":
-        from .mcp_server import call_tool
-        return call_tool(core, client_id, args.name, _tool_arguments())
+        from . import relay_api
+        from .mcp_server import _TOOL_MAP, _VALIDATORS, call_tool, relayed
+        arguments = _tool_arguments()
+        if args.name in _TOOL_MAP and isinstance(arguments, dict) and _VALIDATORS[args.name].is_valid(arguments):
+            secret = read_private_json(args.client_file)["client_secret"]
+            body = relayed(lambda name, values: relay_api.call(state_dir, secret, name, values), args.name, arguments,
+                           args.client_file)
+            if body is not None:
+                return body
+        return call_tool(core, client_id, args.name, arguments)
     if args.command == "pair-begin":
         return core.connection_begin(client_id)
     if args.command == "status":

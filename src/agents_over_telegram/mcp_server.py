@@ -48,6 +48,9 @@ ERROR_MESSAGES = {
     "invalid_arguments": "Arguments do not match this tool's schema.",
     "unknown_tool": "This tool is not available.",
     "internal_error": "The operation failed. Check local setup and status.",
+    "node_too_old": "This project's AOT runtime is too old for the always-on collector. Rerun setup in this project.",
+    "relay_no_answer": "The always-on collector took this call but no answer arrived. Check delivery_status or connection_status before any retry.",
+    "relay_refused": "The always-on collector refused this call. Check aot serve --status.",
     "client_revoked": "This local client has been disconnected or revoked.",
     "unauthorized": "This operation is not authorized for this local client.",
     "invalid_client": "This local client is not registered.",
@@ -530,7 +533,29 @@ def call_tool(core: Any, client_id: str, name: str, arguments: Any) -> dict[str,
         return _error_body(_exception_code(exc), getattr(exc, "details", None))
 
 
-def create_server(core: Any, client_id: str, client_file: Any = None) -> Server:
+def _body_result(body: dict[str, Any]) -> types.CallToolResult:
+    encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return types.CallToolResult(content=[types.TextContent(type="text", text=encoded)],
+                                structuredContent=body, isError=not body.get("ok"))
+
+
+def relayed(forward: Any, name: str, arguments: dict[str, Any], client_file: Any = None) -> dict[str, Any] | None:
+    """Run a validated call on the always-on collector; None when none took it."""
+    from .relay_api import Unavailable
+    if forward is None:
+        return None
+    try:
+        body = forward(name, arguments)
+    except Unavailable:
+        return None
+    if name == "messages_poll" and body.get("ok") and isinstance(body.get("result"), dict):
+        warning = _codex_hooks_warning(client_file)
+        if warning:
+            body["result"]["host_warning"] = warning
+    return body
+
+
+def create_server(core: Any, client_id: str, client_file: Any = None, forward: Any = None) -> Server:
     """Create a server for an identity already authenticated by ``serve``.
 
     This injection seam is also used by isolated SDK interoperability tests;
@@ -557,6 +582,9 @@ def create_server(core: Any, client_id: str, client_file: Any = None) -> Server:
             arguments = request.params.arguments or {}
             if not _VALIDATORS[name].is_valid(arguments):
                 return types.ServerResult(_error("invalid_arguments"))
+            body = await asyncio.to_thread(relayed, forward, name, arguments, client_file)
+            if body is not None:
+                return types.ServerResult(_body_result(body))
             value = await asyncio.to_thread(_dispatch, core, client_id, name, arguments, client_file)
             return types.ServerResult(_result(value))
         except Exception as exc:
@@ -595,7 +623,11 @@ def serve(state_dir: str | Path, client_file: str | Path, transport: Any = None)
         client_id = core.authenticate(secret)
         if client_id != declared_id:
             raise ValueError("Client identity mismatch")
-        server = create_server(core, client_id, client_file)
+        from . import relay_api
+        state = Path(state_dir)
+        # Calls go to the always-on collector when one answers, else run here.
+        forward = (lambda name, arguments: relay_api.call(state, secret, name, arguments)) if transport is None else None
+        server = create_server(core, client_id, client_file, forward=forward)
     except Exception:
         raise RuntimeError("MCP startup failed. Check private setup, state directory and client file.") from None
     asyncio.run(_run_stdio(server))
