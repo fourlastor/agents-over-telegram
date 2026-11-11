@@ -622,17 +622,30 @@ def serve(state_dir: str | Path, client_file: str | Path, transport: Any = None)
         secret = client.get("client_secret")
         if not isinstance(declared_id, str) or not declared_id or not isinstance(secret, str) or not secret:
             raise ValueError("Invalid client file")
-        # Constructing the live transport does not consume updates or send.
-        selected_transport = transport if transport is not None else TelegramTransport(load_token(Path(state_dir)))
-        core = Core(Path(state_dir), selected_transport)
-        client_id = core.authenticate(secret)
-        if client_id != declared_id:
-            raise ValueError("Client identity mismatch")
         from . import relay_api
         state = Path(state_dir)
+
+        def local_core():
+            # Only when no relay answers: open the database and check the client
+            # file against it. Constructing the live transport does not consume
+            # updates or send.
+            selected = transport if transport is not None else TelegramTransport(load_token(state))
+            opened = Core(state, selected)
+            if opened.authenticate(secret) != declared_id:
+                raise ValueError("Client identity mismatch")
+            return opened
+        core = relay_api.LazyCore(local_core)
+        # The client file is checked at startup: by the relay when one answers,
+        # otherwise against the database here.
+        try:
+            body = relay_api.call(state, secret, "connection_status", {}, timeout=relay_api.NODE_TIMEOUT * 2)
+            if not body.get("ok"):
+                raise ValueError("Client rejected by the relay")
+        except relay_api.Unavailable:
+            core.clock  # opens and checks locally
         # Calls go to the always-on collector when one answers, else run here.
         forward = lambda name, arguments: relay_api.call(state, secret, name, arguments)
-        server = create_server(core, client_id, client_file, forward=forward)
+        server = create_server(core, declared_id, client_file, forward=forward)
     except Exception:
         raise RuntimeError("MCP startup failed. Check private setup, state directory and client file.") from None
     asyncio.run(_run_stdio(server))

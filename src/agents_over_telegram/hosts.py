@@ -100,16 +100,40 @@ def hook_answer(args, raw: str) -> dict | None:
     state = Path(profile['state_dir'])
     if not state.is_dir():
         return None
-    core = Core(state, _NoTransport(), recover_sends=False)
-    client_id = _client(core, Path(profile['client_file']), profile['client_id'])
-    _maybe_collect(core, state, profile['mode'] == 'fake', getattr(args, 'collect_interval', 0))
-    answer = hook_response(core, client_id, event, payload)
+    answer = _relayed_hook(state, Path(profile['client_file']), event, payload)
+    if answer is _NO_RELAY:
+        # No relay: this hook does the inbox work on its own database handle.
+        core = Core(state, _NoTransport(), recover_sends=False)
+        client_id = _client(core, Path(profile['client_file']), profile['client_id'])
+        _maybe_collect(core, state, profile['mode'] == 'fake', getattr(args, 'collect_interval', 0))
+        answer = hook_response(core, client_id, event, payload)
     if answer is not None and args.host == 'claude':
         from .push import with_shell_fallback
         for container, key in ((answer, 'reason'), (answer.get('hookSpecificOutput'), 'additionalContext')):
             if isinstance(container, dict) and isinstance(container.get(key), str):
                 container[key] = with_shell_fallback(container[key])
     return answer
+
+
+_NO_RELAY = object()
+# The hook input fields hook_response reads; the rest (prompts, tool output)
+# never leaves this process.
+_HOOK_FIELDS = ('tool_name', 'stop_hook_active')
+
+
+def _relayed_hook(state: Path, client_file: Path, event: str, payload: dict):
+    """The hook's answer from the always-on collector, or _NO_RELAY when none took it."""
+    from .credentials import read_private_json
+    from .relay_api import Lost, Node, Unavailable
+    try:
+        secret = read_private_json(client_file)['client_secret']
+        return Node(state, secret).hook(event, {k: payload[k] for k in _HOOK_FIELDS if k in payload})
+    except Unavailable:
+        return _NO_RELAY
+    except Lost:
+        # The relay may already have recorded this notice as given; doing it
+        # again here would find nothing. The next prompt names pending work.
+        return None
 
 
 def _maybe_collect(core, state: Path, fake: bool, interval) -> None:
@@ -196,9 +220,15 @@ def run_wake(args) -> int:
         return 0
 
 
-def _keep_alive(core, client_id) -> bool:
+def _keep_alive(core, client_id, remote=None) -> bool:
     """Whether the owner turned on the daily keep-alive wake for this client."""
+    from .relay_api import Unavailable
     try:
+        if remote is not None:
+            try:
+                return bool((remote.status().get('routing') or {}).get('keep_alive'))
+            except Unavailable:
+                pass
         return bool((core.connection_status(client_id).get('routing') or {}).get('keep_alive'))
     except Exception:
         return False
@@ -235,8 +265,19 @@ def _wake(args) -> int:
         return 0
     fake = profile['mode'] == 'fake'
     _mode(state, fake)
-    core = Core(state, LazyTransport(state, fake), recover_sends=False)
-    client_id = _client(core, Path(profile['client_file']), profile['client_id'])
+    from .credentials import read_private_json
+    from .relay_api import LazyCore, Node
+    client_file = Path(profile['client_file'])
+    client_id = profile['client_id']
+
+    def local_core():
+        # Only when no relay answers: open the database and check the client
+        # file against it, as before the relay.
+        opened = Core(state, LazyTransport(state, fake), recover_sends=False)
+        _client(opened, client_file, client_id)
+        return opened
+    core = LazyCore(local_core)
+    remote = Node(state, read_private_json(client_file)['client_secret'])
     _start_collector(state)
     locks = state / 'wake-locks'
     locks.mkdir(mode=0o700, exist_ok=True)
@@ -285,11 +326,8 @@ def _wake(args) -> int:
             raise _Woken()
 
     try:
-        from .credentials import read_private_json
-        from .relay_api import Waiter
-        waiter = Waiter(state, read_private_json(Path(profile['client_file']))['client_secret'])
         result = watch(core, client_id, emit, collect=True, duration=args.duration, keep_running=keep_running,
-                       wait_for_change=waiter)
+                       remote=remote)
     except _Woken:
         from .push import with_shell_fallback
         # The asyncRewake waiter runs only for Claude Code.
@@ -302,7 +340,7 @@ def _wake(args) -> int:
     # for longer than the time limit would stop hearing Telegram for good.
     # With keep-alive on, the session's current waiter wakes it once when time
     # is up, so the turn end starts a fresh waiter.
-    if result.get('reason') == 'duration_elapsed' and _keep_alive(core, client_id) and keep_running():
+    if result.get('reason') == 'duration_elapsed' and _keep_alive(core, client_id, remote) and keep_running():
         sys.stderr.write(REFRESH_NOTICE + '\n')
         sys.stderr.flush()
         return WAKE_EXIT

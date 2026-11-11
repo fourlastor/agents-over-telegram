@@ -440,6 +440,14 @@ def test_opt_in_dispatcher_starts_after_successful_initialize_without_notificati
         "--state-dir", str(root / "state"), "--fake", "relay-dispatch",
         "--endpoint", "unix://" + env["AOT_CODEX_SOCKET"], "--duration", "0", "--collect",
     ]
+    # The dispatcher writes its ready line after its record; on a slow runner,
+    # finishing at once can stop it before that line is written.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        log = root / "dispatcher.jsonl"
+        if log.exists() and "test_dispatch_ready" in log.read_text(encoding='utf-8'):
+            break
+        time.sleep(0.05)
     output, error = finish(process)
     assert process.returncode == 0, error
     assert output == b""
