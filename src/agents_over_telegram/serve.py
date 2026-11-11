@@ -36,7 +36,8 @@ LOG_LIMIT = 1_000_000  # bytes; a bigger log is moved to serve.log.1 when the se
 POLL_TIMEOUT = 20
 BUSY_PAUSE = 2.0
 BACKOFF = 2.0
-BACKOFF_MAX = 300.0
+# Well under WATCHDOG_LIMIT, so a long outage never looks like a stuck loop.
+BACKOFF_MAX = 120.0
 # A loop iteration takes at most a long poll plus a few requests; one that
 # runs past this is stuck, and the collector exits so the service restarts it.
 WATCHDOG_LIMIT = 300.0
@@ -147,8 +148,15 @@ def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_runnin
             code = getattr(error, 'code', type(error).__name__)
             pause = min(BACKOFF_MAX, BACKOFF * 2 ** min(failures - 1, 16))
             log(f'aot serve: collection failed ({code}); retrying in {pause:.0f}s')
+            # Waiting out a failure is progress: beat around the pause.
+            if watchdog is not None:
+                watchdog.beat()
             sleep(pause)
+            if watchdog is not None:
+                watchdog.beat()
             continue
+        if watchdog is not None:
+            watchdog.beat()
         if failures:
             log('aot serve: collecting again')
         failures = 0
