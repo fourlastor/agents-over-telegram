@@ -1,4 +1,18 @@
+import os
+
 import pytest
+
+# The Codex desktop integrations (the desktop listener, the app-server client,
+# the shared-backend wrapper and the relay watcher) drive Unix processes,
+# sockets and signals and are not supported on Windows.
+collect_ignore = ([
+    'test_appserver_client.py', 'test_desktop_dispatcher.py', 'test_dispatcher.py',
+    'test_macos_desktop_queue.py', 'test_native_desktop_queue.py', 'test_relay_watch.py',
+    'test_shared_backend_wrapper.py',
+    # These fake uv and the runtime with POSIX shebang scripts; CI runs the
+    # real bootstrap on Windows instead.
+    'test_bootstrap_runtime.py',
+] if os.name == 'nt' else [])
 
 from agents_over_telegram import onboarding as _onboarding
 from agents_over_telegram import serve as _serve
@@ -34,3 +48,28 @@ def _no_collector_started_on_demand(monkeypatch):
     # Tests must never leave a real process behind; its own tests use the real step.
     from agents_over_telegram import serve
     monkeypatch.setattr(serve, 'start_on_demand', lambda state, **kwargs: {'started': False, 'reason': 'test'})
+
+
+_HANG_SECONDS = int(os.environ.get('AOT_TEST_HANG_SECONDS') or 0)
+
+
+@pytest.fixture(autouse=True)
+def _hang_guard():
+    # CI sets AOT_TEST_HANG_SECONDS where a hung test would otherwise run into
+    # the job limit, which discards the whole log. faulthandler dumps every
+    # thread's stack and exits the process instead, so the log shows where.
+    if not _HANG_SECONDS:
+        yield
+        return
+    import faulthandler
+    import sys
+    # pytest swaps sys.stderr per test; the dump must outlive that.
+    faulthandler.dump_traceback_later(_HANG_SECONDS, exit=True, file=sys.__stderr__)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+# For tests of POSIX file modes, owners and shebang scripts, which Windows does not have.
+posix_only = pytest.mark.skipif(os.name == 'nt', reason='POSIX file modes, owners or scripts')

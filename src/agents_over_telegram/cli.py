@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 
+from . import compat
 from .credentials import CredentialError, private_directory, read_private_json, validate_token, write_private_json
 from .transport import FakeTransport, TelegramTransport, TransportError, make_transport
 
@@ -126,12 +127,12 @@ def render_plugin(state_dir, client_file, output, name):
         elif src.is_file():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
-    executable = str(Path(sys.executable).parent / "aot")
+    executable = str(compat.own_aot())
     entry = {"type": "stdio", "command": executable,
              "args": ["--state-dir", str(state_dir), "mcp", "--client-file", str(Path(client_file).absolute())]}
-    (output / ".mcp.json").write_text(json.dumps({"mcpServers": {"telegram": entry}}, indent=2) + "\n")
+    (output / ".mcp.json").write_text(json.dumps({"mcpServers": {"telegram": entry}}, indent=2) + "\n", encoding='utf-8')
     path = output / ".codex-plugin" / "plugin.json"
-    manifest = json.loads(path.read_text())
+    manifest = json.loads(path.read_text(encoding='utf-8'))
     manifest["name"] = name
     # A rendered profile is already wired. Its setup action must not
     # create a second, project-native connection for the same client.
@@ -140,7 +141,7 @@ def render_plugin(state_dir, client_file, output, name):
     # Push hooks need a project's runtime pointer and the host
     # launcher; a rendered profile is a fixed client, so it ships neither.
     manifest.pop("hooks", None)
-    path.write_text(json.dumps(manifest, indent=2) + "\n")
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding='utf-8')
     return {"plugin_directory": str(output), "name": name, "installed": False,
             "scope": "One client identity per server process; separate chat isolation requires host support."}
 

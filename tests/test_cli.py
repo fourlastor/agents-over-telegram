@@ -110,16 +110,16 @@ def test_plugin_renderer_has_no_secret_or_token_and_valid_schema(tmp_path):
     assert not result["installed"]
     for path in rendered.rglob("*"):
         if path.is_file():
-            assert client["client_secret"] not in path.read_text()
+            assert client["client_secret"] not in path.read_text(encoding='utf-8')
     # A root Agent Plugins manifest would make Codex ignore .codex-plugin/plugin.json.
     assert not (rendered/"plugin.json").exists() and not (rendered/"mcp.json").exists()
-    manifest = json.loads((rendered/".mcp.json").read_text())
-    schema = json.loads((root/"docs"/"schemas"/"mcp.schema.json").read_text())
+    manifest = json.loads((rendered/".mcp.json").read_text(encoding='utf-8'))
+    schema = json.loads((root/"docs"/"schemas"/"mcp.schema.json").read_text(encoding='utf-8'))
     Draft202012Validator(schema).validate({"$schema": schema["$id"], **manifest})
     server = next(iter(manifest["mcpServers"].values()))
     assert server["args"][-1] == str(client_path)
     assert "AOT_CLIENT_FILE" not in json.dumps(manifest)
-    compat = json.loads((rendered/".codex-plugin/plugin.json").read_text())
+    compat = json.loads((rendered/".codex-plugin/plugin.json").read_text(encoding='utf-8'))
     assert compat["mcpServers"] == "./.mcp.json"
     assert compat["name"] == "agents-over-telegram-alpha"
     assert "onboardingSkill" not in compat.get("extensions", {}).get("com.openai", {})

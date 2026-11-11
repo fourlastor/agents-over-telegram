@@ -51,7 +51,7 @@ def test_a_failed_install_never_fails_setup(home):
 
 
 def test_unsupported_platforms_are_skipped(home, monkeypatch):
-    monkeypatch.setattr(sys, 'platform', 'win32')
+    monkeypatch.setattr(sys, 'platform', 'freebsd14')
     assert REAL_INSTALL_COLLECTOR(home, run_command=ok) == {'installed': False, 'reason': 'unsupported_platform'}
     monkeypatch.setattr(sys, 'platform', 'linux')
     monkeypatch.setattr('shutil.which', lambda name: None)
@@ -114,10 +114,11 @@ def test_the_service_never_moves_to_an_older_runtime(tmp_path, monkeypatch):
     from agents_over_telegram.credentials import write_private_json
     state = tmp_path / 'state'
     state.mkdir(mode=0o700)
-    write_private_json(state / serve.POINTER, {'version': 1, 'executable': '/new/aot', 'aot_version': '99.0.0'})
+    newer, older = tmp_path / 'new' / 'aot', tmp_path / 'older' / 'aot'
+    write_private_json(state / serve.POINTER, {'version': 1, 'executable': str(newer), 'aot_version': '99.0.0'})
     assert serve.follow(state, tmp_path / 'old' / 'aot') is False
-    assert serve.pointer(state) == serve.Path('/new/aot')
-    write_private_json(state / serve.POINTER, {'version': 1, 'executable': '/older/aot', 'aot_version': '0.1.0'},
+    assert serve.pointer(state) == newer
+    write_private_json(state / serve.POINTER, {'version': 1, 'executable': str(older), 'aot_version': '0.1.0'},
                        overwrite=True)
     assert serve.follow(state, tmp_path / 'this' / 'aot') is True
     assert serve.pointer_version(state) == serve._pointer_value('x')['aot_version']

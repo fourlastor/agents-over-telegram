@@ -1,6 +1,6 @@
 # Compatibility and evidence boundaries
 
-This is a local Python 3.11+ MVP using the pinned official Python MCP SDK `1.30.0` stdio interface. It does not implement MCP 2.0 Events. Linux and macOS/POSIX are supported execution targets. Platform coverage is limited to the host and checks recorded in the implementation test report. Native scoped Codex tools were exercised live on 2026-10-19; Windows, curated-store submission and plugin UI installation remain untested. The macOS native listener checks are scoped below.
+This is a local Python 3.11+ MVP using the pinned official Python MCP SDK `1.30.0` stdio interface. It does not implement MCP 2.0 Events. Linux and macOS/POSIX are supported execution targets. Since 0.9.30 the core, setup, the runtime bootstrap and `aot serve` also run on Windows: CI runs the test suite and a real bootstrap there, but no host (Claude Code, Codex) has been tried on a Windows machine yet; see [Windows](OPERATIONS.md#windows). Platform coverage is limited to the host and checks recorded in the implementation test report. Native scoped Codex tools were exercised live on 2026-10-19; Windows, curated-store submission and plugin UI installation remain untested. The macOS native listener checks are scoped below.
 
 | Surface | Package support and limit |
 | --- | --- |

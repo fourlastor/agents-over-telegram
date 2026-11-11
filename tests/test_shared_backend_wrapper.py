@@ -78,7 +78,7 @@ def bridge(tmp_path):
         root = Path(directory).resolve()
         root.chmod(0o700)
         binary = root / "codex"
-        binary.write_text(f"#!{sys.executable}\n" + FAKE_BACKEND)
+        binary.write_text(f"#!{sys.executable}\n" + FAKE_BACKEND, encoding='utf-8', newline='\n')
         binary.chmod(0o700)
         env = {
             # The desktop launcher itself sets AOT_DISPATCH_*; never let a
@@ -178,7 +178,7 @@ def test_preserves_args_environment_cwd_and_both_protocol_directions(bridge, tmp
     process = start(*args)
     send(process, {"id": 1, "method": "initialize", "params": {"unicode": "Telegram → Codex"}})
     assert receive(process) == {"id": 1, "result": {"echo": {"unicode": "Telegram → Codex"}}}
-    record = json.loads((root / "record.json").read_text())
+    record = json.loads((root / "record.json").read_text(encoding='utf-8'))
     expected_umask = os.umask(0)
     os.umask(expected_umask)
     assert record["umask"] == expected_umask
@@ -246,7 +246,7 @@ def test_signal_stops_owned_backend_and_removes_owned_socket(bridge, number):
     process = start("app-server")
     send(process, {"id": 1, "method": "initialize"})
     receive(process)
-    record = json.loads((root / "record.json").read_text())
+    record = json.loads((root / "record.json").read_text(encoding='utf-8'))
     process.send_signal(number)
     output, error = process.communicate(timeout=10)
     assert process.returncode == 128 + number, error
@@ -262,13 +262,13 @@ def test_killed_wrapper_does_not_leave_backend_running(bridge):
     process = start("app-server")
     send(process, {"id": 1, "method": "initialize"})
     receive(process)
-    pid = json.loads((root / "record.json").read_text())["pid"]
+    pid = json.loads((root / "record.json").read_text(encoding='utf-8'))["pid"]
     process.kill()
     process.communicate(timeout=5)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         try:
-            status = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[0]
+            status = Path(f"/proc/{pid}/stat").read_text(encoding='utf-8').split(") ", 1)[1].split()[0]
         except (FileNotFoundError, ProcessLookupError):
             # Gone, either before the open or (ESRCH) between the open and the read.
             break
@@ -329,16 +329,16 @@ def test_socket_cleanup_does_not_unlink_replacement(bridge):
     receive(process)
     path = Path(env["AOT_CODEX_SOCKET"])
     path.unlink()
-    path.write_text("replacement belongs to someone else")
+    path.write_text("replacement belongs to someone else", encoding='utf-8', newline='\n')
     finish(process)
-    assert path.read_text() == "replacement belongs to someone else"
+    assert path.read_text(encoding='utf-8') == "replacement belongs to someone else"
 
 
 @pytest.mark.parametrize("kind", ["parent-symlink", "socket-symlink", "insecure-parent", "lock-symlink", "lock-hardlink"])
 def test_rejects_unsafe_paths_without_mutating_targets(bridge, kind):
     root, env, start = bridge
     target = root / "preserve"
-    target.write_text("unchanged")
+    target.write_text("unchanged", encoding='utf-8', newline='\n')
     path = Path(env["AOT_CODEX_SOCKET"])
     if kind == "parent-symlink":
         (root / "alias").symlink_to(root, target_is_directory=True)
@@ -355,7 +355,7 @@ def test_rejects_unsafe_paths_without_mutating_targets(bridge, kind):
     process = start("app-server", AOT_CODEX_SOCKET=str(path))
     output, error = process.communicate(timeout=5)
     assert process.returncode == 2 and output == b""
-    assert target.read_text() == "unchanged"
+    assert target.read_text(encoding='utf-8') == "unchanged"
     assert not (root / "record.json").exists()
 
 
@@ -375,7 +375,7 @@ def dispatch_environment(root):
     """Use the real bridge with an isolated dispatcher process double."""
     package = root / "shadow" / "agents_over_telegram"
     package.mkdir(parents=True)
-    (package / "__init__.py").write_text("")
+    (package / "__init__.py").write_text("", encoding='utf-8', newline='\n')
     (package / "desktop_bridge.py").symlink_to(
         Path(__file__).resolve().parents[1] / "src/agents_over_telegram/desktop_bridge.py"
     )
@@ -390,7 +390,7 @@ if os.environ.get("AOT_TEST_DISPATCH_MODE") == "log":
         print(json.dumps({"type": "test_log", "content": "x" * 1000}), flush=True)
 while True:
     time.sleep(1)
-''')
+''', encoding='utf-8', newline='\n')
     (root / "state").mkdir()
     return {
         "PYTHONPATH": str(root / "shadow"),
@@ -434,7 +434,7 @@ def test_opt_in_dispatcher_starts_after_successful_initialize_without_notificati
     send(process, {"id": "__codex_initialize__", "method": "initialize"})
     assert receive(process)["id"] == "__codex_initialize__"
     wait_for_file(root / "dispatcher-record.json")
-    record = json.loads((root / "dispatcher-record.json").read_text())
+    record = json.loads((root / "dispatcher-record.json").read_text(encoding='utf-8'))
     assert record["cwd"] == str(root)
     assert record["args"] == [
         "--state-dir", str(root / "state"), "--fake", "relay-dispatch",
@@ -444,7 +444,7 @@ def test_opt_in_dispatcher_starts_after_successful_initialize_without_notificati
     assert process.returncode == 0, error
     assert output == b""
     assert (root / "dispatcher.jsonl").stat().st_mode & 0o777 == 0o600
-    assert "test_dispatch_ready" in (root / "dispatcher.jsonl").read_text()
+    assert "test_dispatch_ready" in (root / "dispatcher.jsonl").read_text(encoding='utf-8')
     with pytest.raises(ProcessLookupError):
         os.kill(record["pid"], 0)
     assert not (root / "backend.sock").exists()
@@ -503,7 +503,7 @@ def test_unexpected_dispatcher_exit_preserves_desktop_and_does_not_restart(bridg
     wait_for_file(root / "dispatcher-record.json")
     original_record = (root / "dispatcher-record.json").read_bytes()
     deadline = time.monotonic() + 5
-    while "dispatcher_error" not in (root / "dispatcher.jsonl").read_text():
+    while "dispatcher_error" not in (root / "dispatcher.jsonl").read_text(encoding='utf-8'):
         assert time.monotonic() < deadline
         time.sleep(0.02)
     assert process.poll() is None
@@ -515,7 +515,7 @@ def test_unexpected_dispatcher_exit_preserves_desktop_and_does_not_restart(bridg
     assert process.returncode == 0, error
     assert b"dispatcher exited" in error
     assert not (root / "backend.sock").exists()
-    pid = json.loads((root / "record.json").read_text())["pid"]
+    pid = json.loads((root / "record.json").read_text(encoding='utf-8'))["pid"]
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
 
@@ -555,9 +555,9 @@ def test_dispatcher_log_is_bounded_and_symlink_is_never_followed(bridge):
     time.sleep(0.2)
     finish(process)
     assert 0 < (root / "dispatcher.jsonl").stat().st_size <= 1024 * 1024
-    assert all(isinstance(json.loads(line), dict) for line in (root / "dispatcher.jsonl").read_text().splitlines())
+    assert all(isinstance(json.loads(line), dict) for line in (root / "dispatcher.jsonl").read_text(encoding='utf-8').splitlines())
     target = root / "preserved-log"
-    target.write_text("unchanged")
+    target.write_text("unchanged", encoding='utf-8', newline='\n')
     (root / "dispatcher.jsonl").unlink()
     (root / "dispatcher.jsonl").symlink_to(target)
     process = start("app-server", **{
@@ -576,4 +576,4 @@ def test_dispatcher_log_is_bounded_and_symlink_is_never_followed(bridge):
     output, error = finish(process)
     assert process.returncode == 0
     assert b"dispatcher could not start" in early_error + error
-    assert target.read_text() == "unchanged"
+    assert target.read_text(encoding='utf-8') == "unchanged"

@@ -11,6 +11,7 @@ from agents_over_telegram.core import MAX_ATTACHMENT_BYTES, Core, CoreError
 from agents_over_telegram.mcp_server import TOOLS
 from agents_over_telegram.push import claim_new, ensure_tables
 from test_core import append, bind, env, rows  # noqa: F401 (env is a fixture)
+from conftest import posix_only
 
 
 @pytest.fixture
@@ -292,6 +293,7 @@ def test_media_messages_carry_caption_and_attachment_metadata(group):
     assert rows(core, "SELECT count(*) FROM unmatched WHERE reason='unsupported_message'") == [(2,)]
 
 
+@posix_only
 def test_attachment_fetch_stores_privately_and_reuses_the_file(group):
     core, transport, clock, client = group
     core.delivery_settings(client, accept_media=True)

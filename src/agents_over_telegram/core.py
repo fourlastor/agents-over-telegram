@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import fcntl
 import hashlib
 import hmac
 import json
@@ -21,6 +20,7 @@ import stat
 import time
 from typing import Any
 
+from . import compat
 from .transport import TransportError, UnknownSend
 from .credentials import CredentialError, private_directory
 from . import judge as judge_module
@@ -383,7 +383,7 @@ class Core:
             fd = os.open(self.database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             info = self.database.lstat()
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+            if not stat.S_ISREG(info.st_mode) or not compat.owned(info) or not compat.private(info, 0o077) or info.st_nlink != 1:
                 raise CoreError('insecure_state_file')
         else:
             os.close(fd)
@@ -719,20 +719,20 @@ class Core:
     @contextlib.contextmanager
     def _lock(self, name):
         path = self.state_dir / (name + '.lock')
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | compat.O_NOFOLLOW | compat.O_BINARY, 0o600)
         try:
             info = os.fstat(fd)
-            if info.st_uid != os.getuid() or info.st_mode & 0o077 or not stat.S_ISREG(info.st_mode):
+            if not compat.owned(info) or not compat.private(info, 0o077) or not stat.S_ISREG(info.st_mode):
                 raise CoreError('insecure_lock_file')
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                compat.lock(fd)
             except BlockingIOError:
                 yield False
             else:
                 try:
                     yield True
                 finally:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    compat.unlock(fd)
         finally:
             os.close(fd)
 
@@ -2719,7 +2719,7 @@ class Core:
             if not isinstance(data, bytes) or len(data) > MAX_ATTACHMENT_BYTES:
                 raise CoreError('attachment_unavailable')
             partial = directory / f'.{target.name}.{secrets.token_hex(8)}.partial'
-            fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY | compat.O_NOFOLLOW | compat.O_BINARY, 0o600)
             try:
                 with os.fdopen(fd, 'wb') as handle:
                     handle.write(data)
@@ -2731,7 +2731,7 @@ class Core:
                     partial.unlink()
                 raise
             info = target.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
+        if not stat.S_ISREG(info.st_mode) or not compat.owned(info) or not compat.private(info, 0o077) or info.st_nlink != 1:
             raise CoreError('insecure_attachment_file')
         digest = hashlib.sha256(target.read_bytes()).hexdigest()
         result = {'delivery_id': delivery_id, 'file_unique_id': file_unique_id, 'kind': item['kind'],
@@ -2770,7 +2770,7 @@ class Core:
         try:
             # O_NONBLOCK never affects regular-file reads; it only stops a
             # swapped-in FIFO or device from blocking this open forever.
-            fd = os.open(image_path, os.O_RDONLY | os.O_NONBLOCK)
+            fd = os.open(image_path, os.O_RDONLY | compat.O_NONBLOCK | compat.O_BINARY)
         except OSError:
             raise CoreError('invalid_image') from None
         try:
@@ -2800,7 +2800,7 @@ class Core:
         except CredentialError:
             raise CoreError('insecure_state_directory') from None
         partial = directory / f'.{name}.{secrets.token_hex(8)}.partial'
-        fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY | compat.O_NOFOLLOW | compat.O_BINARY, 0o600)
         try:
             with os.fdopen(fd, 'wb') as handle:
                 handle.write(data)

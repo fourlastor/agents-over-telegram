@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from agents_over_telegram import serve
+from agents_over_telegram import compat, serve
 from agents_over_telegram.credentials import write_private_json
 from conftest import REAL_START_ON_DEMAND
 from test_core import env  # noqa: F401 (env is a fixture)
@@ -33,12 +33,14 @@ def live(tmp_path, monkeypatch):
 
 def test_starts_a_detached_collector(live):
     spawn = Spawned()
-    result = REAL_START_ON_DEMAND(live, executable='/opt/aot/bin/aot', spawn=spawn, now=lambda: 1000.0)
+    exe = str(serve.Path('/opt/aot/bin/aot'))
+    result = REAL_START_ON_DEMAND(live, executable=exe, spawn=spawn, now=lambda: 1000.0)
     assert result == {'started': True, 'pid': 4242}
     argv, kwargs = spawn.calls[0]
-    assert argv == ['/opt/aot/bin/aot', '--state-dir', str(live), 'serve', '--on-demand']
+    assert argv == [exe, '--state-dir', str(live), 'serve', '--on-demand']
     assert kwargs['start_new_session'] is True and kwargs['stdin'] == subprocess.DEVNULL
-    assert oct((live / serve.LOG).stat().st_mode & 0o777) == '0o600'
+    if os.name != 'nt':
+        assert oct((live / serve.LOG).stat().st_mode & 0o777) == '0o600'
 
 
 def test_a_collector_that_died_is_restarted_at_most_once_a_minute(live):
@@ -50,9 +52,8 @@ def test_a_collector_that_died_is_restarted_at_most_once_a_minute(live):
 
 
 def test_nothing_starts_while_a_serve_runs(live):
-    import fcntl
     fd = os.open(live / serve.SERVE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    compat.lock(fd, blocking=True)
     try:
         assert serve.running(live) is True
         # A running collector with no record (the service, or one of unknown age) is left alone.
@@ -80,10 +81,9 @@ def test_fake_state_never_starts_a_collector(live):
 
 
 def test_a_second_serve_waits_for_the_first(env):
-    import fcntl
     core, transport, clock = env
     fd = os.open(core.state_dir / serve.SERVE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    compat.lock(fd, blocking=True)
     logs, collected = [], []
     core.collect = lambda **kw: collected.append(1) or {'status': 'ok'}
     left = [3]
@@ -109,7 +109,7 @@ def test_no_serve_setup_writes_the_opt_out(tmp_path, monkeypatch):
             '--prepare-only', '--receiver-handoff-confirmed', '--no-serve']
     cli.run(cli.parser().parse_args([str(x) for x in argv]))
     marker = tmp_path / 'state' / serve.NO_SERVE
-    assert marker.exists() and oct(marker.stat().st_mode & 0o777) == '0o600'
+    assert marker.exists() and (os.name == 'nt' or oct(marker.stat().st_mode & 0o777) == '0o600')
 
 
 def test_the_wake_waiter_and_mcp_start_the_collector(tmp_path, monkeypatch):
@@ -169,11 +169,10 @@ def test_the_serve_loop_stops_an_idle_on_demand_collector(env, monkeypatch):
 
 
 def test_an_on_demand_collector_gives_up_waiting_for_the_lock(env):
-    import fcntl
     core, transport, clock = env
     ticks = Ticks()
     fd = os.open(core.state_dir / serve.SERVE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    compat.lock(fd, blocking=True)
     try:
         def sleep(seconds):
             ticks.now += seconds
@@ -185,28 +184,27 @@ def test_an_on_demand_collector_gives_up_waiting_for_the_lock(env):
 
 
 def test_a_newer_runtime_replaces_an_older_on_demand_collector(live):
-    import fcntl
     write_private_json(live / serve.ON_DEMAND, {'version': 1, 'started': 0, 'executable': '/old/aot',
                                                 'aot_version': '0.1.0'})
     fd = os.open(live / serve.SERVE_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    compat.lock(fd, blocking=True)
     try:
         spawn = Spawned()
-        result = REAL_START_ON_DEMAND(live, executable='/new/aot', spawn=spawn, now=lambda: 10.0)
+        new = str(serve.Path('/new/aot'))
+        result = REAL_START_ON_DEMAND(live, executable=new, spawn=spawn, now=lambda: 10.0)
         assert result['started'] is True
         # The record now names the new runtime, so the old collector stops.
-        assert serve._on_demand_record(live)['executable'] == '/new/aot'
+        assert serve._on_demand_record(live)['executable'] == new
         # The same runtime again, or an older one, starts nothing.
-        assert REAL_START_ON_DEMAND(live, executable='/new/aot', spawn=spawn, now=lambda: 500.0)['reason'] == 'running'
+        assert REAL_START_ON_DEMAND(live, executable=new, spawn=spawn, now=lambda: 500.0)['reason'] == 'running'
         assert REAL_START_ON_DEMAND(live, executable='/old/aot', spawn=spawn, now=lambda: 900.0)['reason'] == 'running'
     finally:
         os.close(fd)
 
 
 def test_two_agents_starting_at_once_spawn_one(live):
-    import fcntl
     fd = os.open(live / serve.ON_DEMAND_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    compat.lock(fd, blocking=True)
     try:
         assert REAL_START_ON_DEMAND(live, spawn=Spawned())['reason'] == 'starting'
     finally:
@@ -233,7 +231,7 @@ def test_a_failed_start_leaves_a_line_in_the_log(tmp_path, monkeypatch):
     from agents_over_telegram import hosts
     monkeypatch.setattr(serve, 'start_on_demand', lambda state, **kw: (_ for _ in ()).throw(PermissionError('sandbox')))
     hosts._start_collector(tmp_path)
-    assert 'could not start aot serve on demand (PermissionError: sandbox)' in (tmp_path / serve.LOG).read_text()
+    assert 'could not start aot serve on demand (PermissionError: sandbox)' in (tmp_path / serve.LOG).read_text(encoding='utf-8')
 
 
 def test_uninstalling_the_service_also_stops_on_demand_starts(env, monkeypatch):

@@ -17,7 +17,7 @@ jobs:
   test:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +29,11 @@ jobs:
             python: "3.13"
           - os: macos-latest
             python: "3.13"
+          - os: windows-latest
+            python: "3.13"
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,10 +48,34 @@ jobs:
         run: uv sync --frozen --extra dev --python ${{ matrix.python }}
 
       - name: Run the test suite
-        run: .venv/bin/python -m pytest -q
+        # A step that runs out of time fails the job but keeps its log;
+        # a job that runs out of time is cancelled and its log is lost.
+        timeout-minutes: 20
+        run: |
+          python=.venv/bin/python; [ -x "$python" ] || python=.venv/Scripts/python.exe
+          if [ "$RUNNER_OS" = Windows ]; then
+            # A test that hangs for two minutes dumps every thread and exits,
+            # so the log survives instead of running into the job limit.
+            AOT_TEST_HANG_SECONDS=120 "$python" -m pytest -q
+          else
+            "$python" -m pytest -q
+          fi
 
       - name: Validate the plugin package
-        run: .venv/bin/python scripts/validate_package.py
+        run: |
+          python=.venv/bin/python; [ -x "$python" ] || python=.venv/Scripts/python.exe
+          "$python" scripts/validate_package.py
+
+      - name: Prepare a real runtime with the bootstrap script
+        if: runner.os == 'Windows'
+        run: |
+          python=.venv/Scripts/python.exe
+          out=$("$python" scripts/bootstrap_runtime.py --runtime-root "$RUNNER_TEMP/aot-runtimes")
+          echo "$out"
+          aot=$(printf '%s' "$out" | "$python" -c "import json, sys; print(json.loads(sys.stdin.read().strip().splitlines()[-1])['executable'])")
+          "$aot" --help > /dev/null
 
       - name: Run the offline demo
-        run: .venv/bin/aot demo
+        run: |
+          aot=.venv/bin/aot; [ -x "$aot" ] || aot=.venv/Scripts/aot.exe
+          "$aot" demo

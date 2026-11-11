@@ -11,6 +11,7 @@ from agents_over_telegram.credentials import (
     CredentialError, load_token, private_directory, read_private_json, write_private_json,
 )
 from agents_over_telegram.transport import TelegramTransport, TransportError, UnknownSend
+from conftest import posix_only
 
 FAKE_TOKEN = "987654321:OFFLINE_SECURITY_SECRET_0123456789"
 
@@ -78,7 +79,7 @@ def test_redirect_or_server_failure_is_unknown_not_retryable(status):
     b'{"ok":true,"result":{"message_id":true}}',
     b'{"ok":false,"error_code":500}',
     b"x" * 2_000_001,
-])
+], ids=['not-json', 'list', 'no-result', 'empty-result', 'bool-message-id', 'error-500', 'oversized'])
 def test_invalid_send_confirmation_stays_unknown(payload):
     transport = TelegramTransport(FAKE_TOKEN, opener=Opener(payload))
     with pytest.raises(UnknownSend):
@@ -108,6 +109,7 @@ def test_non_send_failure_suppresses_secret():
     assert_secret_safe(caught.value)
 
 
+@posix_only
 def test_private_credentials_roundtrip_and_modes(tmp_path):
     state = private_directory(tmp_path / "state")
     write_private_json(state / "credentials.json", {"token": FAKE_TOKEN})
@@ -116,10 +118,11 @@ def test_private_credentials_roundtrip_and_modes(tmp_path):
     assert (state / "credentials.json").stat().st_mode & 0o777 == 0o600
 
 
+@posix_only
 @pytest.mark.parametrize("mode", [0o604, 0o640, 0o666])
 def test_credentials_reject_group_or_other_readability(tmp_path, mode):
     path = tmp_path / "credentials.json"
-    path.write_text(json.dumps({"token": FAKE_TOKEN}))
+    path.write_text(json.dumps({"token": FAKE_TOKEN}), encoding='utf-8', newline='\n')
     path.chmod(mode)
     with pytest.raises(CredentialError) as caught:
         read_private_json(path)
@@ -128,7 +131,7 @@ def test_credentials_reject_group_or_other_readability(tmp_path, mode):
 
 def test_credentials_reject_symlink_and_hardlink(tmp_path):
     target = tmp_path / "target.json"
-    target.write_text(json.dumps({"token": FAKE_TOKEN}))
+    target.write_text(json.dumps({"token": FAKE_TOKEN}), encoding='utf-8', newline='\n')
     target.chmod(0o600)
     symlink = tmp_path / "symlink.json"
     symlink.symlink_to(target)
@@ -170,7 +173,7 @@ def test_existing_secret_is_not_overwritten_without_opt_in(tmp_path):
 
 def test_malformed_credentials_error_is_secret_safe(tmp_path):
     path = tmp_path / "credentials.json"
-    path.write_text(FAKE_TOKEN)
+    path.write_text(FAKE_TOKEN, encoding='utf-8', newline='\n')
     path.chmod(0o600)
     with pytest.raises(CredentialError) as caught:
         read_private_json(path)

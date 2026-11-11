@@ -20,7 +20,7 @@ def validate_marketplace(root: Path, plugin_name: str) -> None:
         return
     if not path.resolve().is_relative_to(root):
         raise ValueError("Marketplace manifest escapes the package")
-    marketplace = json.loads(path.read_text())
+    marketplace = json.loads(path.read_text(encoding='utf-8'))
     if marketplace.get("name") != "agents-over-telegram":
         raise ValueError("Marketplace name must be agents-over-telegram")
     if marketplace.get("interface", {}).get("displayName") != "Agents over Telegram":
@@ -40,7 +40,7 @@ def validate_marketplace(root: Path, plugin_name: str) -> None:
 def validate_package(root: Path, schema_root: Path | None = None) -> None:
     root = root.resolve()
     schema_root = schema_root or Path(__file__).resolve().parents[1] / "docs" / "schemas"
-    sources = json.loads((schema_root / "sources.json").read_text())
+    sources = json.loads((schema_root / "sources.json").read_text(encoding='utf-8'))
     schema_bytes = (schema_root / "mcp.schema.json").read_bytes()
     if hashlib.sha256(schema_bytes).hexdigest() != sources["schemas"]["mcp"]["sha256"]:
         raise ValueError("Vendored mcp schema checksum mismatch")
@@ -52,7 +52,7 @@ def validate_package(root: Path, schema_root: Path | None = None) -> None:
         raise ValueError("A root plugin.json hides .codex-plugin/plugin.json and its hooks from Codex")
     if (root / "mcp.json").exists():
         raise ValueError("A root mcp.json is not read by Codex; bundled MCP uses .mcp.json")
-    manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text())
+    manifest = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding='utf-8'))
     name = manifest.get("name")
     if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) or len(name) > 64:
         raise ValueError("Plugin name is missing or invalid")
@@ -74,7 +74,7 @@ def validate_package(root: Path, schema_root: Path | None = None) -> None:
     if "mcpServers" in manifest:
         if manifest["mcpServers"] != "./.mcp.json" or not mcp_path.is_file():
             raise ValueError("Bundled MCP requires .mcp.json and a ./.mcp.json reference")
-        data["mcp"] = json.loads(mcp_path.read_text())
+        data["mcp"] = json.loads(mcp_path.read_text(encoding='utf-8'))
         if set(data["mcp"]) != {"mcpServers"}:
             raise ValueError("Bundled MCP configuration must contain only mcpServers")
         # .mcp.json has no $schema; the server entries follow the vendored MCP schema.
@@ -106,7 +106,7 @@ def validate_package(root: Path, schema_root: Path | None = None) -> None:
     if not skills:
         raise ValueError("No packaged skills found")
     for skill in skills:
-        text = skill.read_text()
+        text = skill.read_text(encoding='utf-8')
         if not text.startswith("---\n"):
             raise ValueError("Skill frontmatter is missing")
         header = text.split("---", 2)[1]

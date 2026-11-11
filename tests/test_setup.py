@@ -1,5 +1,6 @@
 """Isolated setup/profile contracts: no live Telegram or global host configuration."""
 import json
+import os
 from pathlib import Path
 import shlex
 import sqlite3
@@ -9,11 +10,13 @@ import tomllib
 
 import pytest
 
+from agents_over_telegram import compat
 from agents_over_telegram import cli
 from agents_over_telegram.core import Core
 from agents_over_telegram.credentials import CredentialError, read_private_json, write_private_json
 from agents_over_telegram.onboarding import PROFILE_NAME, human_status
 from agents_over_telegram.transport import FakeTransport, make_transport
+from conftest import posix_only
 
 
 def invoke(*argv):
@@ -65,14 +68,15 @@ def test_prepare_only_is_idempotent_does_not_collect_and_writes_no_secrets(tmp_p
     assert before == {p: p.read_bytes() for p in Path(first['project_dir']).rglob('*') if p.is_file()}
     assert read_private_json(Path(first['state_dir']) / 'fake-transport.json')['poll_offsets'] == []
     assert read_private_json(Path(first['state_dir']) / 'fake-transport.json')['sent'] == []
-    for payload in [json.dumps(first), *(p.read_text() for p in before)]:
+    for payload in [json.dumps(first), *(p.read_text(encoding='utf-8') for p in before)]:
         assert private['client_secret'] not in payload
         assert 'client_secret' not in payload
     with sqlite3.connect(Path(first['state_dir']) / 'state.sqlite3') as db:
         assert db.execute('select count(*) from clients').fetchone()[0] == 1
     assert 'dedicated Telegram group or topic' in first['next_step']
     assert 'add @' + first['connection']['bot']['username'] in first['next_step']
-    assert shlex.split(first['next_step'].split('then run: ', 1)[1])[0].startswith('/')
+    if os.name != 'nt':
+        assert shlex.split(first['next_step'].split('then run: ', 1)[1])[0].startswith('/')
 
 
 def test_two_projects_share_bot_but_have_distinct_identity_and_fake_mcp_flags(tmp_path):
@@ -80,9 +84,9 @@ def test_two_projects_share_bot_but_have_distinct_identity_and_fake_mcp_flags(tm
     assert alpha['state_dir'] == beta['state_dir']
     assert alpha['client_id'] != beta['client_id']
     for result in (alpha, beta):
-        entry = tomllib.loads(Path(result['config_file']).read_text())['mcp_servers']['telegram']
+        entry = tomllib.loads(Path(result['config_file']).read_text(encoding='utf-8'))['mcp_servers']['telegram']
         assert entry['args'] == ['--state-dir', result['state_dir'], '--fake', 'mcp', '--client-file', result['client_file']]
-        assert entry['command'] == str(Path(sys.executable).absolute().parent / 'aot')
+        assert entry['command'] == str(compat.own_aot())
     with sqlite3.connect(Path(alpha['state_dir']) / 'state.sqlite3') as db:
         assert db.execute('select count(*) from account').fetchone()[0] == 1
 
@@ -91,10 +95,10 @@ def test_existing_unrelated_toml_is_preserved(tmp_path):
     project = tmp_path / 'project'
     (project / '.codex').mkdir(parents=True)
     original = '# keep this comment\nmodel_reasoning_effort = "low"\n[mcp_servers.other]\ncommand = "other-command"\n'
-    (project / '.codex/config.toml').write_text(original)
+    (project / '.codex/config.toml').write_text(original, encoding='utf-8', newline='\n')
     result = prepare(tmp_path, project=project)
-    assert Path(result['config_file']).read_text().startswith(original)
-    assert tomllib.loads(Path(result['config_file']).read_text())['mcp_servers']['other']['command'] == 'other-command'
+    assert Path(result['config_file']).read_text(encoding='utf-8').startswith(original)
+    assert tomllib.loads(Path(result['config_file']).read_text(encoding='utf-8'))['mcp_servers']['other']['command'] == 'other-command'
 
 
 @pytest.mark.parametrize('contents', ['[mcp_servers.telegram]\ncommand="different"\n', 'not valid toml ['])
@@ -102,10 +106,10 @@ def test_config_conflict_precedes_all_account_or_client_mutation(tmp_path, conte
     project = tmp_path / 'project'
     (project / '.codex').mkdir(parents=True)
     path = project / '.codex/config.toml'
-    path.write_text(contents)
+    path.write_text(contents, encoding='utf-8', newline='\n')
     with pytest.raises(CredentialError):
         prepare(tmp_path, project=project)
-    assert path.read_text() == contents
+    assert path.read_text(encoding='utf-8') == contents
     assert not (tmp_path / 'state').exists()
     assert not (project / PROFILE_NAME).exists()
 
@@ -172,9 +176,9 @@ def test_explicit_scope_mismatch_never_switches_profile(tmp_path, monkeypatch, e
 def test_fake_flag_cannot_switch_live_profile(tmp_path, monkeypatch):
     result = prepare(tmp_path)
     path = Path(result['profile_file'])
-    profile = json.loads(path.read_text())
+    profile = json.loads(path.read_text(encoding='utf-8'))
     profile['mode'] = 'live'
-    path.write_text(json.dumps(profile))
+    path.write_text(json.dumps(profile), encoding='utf-8', newline='\n')
     monkeypatch.chdir(result['project_dir'])
     with pytest.raises(CredentialError, match='project_profile_mode_mismatch'):
         invoke('--fake', 'status')
@@ -291,8 +295,8 @@ def test_live_registration_keeps_token_private_and_reuses_without_transport(tmp_
     assert calls == [token]
     output = capsys.readouterr()
     assert token not in output.out + output.err + json.dumps(result)
-    assert all(token not in p.read_text() for p in Path(result['project_dir']).rglob('*') if p.is_file())
-    entry = tomllib.loads(Path(result['config_file']).read_text())['mcp_servers']['telegram']
+    assert all(token not in p.read_text(encoding='utf-8') for p in Path(result['project_dir']).rglob('*') if p.is_file())
+    entry = tomllib.loads(Path(result['config_file']).read_text(encoding='utf-8'))['mcp_servers']['telegram']
     assert '--fake' not in entry['args']
 
 
@@ -334,11 +338,11 @@ def test_symlink_project_files_fail_closed_before_state(tmp_path, kind):
         target.mkdir()
         (project/'.codex').symlink_to(target, target_is_directory=True)
     elif kind == 'profile':
-        target.write_text('{}')
+        target.write_text('{}', encoding='utf-8', newline='\n')
         (project/PROFILE_NAME).symlink_to(target)
     else:
         (project/'.codex').mkdir()
-        target.write_text('')
+        target.write_text('', encoding='utf-8', newline='\n')
         (project/'.codex/config.toml').symlink_to(target)
     with pytest.raises(CredentialError):
         prepare(tmp_path, project=project)
@@ -387,17 +391,18 @@ def test_setup_stdout_is_json_and_cancellation_has_fixed_error(tmp_path, monkeyp
 def test_matching_config_timeouts_preserved_and_env_override_rejected(tmp_path):
     result = prepare(tmp_path)
     path = Path(result['config_file'])
-    text = path.read_text()
+    text = path.read_text(encoding='utf-8')
     args_line = next(line for line in text.splitlines(keepends=True) if line.startswith('args = '))
     original = text.replace(args_line, args_line + 'startup_timeout_sec = 20\ntool_timeout_sec = 90\n')
-    path.write_text(original)
+    path.write_text(original, encoding='utf-8', newline='\n')
     assert prepare(tmp_path)['client_id'] == result['client_id']
-    assert path.read_text() == original
-    path.write_text(original + '[mcp_servers.telegram.env]\nAOT_CLIENT_FILE = "different"\n')
+    assert path.read_text(encoding='utf-8') == original
+    path.write_text(original + '[mcp_servers.telegram.env]\nAOT_CLIENT_FILE = "different"\n', encoding='utf-8', newline='\n')
     with pytest.raises(CredentialError, match='project_mcp_config_conflict'):
         prepare(tmp_path)
 
 
+@posix_only
 def test_group_writable_profile_reference_rejected(tmp_path, monkeypatch):
     result = prepare(tmp_path)
     Path(result['profile_file']).chmod(0o660)
@@ -465,7 +470,7 @@ def test_project_flush_only_sends_its_client_and_legacy_global_scope_remains(tmp
 def test_codex_config_approves_only_push_tools(tmp_path):
     from agents_over_telegram.onboarding import CODEX_APPROVED_TOOLS
     result = prepare(tmp_path)
-    entry = tomllib.loads(Path(result['config_file']).read_text())['mcp_servers']['telegram']
+    entry = tomllib.loads(Path(result['config_file']).read_text(encoding='utf-8'))['mcp_servers']['telegram']
     assert entry['tools'] == {name: {'approval_mode': 'approve'} for name in CODEX_APPROVED_TOOLS}
     assert set(CODEX_APPROVED_TOOLS) == {'messages_poll', 'message_send', 'message_react', 'messages_ack'}
 
@@ -473,17 +478,17 @@ def test_codex_config_approves_only_push_tools(tmp_path):
 def test_older_codex_config_gains_approvals_and_custom_tools_stay(tmp_path):
     result = prepare(tmp_path)
     path = Path(result['config_file'])
-    full = path.read_text()
+    full = path.read_text(encoding='utf-8')
     older = full[:full.index('\n[mcp_servers.telegram.tools.')] + '\n'
-    path.write_text(older)
+    path.write_text(older, encoding='utf-8', newline='\n')
     prepare(tmp_path)
-    upgraded = path.read_text()
+    upgraded = path.read_text(encoding='utf-8')
     assert upgraded.startswith(older)
     assert tomllib.loads(upgraded)['mcp_servers']['telegram'] == tomllib.loads(full)['mcp_servers']['telegram']
     custom = older + '\n[mcp_servers.telegram.tools.messages_poll]\napproval_mode = "prompt"\n'
-    path.write_text(custom)
+    path.write_text(custom, encoding='utf-8', newline='\n')
     prepare(tmp_path)
-    assert path.read_text() == custom
+    assert path.read_text(encoding='utf-8') == custom
 
 
 def test_relay_accepts_codex_config_with_or_without_approvals(tmp_path):
@@ -493,7 +498,7 @@ def test_relay_accepts_codex_config_with_or_without_approvals(tmp_path):
     entry = _entry(Path(result['state_dir']), Path(result['client_file']), True)
     _, current, proposed = _config_plan(project, entry, approvals=False)
     assert current == proposed
-    full = path.read_text()
-    path.write_text(full[:full.index('\n[mcp_servers.telegram.tools.')] + '\n')
+    full = path.read_text(encoding='utf-8')
+    path.write_text(full[:full.index('\n[mcp_servers.telegram.tools.')] + '\n', encoding='utf-8', newline='\n')
     _, current, proposed = _config_plan(project, entry, approvals=False)
     assert current == proposed

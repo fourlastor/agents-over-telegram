@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from agents_over_telegram.mcp_server import TOOLS, create_server
+from conftest import posix_only
 
 
 @pytest.fixture
@@ -303,6 +304,7 @@ def test_serve_authenticates_private_file_without_reading_live_token(tmp_path, m
     assert len(observed) == 1
 
 
+@posix_only
 @pytest.mark.parametrize("case", ["missing", "empty", "bad_secret", "insecure", "symlink"])
 def test_serve_fails_closed_for_missing_or_unsafe_client_file(tmp_path, case):
     from agents_over_telegram.mcp_server import serve

@@ -8,6 +8,8 @@ import re
 import stat
 import tempfile
 
+from . import compat
+
 
 class CredentialError(Exception):
     def __init__(self, code="unsafe_credentials"):
@@ -20,7 +22,7 @@ def private_directory(path):
     try:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = path.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        if not stat.S_ISDIR(info.st_mode) or not compat.owned(info) or not compat.private(info, 0o077):
             raise CredentialError("unsafe_state_directory")
     except OSError:
         raise CredentialError("state_directory_unavailable") from None
@@ -29,11 +31,12 @@ def private_directory(path):
 
 def read_private_json(path):
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        compat.refuse_link(path)
+        fd = os.open(path, os.O_RDONLY | compat.O_NOFOLLOW | compat.O_BINARY | compat.O_CLOEXEC)
         with os.fdopen(fd, "r", encoding="utf-8") as stream:
             info = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                    or info.st_mode & 0o077 or info.st_nlink != 1):
+            if (not stat.S_ISREG(info.st_mode) or not compat.owned(info)
+                    or not compat.private(info, 0o077) or info.st_nlink != 1):
                 raise CredentialError()
             raw = stream.read(65537)
             if len(raw) > 65536:
@@ -68,11 +71,13 @@ def write_private_json(path, value, *, overwrite=False):
             os.link(temp, path)
             os.unlink(temp)
         temp = None
-        dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        if not compat.WINDOWS:
+            # Windows cannot open a directory; NTFS journals the rename itself.
+            dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
     except OSError:
         raise CredentialError("credential_write_failed") from None
     finally:

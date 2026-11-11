@@ -19,6 +19,7 @@ import time
 from typing import Any, Callable
 
 from .core import CoreError, _mapping
+from . import compat
 from .credentials import CredentialError
 from .transport import TransportError
 
@@ -49,7 +50,7 @@ def shell_fallback() -> str:
     plugin enabled mid-session in the desktop app) still gets hook notices. It
     names this runtime's own executable, which the project pointer selected.
     """
-    executable = Path(sys.executable).absolute().parent / 'aot'
+    executable = compat.own_aot()
     return (f'If the Telegram tools are not loaded in this session, run the same tools from a shell in the '
             f'project folder instead: "{executable}" tool messages_poll, and likewise message_send and '
             f'messages_ack with their JSON arguments on stdin.')

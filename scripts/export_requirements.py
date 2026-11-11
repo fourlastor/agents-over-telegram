@@ -59,8 +59,8 @@ def _dependency_names(packages: dict, initial: list[dict]) -> set[str]:
 
 def validate_exports(root: Path) -> None:
     """Check packaged pins, hashes and source digests without running uv or networking."""
-    project = tomllib.loads((root / "pyproject.toml").read_text())
-    lock = tomllib.loads((root / "uv.lock").read_text())
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding='utf-8'))
+    lock = tomllib.loads((root / "uv.lock").read_text(encoding='utf-8'))
     packages = {package["name"]: package for package in lock["package"]}
     if len(packages) != len(lock["package"]):
         raise ValueError("Requirements validation needs distinct locked package names")

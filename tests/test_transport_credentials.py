@@ -8,6 +8,7 @@ import pytest
 
 from agents_over_telegram.credentials import CredentialError, load_token, private_directory, read_private_json, write_private_json
 from agents_over_telegram.transport import FakeTransport, FileFakeTransport, TelegramTransport, TransportError, UnknownSend
+from conftest import posix_only
 
 SECRET = "987654:FAKE_SECRET_MUST_NEVER_ESCAPE_123456789"
 
@@ -28,6 +29,7 @@ class Opener:
         return Response(self.value)
 
 
+@posix_only
 def test_private_file_modes_and_roundtrip(tmp_path):
     root = private_directory(tmp_path / "state")
     write_private_json(root / "credentials.json", {"token": SECRET})

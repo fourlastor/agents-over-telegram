@@ -4,7 +4,7 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.9.29 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.9.30 supports **Codex**, **Claude Code**, **Pi** and **Amp**. Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
 | Host | Integration | Push delivery |
 |---|---|---|
@@ -17,7 +17,7 @@ Setup takes `--host claude|codex|pi|amp`. [Agent hosts](docs/HOSTS.md) has the s
 
 ## Before you start
 
-- **Linux or macOS.**
+- **Linux or macOS.** Windows support is new and only tested in CI so far; see [Windows](docs/OPERATIONS.md#windows).
 - **Python 3.11 or newer** with virtual-environment support. The plugin prepares its own runtime from it. uv is optional. On Debian or Ubuntu, install `python3-venv` if your Python does not include it. If Python is missing, see the official [Python downloads](https://www.python.org/downloads/).
 - **A Telegram bot.** Create one with `@BotFather` if you do not have one for AOT yet. Add it to a dedicated group, or to a forum topic. Keep the token private: the setup wizard asks for it in a hidden terminal prompt. Later agents reuse the same bot without the token.
 

@@ -32,13 +32,13 @@ def test_shipped_package_uses_current_schemas():
 def test_codex_plugin_manifest_is_the_only_manifest():
     # Codex 0.163.0 prefers a root Agent Plugins plugin.json and then loads no plugin hooks.
     assert not (ROOT / "plugin.json").exists()
-    assert json.loads((ROOT / ".codex-plugin/plugin.json").read_text())["hooks"] == "./codex/hooks.json"
+    assert json.loads((ROOT / ".codex-plugin/plugin.json").read_text(encoding='utf-8'))["hooks"] == "./codex/hooks.json"
 
 
 def test_validator_rejects_root_agent_plugins_manifest(tmp_path):
     root = copy_package(tmp_path)
     (root / "plugin.json").write_text(json.dumps({
-        "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "agents-over-telegram"}))
+        "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "agents-over-telegram"}), encoding='utf-8', newline='\n')
     with pytest.raises(ValueError, match="root plugin.json"):
         validator.validate_package(root)
 
@@ -53,26 +53,26 @@ def test_validator_rejects_missing_hooks_file(tmp_path):
 def test_normal_install_has_no_global_mcp_connection():
     assert not (ROOT / "mcp.json").exists()
     assert not (ROOT / ".mcp.json").exists()
-    compat = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
+    compat = json.loads((ROOT / ".codex-plugin/plugin.json").read_text(encoding='utf-8'))
     assert "mcpServers" not in compat
     assert compat["extensions"]["com.openai"]["onboardingSkill"] == "./skills/telegram-setup/SKILL.md"
 
 
 def add_bundled_mcp(root):
     servers = {"telegram": {"type": "stdio", "command": "/test/aot", "args": []}}
-    (root / ".mcp.json").write_text(json.dumps({"mcpServers": servers}))
+    (root / ".mcp.json").write_text(json.dumps({"mcpServers": servers}), encoding='utf-8', newline='\n')
     path = root / ".codex-plugin/plugin.json"
-    compat = json.loads(path.read_text())
+    compat = json.loads(path.read_text(encoding='utf-8'))
     compat["mcpServers"] = "./.mcp.json"
-    path.write_text(json.dumps(compat))
+    path.write_text(json.dumps(compat), encoding='utf-8', newline='\n')
 
 
 def test_manifest_rejects_missing_stdio_type(tmp_path):
     copy_package(tmp_path)
     add_bundled_mcp(tmp_path)
-    data = json.loads((tmp_path / ".mcp.json").read_text())
+    data = json.loads((tmp_path / ".mcp.json").read_text(encoding='utf-8'))
     del data["mcpServers"]["telegram"]["type"]
-    (tmp_path / ".mcp.json").write_text(json.dumps(data))
+    (tmp_path / ".mcp.json").write_text(json.dumps(data), encoding='utf-8', newline='\n')
     with pytest.raises(ValidationError):
         validator.validate_package(tmp_path)
 
@@ -93,12 +93,12 @@ def test_launcher_does_not_echo_invalid_environment():
 
 def test_launcher_uses_one_explicit_profile_without_shell(tmp_path):
     executable = tmp_path / "aot executable"
-    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding='utf-8', newline='\n')
     executable.chmod(0o700)
     state = tmp_path / "private state"
     state.mkdir()
     client = tmp_path / "client; literal.json"
-    client.write_text("unused fake capability")
+    client.write_text("unused fake capability", encoding='utf-8', newline='\n')
     command = launcher.build_command({"AOT_EXECUTABLE": str(executable), "AOT_STATE_DIR": str(state), "AOT_CLIENT_FILE": str(client)})
     assert command == [str(executable), "--state-dir", str(state), "mcp", "--client-file", str(client)]
 
@@ -126,9 +126,9 @@ def test_validator_rejects_partial_mcp_wiring(tmp_path, missing):
     add_bundled_mcp(tmp_path)
     if missing == "reference":
         path = tmp_path / ".codex-plugin/plugin.json"
-        compat = json.loads(path.read_text())
+        compat = json.loads(path.read_text(encoding='utf-8'))
         del compat["mcpServers"]
-        path.write_text(json.dumps(compat))
+        path.write_text(json.dumps(compat), encoding='utf-8', newline='\n')
     else:
         (tmp_path / missing).unlink()
     with pytest.raises(ValueError, match="MCP"):
@@ -168,9 +168,9 @@ def test_source_archive_does_not_restore_global_mcp(tmp_path):
 def test_marketplace_rejects_non_repository_sources(tmp_path, source):
     root = copy_package(tmp_path)
     path = root / ".agents/plugins/marketplace.json"
-    marketplace = json.loads(path.read_text())
+    marketplace = json.loads(path.read_text(encoding='utf-8'))
     marketplace["plugins"][0]["source"] = source
-    path.write_text(json.dumps(marketplace))
+    path.write_text(json.dumps(marketplace), encoding='utf-8', newline='\n')
     with pytest.raises(ValueError, match="Marketplace source"):
         validator.validate_package(root)
 
@@ -178,9 +178,9 @@ def test_marketplace_rejects_non_repository_sources(tmp_path, source):
 def test_marketplace_identity_must_match_plugin(tmp_path):
     root = copy_package(tmp_path)
     path = root / ".agents/plugins/marketplace.json"
-    marketplace = json.loads(path.read_text())
+    marketplace = json.loads(path.read_text(encoding='utf-8'))
     marketplace["plugins"][0]["name"] = "unrelated-plugin"
-    path.write_text(json.dumps(marketplace))
+    path.write_text(json.dumps(marketplace), encoding='utf-8', newline='\n')
     with pytest.raises(ValueError, match="Marketplace and plugin identity"):
         validator.validate_package(root)
 
@@ -191,7 +191,7 @@ def test_archive_includes_only_marketplace_manifest_from_agents(tmp_path):
     for relative in (".agents/private.json", ".venv/private.json", "runtime/private.json", "state/credentials.json", "requirements/private.json"):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("not packaged")
+        path.write_text("not packaged", encoding='utf-8', newline='\n')
     archive = tmp_path / "plugin.zip"
     load_script("package_local").package(root, archive)
     with ZipFile(archive) as package:
@@ -212,9 +212,9 @@ def test_onboarding_package_requires_both_dependency_exports(tmp_path, kind):
 
 def set_onboarding(root, value):
     path = root / ".codex-plugin/plugin.json"
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding='utf-8'))
     data.setdefault("extensions", {}).setdefault("com.openai", {})["onboardingSkill"] = value
-    path.write_text(json.dumps(data))
+    path.write_text(json.dumps(data), encoding='utf-8', newline='\n')
 
 
 def test_onboarding_skill_must_be_packaged(tmp_path):
@@ -235,7 +235,7 @@ def test_onboarding_rejects_unscoped_paths(tmp_path, value):
 def test_onboarding_rejects_symlink_escape(tmp_path):
     root = copy_package(tmp_path / "package")
     outside = tmp_path / "outside.md"
-    outside.write_text("---\nname: external\ndescription: external\n---\n")
+    outside.write_text("---\nname: external\ndescription: external\n---\n", encoding='utf-8', newline='\n')
     target = root / "skills" / "telegram-setup" / "SKILL.md"
     target.unlink()
     target.symlink_to(outside)
@@ -246,7 +246,7 @@ def test_onboarding_rejects_symlink_escape(tmp_path):
 def test_release_metadata_declares_the_canonical_apache_license():
     import hashlib
     import tomllib
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding='utf-8'))["project"]
     assert project["license"] == "Apache-2.0"
     assert project["license-files"] == ["LICENSE"]
     assert project["urls"]["Repository"] == "https://github.com/fourlastor/agents-over-telegram"

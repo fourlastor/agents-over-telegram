@@ -61,7 +61,7 @@ async def check(aot):
             require(all(not Path(name).is_absolute() and ".." not in Path(name).parts
                         for name in names), "Package contains an unsafe extraction path")
             archive.extractall(cache)
-        manifest = json.loads((cache / ".codex-plugin/plugin.json").read_text())
+        manifest = json.loads((cache / ".codex-plugin/plugin.json").read_text(encoding='utf-8'))
         require("mcpServers" not in manifest, "Manifest still declares automatic MCP")
         onboarding = manifest["extensions"]["com.openai"]["onboardingSkill"]
         skill = (cache / onboarding).resolve()
@@ -109,11 +109,11 @@ async def check(aot):
         fake_path = state / "fake-transport.json"
 
         def inject(updates):
-            fake = json.loads(fake_path.read_text())
+            fake = json.loads(fake_path.read_text(encoding='utf-8'))
             fake["updates"].extend(updates)
-            fake_path.write_text(json.dumps(fake))
+            fake_path.write_text(json.dumps(fake), encoding='utf-8')
 
-        fake = json.loads(fake_path.read_text())
+        fake = json.loads(fake_path.read_text(encoding='utf-8'))
         require(not fake["sent"] and not fake["poll_offsets"], "Prepare-only performed transport work")
         require(not (state / "credentials.json").exists(), "Fake setup wrote bot credentials")
         checks.append("Prepare-only does not poll, send, or create bot credentials")
@@ -217,7 +217,7 @@ async def check(aot):
 
         human = cli("status", "--human", cwd=projects["Alpha"], text=True)
         require("Alpha" in human and "aot_test_bot" in human, "Human status did not show its scoped connection")
-        require(not json.loads(fake_path.read_text())["sent"], "Smoke unexpectedly published a message")
+        require(not json.loads(fake_path.read_text(encoding='utf-8'))["sent"], "Smoke unexpectedly published a message")
         checks.append("Project-local human status works and the entire smoke publishes no messages")
         return {"status": "passed", "checked_at": datetime.now(timezone.utc).isoformat(),
                 "version": version, "transport": "isolated offline fake", "source_files": count,
@@ -239,7 +239,7 @@ def main():
     encoded = json.dumps(report, indent=2) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(encoded)
+        args.output.write_text(encoded, encoding='utf-8')
     print(encoded, end="")
 
 

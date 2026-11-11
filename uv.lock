@@ -10,7 +10,7 @@ resolution-markers = [
 
 [[package]]
 name = "agents-over-telegram"
-version = "0.9.29"
+version = "0.9.30"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },

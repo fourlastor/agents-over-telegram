@@ -12,8 +12,10 @@ import sys
 
 import pytest
 
+from agents_over_telegram import compat
+
 ROOT = Path(__file__).resolve().parents[1]
-AOT = Path(sys.executable).parent / 'aot'
+AOT = compat.own_aot()
 HARNESS = ROOT / 'scripts' / 'e2e_fake.py'
 
 
@@ -45,9 +47,9 @@ def payload(root, event, **fields):
 
 
 def test_plugin_manifest_points_at_codex_hooks():
-    manifest = json.loads((ROOT / '.codex-plugin' / 'plugin.json').read_text())
+    manifest = json.loads((ROOT / '.codex-plugin' / 'plugin.json').read_text(encoding='utf-8'))
     assert manifest['hooks'] == './codex/hooks.json'
-    hooks = json.loads((ROOT / 'codex' / 'hooks.json').read_text())['hooks']
+    hooks = json.loads((ROOT / 'codex' / 'hooks.json').read_text(encoding='utf-8'))['hooks']
     assert set(hooks) == {'SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop'}
     for entries in hooks.values():
         for entry in entries:
@@ -74,10 +76,10 @@ def test_codex_hook_collection_is_rate_limited(env):
     inject(env, 'Second message')
     # The last attempt was just now, so this hook does not contact Telegram again.
     assert hook(env, payload(env, 'PostToolUse', tool_name='shell'), '--collect-interval', '10') is None
-    fake = json.loads((env / 'state' / 'fake-transport.json').read_text())
+    fake = json.loads((env / 'state' / 'fake-transport.json').read_text(encoding='utf-8'))
     polls_before = len(fake['poll_offsets'])
     hook(env, payload(env, 'PostToolUse', tool_name='shell'), '--collect-interval', '10')
-    fake = json.loads((env / 'state' / 'fake-transport.json').read_text())
+    fake = json.loads((env / 'state' / 'fake-transport.json').read_text(encoding='utf-8'))
     assert len(fake['poll_offsets']) == polls_before
 
 
@@ -112,7 +114,9 @@ def test_plugin_launcher_finds_the_project_from_the_hook_input_cwd(env, tmp_path
     elsewhere = tmp_path / 'hook-cwd'
     elsewhere.mkdir()
     clean = {k: v for k, v in os.environ.items() if k not in ('AOT_PROJECT_DIR', 'CLAUDE_PROJECT_DIR')}
-    result = subprocess.run(['/usr/bin/python3', str(ROOT / 'scripts' / 'aot_host_launch.py'), 'hook', '--host', 'codex',
+    # The host's system Python, as the plugin hook command runs it; any Python 3.11+ on Windows.
+    system_python = '/usr/bin/python3' if os.name != 'nt' else sys.executable
+    result = subprocess.run([system_python, str(ROOT / 'scripts' / 'aot_host_launch.py'), 'hook', '--host', 'codex',
                              '--collect-interval', '0.001'],
                             input=json.dumps(payload(env, 'PostToolUse', tool_name='shell')),
                             capture_output=True, text=True, cwd=elsewhere, env=clean, timeout=60)

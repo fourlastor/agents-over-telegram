@@ -13,6 +13,7 @@ import sys
 import tempfile
 import tomllib
 
+from . import compat
 from .credentials import CredentialError, private_directory, read_private_json, write_private_json
 
 PROFILE_NAME = '.aot-profile.json'
@@ -45,16 +46,20 @@ HOST_NEXT_STEPS = {
 
 
 def default_state_dir():
+    if compat.WINDOWS and not os.environ.get('XDG_DATA_HOME') and os.environ.get('LOCALAPPDATA'):
+        # The user's local profile folder, which other users cannot read.
+        return Path(os.environ['LOCALAPPDATA']) / 'agents-over-telegram'
     return Path(os.environ.get('XDG_DATA_HOME', str(Path.home() / '.local/share'))) / 'agents-over-telegram'
 
 
 def _read_local(path):
     """Read bounded owner-controlled configuration, never follow file symlinks."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        compat.refuse_link(path)
+        fd = os.open(path, os.O_RDONLY | compat.O_NOFOLLOW | compat.O_BINARY | compat.O_CLOEXEC)
         with os.fdopen(fd, 'r', encoding='utf-8') as stream:
             info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & (0o022 if Path(path).name == PROFILE_NAME else 0o002):
+            if not stat.S_ISREG(info.st_mode) or not compat.owned(info) or info.st_nlink != 1 or not compat.private(info, 0o022 if Path(path).name == PROFILE_NAME else 0o002):
                 raise CredentialError('unsafe_project_config')
             raw = stream.read(262145)
             if len(raw) > 262144:
@@ -67,7 +72,7 @@ def _read_local(path):
 def _check_directory(path):
     if path.exists() or path.is_symlink():
         info = path.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o002:
+        if not stat.S_ISDIR(info.st_mode) or not compat.owned(info) or not compat.private(info, 0o002):
             raise CredentialError('unsafe_project_directory')
 
 
@@ -125,7 +130,7 @@ def _entry(state, client, fake):
     if fake:
         args.append('--fake')
     args += ['mcp', '--client-file', str(client)]
-    return {'command': str(Path(sys.executable).absolute().parent / 'aot'), 'args': args}
+    return {'command': str(compat.own_aot()), 'args': args}
 
 
 # The tools that handle pushed Telegram work: read the inbox, reply in the bound
@@ -399,6 +404,10 @@ def _serve_command(executable, state, option):
     return f'"{executable}" --state-dir "{state}" serve {option}'
 
 
+def _service_manager():
+    return {'darwin': 'launchd', 'win32': 'Task Scheduler'}.get(sys.platform, 'systemd')
+
+
 def _collector_choice(args, state, executable):
     """Install the always-on collector only when the human chose it.
 
@@ -413,12 +422,12 @@ def _collector_choice(args, state, executable):
     if serve.status(state)['installed']:
         return {'installed': True, 'already_installed': True, 'service': serve.name(state),
                 'remove_with': _serve_command(executable, state, '--uninstall')}
-    if sys.platform not in ('linux', 'darwin') or (sys.platform == 'linux' and not shutil.which('systemctl')):
+    if sys.platform not in ('linux', 'darwin', 'win32') or (sys.platform == 'linux' and not shutil.which('systemctl')):
         return {'installed': False, 'reason': 'unsupported_platform'}
     offer = {'installed': False,
              'offer': 'An always-on collector answers settings taps, approvals and /settings, and keeps '
                       'collecting messages, while no agent is running. It is installed as a login service '
-                      f"({'launchd' if sys.platform == 'darwin' else 'systemd'}). Ask the human; with a yes, "
+                      f"({_service_manager()}). Ask the human; with a yes, "
                       'rerun setup with --serve.',
              'install_with': _serve_command(executable, state, '--install')}
     if getattr(args, 'no_serve', False):
@@ -453,7 +462,7 @@ def _install_collector(state, run_command=None, executable=None):
     if serve.status(state)['installed']:
         return {'installed': True, 'already_installed': True, 'service': serve.name(state),
                 'remove_with': _serve_command(executable, state, '--uninstall')}
-    if sys.platform not in ('linux', 'darwin') or (sys.platform == 'linux' and not shutil.which('systemctl')):
+    if sys.platform not in ('linux', 'darwin', 'win32') or (sys.platform == 'linux' and not shutil.which('systemctl')):
         return {'installed': False, 'reason': 'unsupported_platform'}
     run_command = run_command or subprocess.run
     try:

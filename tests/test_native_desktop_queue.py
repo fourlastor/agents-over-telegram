@@ -26,7 +26,7 @@ def adapter(tmp_path, monkeypatch):
     binary = install / 'resources' / 'codex'
     binary.parent.mkdir(parents=True)
     for file in (binary, install / 'ChatGPT'):
-        file.write_text('#!/bin/sh\nexit 99\n')
+        file.write_text('#!/bin/sh\nexit 99\n', encoding='utf-8', newline='\n')
         file.chmod(0o700)
     home = tmp_path / 'codex-home'
     home.mkdir()
@@ -295,7 +295,7 @@ def processes(adapter, tmp_path, monkeypatch):
         (entry / 'exe').symlink_to(executable)
         (entry / 'cmdline').write_bytes(b'\0'.join(arg.encode() for arg in args) + b'\0')
         fields = ['S', str(parent)] + ['0'] * 17 + [start]
-        (entry / 'stat').write_text(f'{pid} (process name with spaces) ' + ' '.join(fields))
+        (entry / 'stat').write_text(f'{pid} (process name with spaces) ' + ' '.join(fields), encoding='utf-8', newline='\n')
         if environment is not None:
             (entry / 'environ').write_bytes(b'\0'.join(
                 key.encode() + b'=' + value.encode() for key, value in environment.items()) + b'\0')

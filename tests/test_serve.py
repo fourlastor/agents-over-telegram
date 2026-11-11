@@ -12,6 +12,7 @@ from agents_over_telegram.credentials import write_private_json
 from agents_over_telegram.transport import TransportError
 from test_core import append, bind, env  # noqa: F401 (env is a fixture)
 from test_settings_panel import query
+from conftest import posix_only
 
 
 def loop(core, state, cycles, **kwargs):
@@ -120,10 +121,11 @@ def test_install_and_uninstall_a_systemd_user_service(home):
     service = serve.name(home)
     unit = home.parent / 'home' / '.config' / 'systemd' / 'user' / f'{service}.service'
     assert result['unit'] == str(unit) and result['service'] == service
-    text = unit.read_text()
+    text = unit.read_text(encoding='utf-8')
     assert f'ExecStart="/usr/bin/python3" "{home / serve.LAUNCHER}"' in text and 'Restart=always' in text
     assert serve.pointer(home) == serve.own_executable()
-    assert oct((home / serve.LAUNCHER).stat().st_mode & 0o777) == '0o600'
+    if os.name != 'nt':
+        assert oct((home / serve.LAUNCHER).stat().st_mode & 0o777) == '0o600'
     assert ['systemctl', '--user', 'enable', '--now', f'{service}.service'] in commands
     assert serve.status(home)['installed'] is True
     assert serve.uninstall(home, run_command=run_command) == {'installed': False, 'removed': True}
@@ -131,6 +133,7 @@ def test_install_and_uninstall_a_systemd_user_service(home):
     assert ['systemctl', '--user', 'disable', '--now', f'{service}.service'] in commands
 
 
+@posix_only
 def test_install_a_launchd_agent_on_macos(home, monkeypatch):
     monkeypatch.setattr(sys, 'platform', 'darwin')
     commands = []
@@ -144,17 +147,18 @@ def test_install_a_launchd_agent_on_macos(home, monkeypatch):
     assert commands[-1][:2] == ['launchctl', 'bootstrap']
 
 
+@posix_only
 def test_the_launcher_runs_the_recorded_executable(tmp_path):
     state = tmp_path / 'state'
     state.mkdir(mode=0o700)
     fake = tmp_path / 'aot'
     out = tmp_path / 'argv.json'
-    fake.write_text(f'#!{sys.executable}\nimport json, sys\nopen({str(out)!r}, "w").write(json.dumps(sys.argv[1:]))\n')
+    fake.write_text(f'#!{sys.executable}\nimport json, sys\nopen({str(out)!r}, "w").write(json.dumps(sys.argv[1:]))\n', encoding='utf-8', newline='\n')
     fake.chmod(0o700)
-    (state / serve.LAUNCHER).write_text(serve.LAUNCHER_SOURCE)
+    (state / serve.LAUNCHER).write_text(serve.LAUNCHER_SOURCE, encoding='utf-8', newline='\n')
     write_private_json(state / serve.POINTER, {'version': 1, 'executable': str(fake)})
     subprocess.run([sys.executable, str(state / serve.LAUNCHER)], check=True, timeout=30)
-    assert json.loads(out.read_text()) == ['--state-dir', str(state), 'serve']
+    assert json.loads(out.read_text(encoding='utf-8')) == ['--state-dir', str(state), 'serve']
 
 
 def test_the_cli_reports_status(env):
@@ -183,7 +187,7 @@ def test_status_needs_a_unit_that_starts_this_launcher(home):
     assert serve.status(home)['installed'] is False
     unit = Path(serve.status(home)['unit'])
     unit.parent.mkdir(parents=True)
-    unit.write_text('ExecStart=/usr/bin/python3 /elsewhere/serve_launch.py')
+    unit.write_text('ExecStart=/usr/bin/python3 /elsewhere/serve_launch.py', encoding='utf-8', newline='\n')
     assert serve.status(home)['installed'] is False
 
 
