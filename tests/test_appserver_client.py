@@ -85,6 +85,11 @@ def test_real_unix_handshake_and_serial_requests():
 
 
 def test_bidirectional_requests_are_left_for_desktop_and_metadata_is_redacted():
+    import threading
+    # The client sends its next request only after the server's quiet-window
+    # check, so a slow runner cannot overlap the two.
+    checked = threading.Event()
+
     def handler(ws, received):
         request = json.loads(ws.recv())
         send(ws, {"method": "turn/started", "params": {"threadId": THREAD, "turn": {"id": TURN}, "content": SECRET}})
@@ -96,6 +101,7 @@ def test_bidirectional_requests_are_left_for_desktop_and_metadata_is_redacted():
         # The dispatcher must not deny, fulfill, or auto-approve broadcast work.
         with pytest.raises(TimeoutError):
             ws.recv(timeout=0.08)
+        checked.set()
         request = json.loads(ws.recv(timeout=2))
         received.append(request)
         send(ws, {"id": request["id"], "result": {}})
@@ -111,7 +117,7 @@ def test_bidirectional_requests_are_left_for_desktop_and_metadata_is_redacted():
             assert SECRET not in json.dumps(events)
             assert client.server_requests_received == 2
             assert client.notifications_received == 2
-            time.sleep(0.1)
+            assert checked.wait(5)
             assert client.request("thread/loaded/list", {}) == {}
 
 
