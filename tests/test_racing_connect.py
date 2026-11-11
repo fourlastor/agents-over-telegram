@@ -77,6 +77,16 @@ def test_every_address_refusing_raises_the_failure():
     with pytest.raises(OSError) as raised:
         net.racing_connection(('api.example', 1), 5, resolve=resolving(('127.0.0.1', closed_port())))
     assert not isinstance(raised.value, TimeoutError)
+    assert raised.value.strerror and raised.value.strerror != 'connect failed'
+
+
+def test_without_a_timeout_the_winner_keeps_the_global_default(listener, monkeypatch):
+    monkeypatch.setattr(socket, 'getdefaulttimeout', lambda: 3.0)
+    sock = net.racing_connection(('api.example', listener), resolve=resolving(('127.0.0.1', listener)))
+    try:
+        assert sock.gettimeout() == 3.0
+    finally:
+        sock.close()
 
 
 def test_families_alternate_from_the_resolvers_first_choice():

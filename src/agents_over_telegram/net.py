@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import errno
 import http.client
+import os
 import selectors
 import socket
 import time
@@ -78,7 +79,7 @@ def racing_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_ad
                     break
                 if code not in _IN_PROGRESS:
                     sock.close()
-                    error = OSError(code, 'connect failed')
+                    error = OSError(code, os.strerror(code))
                     continue
                 selector.register(sock, selectors.EVENT_WRITE)
                 pending.add(sock)
@@ -99,7 +100,7 @@ def racing_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_ad
                     continue
                 sock.close()
                 if code:
-                    error = OSError(code, 'connect failed')
+                    error = OSError(code, os.strerror(code))
                     # A failed attempt hands its turn to the next address at once.
                     next_start = time.monotonic()
     finally:
@@ -111,9 +112,8 @@ def racing_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_ad
         if deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError('timed out')
         raise error or OSError('connect failed')
-    winner.setblocking(True)
-    if limited:
-        winner.settimeout(timeout)
+    # Like socket.create_connection: the given timeout, else the global default.
+    winner.settimeout(timeout if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT else socket.getdefaulttimeout())
     return winner
 
 
