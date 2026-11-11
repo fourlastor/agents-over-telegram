@@ -17,6 +17,7 @@ the new runtime.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import plistlib
@@ -32,6 +33,13 @@ from .credentials import CredentialError, read_private_json, write_private_json
 POINTER = 'serve-runtime.json'
 LAUNCHER = 'serve_launch.py'
 LOG = 'serve.log'
+# Held for the whole life of one aot serve, so a state directory never has two.
+SERVE_LOCK = 'serve.lock'
+# Written by setup --no-serve: no service, and no collector started on demand.
+NO_SERVE = 'no-serve'
+ON_DEMAND = 'serve-on-demand.json'
+# A collector started on demand that died is started again at most this often.
+ON_DEMAND_INTERVAL = 60.0
 LOG_LIMIT = 1_000_000  # bytes; a bigger log is moved to serve.log.1 when the service starts
 POLL_TIMEOUT = 20
 BUSY_PAUSE = 2.0
@@ -134,6 +142,94 @@ def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_runnin
     """
     log = log or (lambda text: print(text, flush=True))
     rotate_log(state)
+    lock = _hold_serve_lock(state, sleep, keep_running, log)
+    if lock is None:
+        return 0
+    try:
+        return _serve(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay)
+    finally:
+        os.close(lock)
+
+
+def _hold_serve_lock(state, sleep, keep_running, log):
+    """Take this state directory's serve lock, waiting while another aot serve holds it."""
+    fd = os.open(Path(state) / SERVE_LOCK, os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    told = False
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError:
+            pass
+        if not told:
+            log('aot serve: another aot serve runs for this state directory; waiting until it stops')
+            told = True
+        if keep_running is not None and not keep_running():
+            os.close(fd)
+            return None
+        sleep(BUSY_PAUSE)
+
+
+def running(state):
+    """True when an aot serve holds this state directory's serve lock."""
+    try:
+        fd = os.open(Path(state) / SERVE_LOCK, os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def start_on_demand(state, *, executable=None, spawn=subprocess.Popen, now=time.time):
+    """Start aot serve in the background when nothing else will collect; the reason when not.
+
+    A fallback for machines without the user service: agents call this when
+    they start, so owner actions and messages are still handled. It starts
+    nothing when the state directory is in fake mode, when setup --no-serve
+    opted out, when the service is installed (its manager restarts it), when
+    an aot serve already runs, or when one was started less than a minute
+    ago (so a collector that dies at once is not restarted in a loop). The
+    process is detached from the agent's session, so it outlives it.
+    """
+    state = Path(state).absolute()
+    try:
+        mode = read_private_json(state / 'mode.json').get('mode')
+    except (CredentialError, OSError):
+        mode = None
+    if mode != 'live':
+        return {'started': False, 'reason': 'not_live'}
+    if (state / NO_SERVE).exists():
+        return {'started': False, 'reason': 'opted_out'}
+    if status(state)['installed']:
+        return {'started': False, 'reason': 'service_installed'}
+    if running(state):
+        return {'started': False, 'reason': 'running'}
+    record = state / ON_DEMAND
+    try:
+        last = read_private_json(record).get('started')
+    except (CredentialError, OSError):
+        last = None
+    if isinstance(last, (int, float)) and 0 <= now() - last < ON_DEMAND_INTERVAL:
+        return {'started': False, 'reason': 'recently_started'}
+    write_private_json(record, {'version': 1, 'started': now()}, overwrite=record.exists())
+    rotate_log(state)
+    log = os.open(state / LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, 'O_CLOEXEC', 0), 0o600)
+    try:
+        process = spawn([str(executable or own_executable()), '--state-dir', str(state), 'serve'],
+                        stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+    finally:
+        os.close(log)
+    return {'started': True, 'pid': process.pid}
+
+
+def _serve(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay):
     log(f'aot serve: collecting for {state}')
     if watchdog is not None:
         watchdog.start(log)
@@ -142,7 +238,7 @@ def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_runnin
         try:
             relay.start()
         except Exception as error:
-            log(f'aot serve: not answering agents ({type(error).__name__}); they run their calls themselves')
+            log(f'aot serve: not answering agents ({type(error).__name__}: {error}); they run their calls themselves')
             relay = None
     try:
         return _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay)
@@ -232,6 +328,8 @@ def rotate_log(state):
 def install(state, *, run_command=subprocess.run, python=None):
     """Write the pointer, the launcher and the user service, then start it."""
     state = Path(state).absolute()
+    # Installing it is the opposite of setup --no-serve.
+    (state / NO_SERVE).unlink(missing_ok=True)
     python = python or shutil.which('python3') or '/usr/bin/python3'
     write_private_json(state / POINTER, {'version': 1, 'executable': str(own_executable())}, overwrite=True)
     launcher = state / LAUNCHER

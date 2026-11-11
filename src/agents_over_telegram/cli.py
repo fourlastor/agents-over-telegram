@@ -654,7 +654,9 @@ def run(args):
             raise SystemExit(RUNTIME_MOVED_EXIT)
         return None
     if args.command == "mcp":
+        from .hosts import _start_collector
         from .mcp_server import serve
+        _start_collector(state_dir)
         serve(state_dir, args.client_file, transport=core.transport)
         return None
     raise CredentialError("unknown_command")

@@ -209,6 +209,15 @@ def _keep_alive(core, client_id) -> bool:
         return False
 
 
+def _start_collector(state: Path) -> None:
+    """Start aot serve on demand when this machine has no service; never fails the caller."""
+    from . import serve
+    try:
+        serve.start_on_demand(state)
+    except Exception:
+        pass
+
+
 def _wake(args) -> int:
     import fcntl
     import hashlib
@@ -228,6 +237,7 @@ def _wake(args) -> int:
     _mode(state, fake)
     core = Core(state, LazyTransport(state, fake), recover_sends=False)
     client_id = _client(core, Path(profile['client_file']), profile['client_id'])
+    _start_collector(state)
     locks = state / 'wake-locks'
     locks.mkdir(mode=0o700, exist_ok=True)
     key = hashlib.sha256(f'{client_id}\0{args.session or ""}'.encode()).hexdigest()[:24]

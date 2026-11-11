@@ -332,8 +332,14 @@ def setup(args):
     serve.follow(state, Path(_entry(state, client, fake)['command']))
     collector = None
     if not fake:
-        collector = ({'installed': serve.pointer(state) is not None, 'skipped': 'no_serve'}
-                     if getattr(args, 'no_serve', False) else _install_collector(state))
+        if getattr(args, 'no_serve', False):
+            # Also keeps agents from starting a collector on demand.
+            marker = state / serve.NO_SERVE
+            if not marker.exists():
+                os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0), 0o600))
+            collector = {'installed': serve.pointer(state) is not None, 'skipped': 'no_serve'}
+        else:
+            collector = _install_collector(state)
     status = core.connection_status(client_id)
     next_setup = _next_setup(args, state, fake, project, client)
     result = {'project_dir': str(project), 'profile_file': str(project / PROFILE_NAME),

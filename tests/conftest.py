@@ -1,9 +1,11 @@
 import pytest
 
 from agents_over_telegram import onboarding as _onboarding
+from agents_over_telegram import serve as _serve
 
-# The real step, for the tests that check it with a fake service manager.
+# The real steps, for the tests that check them with fakes.
 REAL_INSTALL_COLLECTOR = _onboarding._install_collector
+REAL_START_ON_DEMAND = _serve.start_on_demand
 
 
 @pytest.fixture(autouse=True)
@@ -21,3 +23,11 @@ def _no_real_collector_service(monkeypatch):
     from agents_over_telegram import onboarding
     monkeypatch.setattr(onboarding, '_install_collector',
                         lambda state, run_command=None: {'installed': False, 'reason': 'test'})
+
+
+@pytest.fixture(autouse=True)
+def _no_collector_started_on_demand(monkeypatch):
+    # Agents start aot serve in the background when no service is installed.
+    # Tests must never leave a real process behind; its own tests use the real step.
+    from agents_over_telegram import serve
+    monkeypatch.setattr(serve, 'start_on_demand', lambda state, **kwargs: {'started': False, 'reason': 'test'})
