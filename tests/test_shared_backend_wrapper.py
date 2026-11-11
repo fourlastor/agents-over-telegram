@@ -123,7 +123,7 @@ def receive(process, timeout=5):
 
 
 def wait_for_endpoint(root, process):
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if (root / "backend.sock").exists():
             return
@@ -265,7 +265,7 @@ def test_killed_wrapper_does_not_leave_backend_running(bridge):
     pid = json.loads((root / "record.json").read_text(encoding='utf-8'))["pid"]
     process.kill()
     process.communicate(timeout=5)
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         try:
             status = Path(f"/proc/{pid}/stat").read_text(encoding='utf-8').split(") ", 1)[1].split()[0]
@@ -415,7 +415,7 @@ def wait_for_stderr(process, needle, timeout=5):
 
 
 def wait_for_file(path):
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if path.exists() and path.stat().st_size:
             return
@@ -510,7 +510,7 @@ def test_unexpected_dispatcher_exit_preserves_desktop_and_does_not_restart(bridg
     send(process, {"method": "initialized"})
     wait_for_file(root / "dispatcher-record.json")
     original_record = (root / "dispatcher-record.json").read_bytes()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 15
     while "dispatcher_error" not in (root / "dispatcher.jsonl").read_text(encoding='utf-8'):
         assert time.monotonic() < deadline
         time.sleep(0.02)

@@ -221,7 +221,7 @@ def test_the_started_process_is_reaped(live):
             waited.append(1)
     REAL_START_ON_DEMAND(live, spawn=lambda argv, **kw: Process())
     import time
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 15
     while not waited and time.monotonic() < deadline:
         time.sleep(0.01)
     assert waited == [1]

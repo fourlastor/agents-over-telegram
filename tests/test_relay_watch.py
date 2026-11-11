@@ -90,7 +90,7 @@ def test_no_collect_is_quiet_and_does_not_poll_or_load_token(relay):
     path = Path(profile['state_dir']) / 'fake-transport.json'
     before = path.read_bytes()
     process = launch(profile, '--once', '--duration', '.3')
-    out, err = process.communicate(timeout=3)
+    out, err = process.communicate(timeout=30)
     assert process.returncode == 0, err
     values = [json.loads(x) for x in out.splitlines()]
     assert [x['type'] for x in values] == ['relay_ready', 'relay_stopped']
@@ -114,7 +114,7 @@ def test_persistent_receipt_and_stop_leave_processing_to_target(relay):
         assert line(process)['type'] == 'relay_receipt'
         process.stdin.write('{"command":"stop"}\n')
         process.stdin.flush()
-        out, err = process.communicate(timeout=3)
+        out, err = process.communicate(timeout=30)
         assert process.returncode == 0, err
         assert json.loads(out.splitlines()[-1])['reason'] == 'requested'
         assert len(core.poll(profile['client_id'])['deliveries']) == 1
@@ -128,7 +128,7 @@ def test_closed_stdin_exits_without_collection_and_releases_lock(relay):
     path = Path(profile['state_dir']) / 'fake-transport.json'
     before = path.read_bytes()
     process = launch(profile, '--collect', '--duration', '5', stdin=subprocess.DEVNULL)
-    out, err = process.communicate(timeout=3)
+    out, err = process.communicate(timeout=30)
     assert process.returncode == 0, err
     assert json.loads(out.splitlines()[-1])['reason'] == 'stdin_closed'
     assert path.read_bytes() == before
@@ -142,14 +142,14 @@ def test_concurrent_watcher_rejected_and_shutdown_holds_unresolved(relay):
     try:
         assert line(process)['type'] == 'relay_ready'
         second = launch(profile, '--once', '--duration', '.2')
-        out, err = second.communicate(timeout=3)
+        out, err = second.communicate(timeout=30)
         assert second.returncode == 1 and 'relay_watcher_busy' in err
         add_update(profile)
         core.collect()
         assert line(process)['type'] == 'telegram_wake'
         process.stdin.close()
         process.stdin = None
-        process.communicate(timeout=3)
+        process.communicate(timeout=30)
         assert process.returncode == 0
         assert store.next_event() is None  # unresolved handoff is held on shutdown
         with core._lock('relay-watcher') as acquired:
@@ -193,12 +193,12 @@ def test_profile_drift_blocks_wake_without_losing_work(relay):
     add_update(profile)
     core.collect()
     process = launch(profile, '--once', '--duration', '.2')
-    out, err = process.communicate(timeout=3)
+    out, err = process.communicate(timeout=30)
     assert process.returncode == 0, err
     assert 'telegram_wake' not in out
     config.write_text(saved, encoding='utf-8', newline='\n')
     process = launch(profile, '--once', '--duration', '.5')
-    out, err = process.communicate(timeout=3)
+    out, err = process.communicate(timeout=30)
     assert process.returncode == 0, err
     assert 'telegram_wake' in out
 

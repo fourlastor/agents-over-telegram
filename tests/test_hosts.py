@@ -594,7 +594,7 @@ def test_keep_alive_is_quiet_when_the_host_is_gone_or_a_newer_waiter_runs(tmp_pa
     first = start_wake(result['project_dir'], 'kept', duration=60)
     second = None
     try:
-        time.sleep(1.0)
+        wait_for_owner(result, 'kept', first)
         second = start_wake(result['project_dir'], 'kept', duration=60)
         out, err = first.communicate(timeout=30)
         assert (first.returncode, out, err) == (0, '', '')
@@ -624,6 +624,25 @@ def test_wake_collects_from_telegram_while_waiting(tmp_path):
     assert '1 new Telegram message' in err and 'arrives later' not in err
 
 
+def wait_for_owner(result, session, process, timeout=30):
+    """Wait until a waiter has registered as its session's owner.
+
+    A waiter writes its owner token as it starts; one started after it takes
+    over. Starting the next waiter before that would make the order of the two
+    a race on a slow machine.
+    """
+    import hashlib
+    key = hashlib.sha256(f"{result['client_id']}\0{session}".encode()).hexdigest()[:24]
+    owner = Path(result['state_dir']) / 'wake-locks' / f'{key}.owner'
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if owner.exists() and owner.read_text(encoding='utf-8').startswith(f'{process.pid}-'):
+            return
+        assert process.poll() is None, process.communicate()
+        time.sleep(0.05)
+    pytest.fail('the waiter never registered as its session owner')
+
+
 def start_wake(project, session, duration=60):
     return subprocess.Popen([str(RUNTIME), 'wake', '--host', 'claude', '--project-dir', project,
                              '--session', session, '--duration', str(duration)], stdout=subprocess.PIPE,
@@ -637,13 +656,14 @@ def test_newest_waiter_takes_over_its_session(tmp_path):
     other = start_wake(project, 'other')
     second = None
     try:
-        time.sleep(1.0)
+        wait_for_owner(result, 'abc', first)
+        wait_for_owner(result, 'other', other)
         assert first.poll() is None
         # A turn end starts a new waiter; the running one hands over and exits quietly.
         second = start_wake(project, 'abc')
         out, err = first.communicate(timeout=30)
         assert (first.returncode, out, err) == (0, '', '')
-        time.sleep(1.0)
+        wait_for_owner(result, 'abc', second)
         assert second.poll() is None
         # Another session keeps its own waiter.
         assert other.poll() is None
@@ -758,7 +778,8 @@ def test_waiting_waiter_keeps_waiting_until_replaced(tmp_path):
         compat.lock(held, blocking=True)
         waiting = start_wake(result['project_dir'], 'abc')
         try:
-            time.sleep(2.0)
+            # It registers as owner, then waits for the lock held above.
+            wait_for_owner(result, 'abc', waiting)
             assert waiting.poll() is None
             # A newer owner replaces the waiting one, which then exits quietly.
             (locks / f'{key}.owner').write_text('newer', encoding='utf-8', newline='\n')
@@ -951,8 +972,11 @@ def alive(pid):
 def test_relay_stops_the_runtime_when_the_host_stops_it(tmp_path, signum):
     project, session, _ = relay_project(tmp_path)
     session.send(2, 'hang')
-    time.sleep(0.3)
-    [pid] = [int(line) for line in (tmp_path / 'pids').read_text(encoding='utf-8').split()]
+    pids = tmp_path / 'pids'
+    deadline = time.monotonic() + 30
+    while not (pids.exists() and pids.read_text(encoding='utf-8').strip()) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    [pid] = [int(line) for line in pids.read_text(encoding='utf-8').split()]
     session.process.send_signal(signum)
     assert session.process.wait(timeout=10) == 128 + signum
     deadline = time.monotonic() + 10
