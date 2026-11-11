@@ -548,7 +548,8 @@ class Core:
             # The newest runtime that collected, so older ones stand aside (see collect).
             account_columns = {row['name'] for row in db.execute('PRAGMA table_info(account)')}
             for column, kind in (('collector_version', 'TEXT'), ('collector_seen', 'REAL'),
-                                 ('legacy_intake_at', 'REAL'), ('aware_intake', 'REAL')):
+                                 ('legacy_intake_at', 'REAL'), ('aware_intake', 'REAL'),
+                                 ('down_notice_at', 'REAL')):
                 if column not in account_columns:
                     db.execute(f'ALTER TABLE account ADD COLUMN {column} {kind}')
             if 'event_at' not in {row['name'] for row in db.execute('PRAGMA table_info(inbox)')}:
@@ -2229,6 +2230,32 @@ class Core:
     # How long a newer runtime's last collection keeps older runtimes from
     # collecting. Past it the newer one counts as gone, so nobody goes deaf.
     COLLECTOR_STALE = 120
+    # How long without a fetch attempt before status calls the always-on
+    # collector down. It polls every 20 seconds, backs off at most 120 seconds
+    # after failures, and its watchdog restarts it after 300 seconds stuck.
+    SERVICE_STALE = 360
+    # Agents are told about a down collector at most this often, account-wide.
+    DOWN_NOTICE_INTERVAL = 3600
+
+    def collector_down_notice_due(self):
+        """The collector status when a down notice should go to an agent now, else None.
+
+        At most one notice per DOWN_NOTICE_INTERVAL for the whole account, and
+        none in the first minutes after the machine started, before the
+        service had its first chance to fetch.
+        """
+        if time.monotonic() < self.SERVICE_STALE:
+            return None
+        with self._tx() as db:
+            collector = self.collector_status(db)
+            if not collector['service_stale']:
+                return None
+            last = self._account(db)['down_notice_at']
+            now = self.clock()
+            if last is not None and 0 <= now - last < self.DOWN_NOTICE_INTERVAL:
+                return None
+            db.execute('UPDATE account SET down_notice_at=? WHERE singleton=1', (now,))
+        return collector
 
     def _newer_collector(self, account):
         """The version of a newer runtime that collected recently, or None."""
@@ -2249,9 +2276,18 @@ class Core:
         legacy = account['legacy_intake_at']
         # An older runtime's collection is worth mentioning for a week.
         recent_legacy = legacy if legacy is not None and self.clock() - legacy < 7 * 86400 else None
+        from . import serve
+        # With the always-on collector installed, someone fetches every few
+        # seconds; a long silence means it is down or stuck.
+        service = serve.pointer(self.state_dir) is not None
+        # Attempts count, failed ones included: a network outage is reported
+        # as an intake error, not as a collector that stopped.
+        last = account['last_attempt']
+        stale = service and (last is None or self.clock() - last > self.SERVICE_STALE)
         return {'runtime_version': self.runtime_version, 'collector_version': account['collector_version'],
                 'collector_seen_at': account['collector_seen'], 'deferring_to': newer,
-                'legacy_intake_at': recent_legacy}
+                'legacy_intake_at': recent_legacy, 'service_installed': service, 'service_stale': stale,
+                'last_attempt_at': last}
 
     # The bot's command menu in private chats; bump the version when it changes.
     BOT_MENU = ({'command': 'start', 'description': 'Check that this bot can message you'},

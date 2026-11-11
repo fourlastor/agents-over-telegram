@@ -23,6 +23,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -35,7 +36,12 @@ LOG_LIMIT = 1_000_000  # bytes; a bigger log is moved to serve.log.1 when the se
 POLL_TIMEOUT = 20
 BUSY_PAUSE = 2.0
 BACKOFF = 2.0
-BACKOFF_MAX = 300.0
+# Well under WATCHDOG_LIMIT, so a long outage never looks like a stuck loop.
+BACKOFF_MAX = 120.0
+# A loop iteration takes at most a long poll plus a few requests; one that
+# runs past this is stuck, and the collector exits so the service restarts it.
+WATCHDOG_LIMIT = 300.0
+STUCK_EXIT = 4
 
 # Started by the service manager with the system Python: it only reads the
 # pointer and replaces itself with the recorded AOT executable.
@@ -88,14 +94,50 @@ def moved(state):
     return current is not None and os.path.realpath(current) != os.path.realpath(own_executable())
 
 
-def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_running=None, log=None):
+class Watchdog:
+    """Notices a collector loop that stopped making progress.
+
+    The service manager only restarts a process that exits; one that hangs
+    (a request that never returns, a lock that is never released) would leave
+    every agent deaf. The loop beats once per iteration, and a thread exits
+    the process when no beat came for ``limit`` seconds.
+    """
+
+    def __init__(self, limit=WATCHDOG_LIMIT, clock=time.monotonic):
+        self.limit, self.clock = limit, clock
+        self.last = clock()
+
+    def beat(self):
+        self.last = self.clock()
+
+    def stuck(self):
+        return self.clock() - self.last > self.limit
+
+    def start(self, log, exit_=os._exit, sleep=time.sleep):
+        def watch():
+            while True:
+                sleep(max(1.0, self.limit / 10))
+                if self.stuck():
+                    log(f'aot serve: no progress for {self.limit:.0f}s; exiting so the service restarts it')
+                    exit_(STUCK_EXIT)
+                    return
+        thread = threading.Thread(target=watch, name='aot-serve-watchdog', daemon=True)
+        thread.start()
+        return thread
+
+
+def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_running=None, log=None, watchdog=None):
     """Collect without stopping; return 3 when the runtime moved, 0 when told to stop."""
     from .hosts import RUNTIME_MOVED_EXIT
     log = log or (lambda text: print(text, flush=True))
     rotate_log(state)
     log(f'aot serve: collecting for {state}')
+    if watchdog is not None:
+        watchdog.start(log)
     failures = 0
     while keep_running is None or keep_running():
+        if watchdog is not None:
+            watchdog.beat()
         if moved(state):
             log('aot serve: a newer runtime is installed; restarting on it')
             return RUNTIME_MOVED_EXIT
@@ -106,8 +148,15 @@ def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_runnin
             code = getattr(error, 'code', type(error).__name__)
             pause = min(BACKOFF_MAX, BACKOFF * 2 ** min(failures - 1, 16))
             log(f'aot serve: collection failed ({code}); retrying in {pause:.0f}s')
+            # Waiting out a failure is progress: beat around the pause.
+            if watchdog is not None:
+                watchdog.beat()
             sleep(pause)
+            if watchdog is not None:
+                watchdog.beat()
             continue
+        if watchdog is not None:
+            watchdog.beat()
         if failures:
             log('aot serve: collecting again')
         failures = 0

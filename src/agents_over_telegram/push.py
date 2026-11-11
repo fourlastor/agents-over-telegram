@@ -297,6 +297,18 @@ HOOK_EVENTS = ('SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop')
 _TELEGRAM_TOOL = re.compile(r'(?:^|__)(?:messages_poll|messages_ack|message_send|messages_history)$')
 
 
+def collector_down_notice(core) -> str | None:
+    """A notice when the installed always-on collector stopped fetching, else None."""
+    from .onboarding import collector_down_text
+    try:
+        collector = core.collector_down_notice_due()
+    except Exception:
+        return None
+    if not collector:
+        return None
+    return '[Agents over Telegram] Tell the user: ' + collector_down_text(collector)
+
+
 def hook_response(core, client_id: str, event: str, payload: dict) -> dict[str, Any] | None:
     """Return the hook JSON for one host event, or None for no output.
 
@@ -317,6 +329,10 @@ def hook_response(core, client_id: str, event: str, payload: dict) -> dict[str, 
     claimed = claim_new(core, client_id, 'hook')
     if claimed is None and event in ('SessionStart', 'UserPromptSubmit'):
         claimed = pending_summary(core, client_id)
+    if event in ('SessionStart', 'UserPromptSubmit'):
+        down = collector_down_notice(core)
+        if down:
+            claimed = {**(claimed or {}), 'notice': '\n'.join(filter(None, [(claimed or {}).get('notice'), down]))}
     if claimed is None:
         return None
     if event == 'Stop':

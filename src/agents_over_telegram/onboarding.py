@@ -387,6 +387,16 @@ def setup(args):
     return result
 
 
+def collector_down_text(collector):
+    """What to tell the owner when the always-on collector stopped fetching."""
+    last = collector.get('last_attempt_at')
+    since = (' since ' + datetime.fromtimestamp(last, timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+             if isinstance(last, (int, float)) else ' yet')
+    return (f'the always-on collector (aot serve) has not tried to fetch from Telegram{since}, so new messages, '
+            'settings taps and approvals are waiting. Check it with "aot serve --status" and its log '
+            '(journalctl --user on Linux, serve.log in the state directory on macOS).')
+
+
 def human_status(value):
     """Compact display derived solely from sanitized public status fields."""
     bot = value.get('bot') or {}
@@ -427,6 +437,8 @@ def human_status(value):
         lines.append(f"Collector: a newer runtime ({collector['deferring_to']}) fetches from Telegram for this bot; "
                      f"this project's runtime ({collector.get('runtime_version')}) only reads its inbox. "
                      'Rerun setup in this project to move it to the newer runtime.')
+    if collector.get('service_stale'):
+        lines.append('Collector: ' + collector_down_text(collector))
     if collector.get('legacy_intake_at'):
         when = datetime.fromtimestamp(collector['legacy_intake_at'], timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         lines.append(f'Collector: a runtime older than 0.9.24 fetched from Telegram at {when} and routed updates '
