@@ -110,6 +110,9 @@ def test_relay_calls_are_logged_but_waits_are_not(env):
     try:
         relay_api.call(core.state_dir, credentials['client_secret'], 'connection_status', {})
         relay_api.Waiter(core.state_dir, credentials['client_secret'])(0.1)
+        # Buffered until the collector writes them once per cycle.
+        assert kinds(core, 'relay') == []
+        relay.flush_activity()
     finally:
         relay.stop()
     [call] = kinds(core, 'relay')
@@ -139,3 +142,9 @@ def test_the_cli_prints_the_activity(env, capsys):
     core.record_activity('serve', {'event': 'started'})
     run(parser().parse_args(['--state-dir', str(core.state_dir), '--fake', 'serve', '--activity']))
     assert 'event=started' in capsys.readouterr().out
+
+
+def test_entries_written_together_keep_their_own_times(env):
+    core, transport, clock = env
+    core.record_activities([('relay', {'n': 1}, 100.0), ('relay', {'n': 2}, 200.0)])
+    assert [(e['at'], e['n']) for e in kinds(core, 'relay')] == [(100.0, 1), (200.0, 2)]

@@ -434,6 +434,8 @@ def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay=N
         except Exception:
             pass
         flushed = round((time.monotonic() - started) * 1000)
+        if relay is not None:
+            relay.flush_activity()
         if flushed >= core.SLOW_CYCLE_MS:
             # Time spent sending is time no fetch runs; taps arriving now wait.
             core.record_activity('cycle', {'flush_ms': flushed})

@@ -2355,19 +2355,35 @@ class Core:
     ACTIVITY_KEEP = 100
     ACTIVITY_KINDS = ('cycle', 'owner', 'relay', 'serve')
 
-    def record_activity(self, kind, detail):
+    def record_activity(self, kind, detail, at=None):
         """Append one entry to the bounded activity log; never fails the caller.
 
         It records timings for diagnosing lag (collector cycles, owner actions,
         relay requests, collector events), never message text or chat ids.
+
+        Never call it while a write transaction (_tx) is open in this thread:
+        it opens its own, would wait out the busy timeout, and the entry would
+        be dropped without a trace.
         """
+        self.record_activities([(kind, detail, at)])
+
+    def record_activities(self, entries):
+        """Append several (kind, detail, at) entries in one transaction; never fails the caller.
+
+        The same rule as record_activity: never inside an open _tx.
+        """
+        if not entries:
+            return
         try:
             with self._tx() as db:
-                db.execute('INSERT INTO activity(at,kind,detail) VALUES(?,?,?)',
-                           (self.clock(), kind, json.dumps(detail, separators=(',', ':'), sort_keys=True)))
-                db.execute('DELETE FROM activity WHERE kind=? AND id NOT IN '
-                           '(SELECT id FROM activity WHERE kind=? ORDER BY id DESC LIMIT ?)',
-                           (kind, kind, self.ACTIVITY_KEEP))
+                for kind, detail, at in entries:
+                    db.execute('INSERT INTO activity(at,kind,detail) VALUES(?,?,?)',
+                               (self.clock() if at is None else at, kind,
+                                json.dumps(detail, separators=(',', ':'), sort_keys=True)))
+                for kind in {kind for kind, _, _ in entries}:
+                    db.execute('DELETE FROM activity WHERE kind=? AND id NOT IN '
+                               '(SELECT id FROM activity WHERE kind=? ORDER BY id DESC LIMIT ?)',
+                               (kind, kind, self.ACTIVITY_KEEP))
         except Exception:
             pass
 

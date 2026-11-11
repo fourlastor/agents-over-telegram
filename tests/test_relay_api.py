@@ -280,6 +280,9 @@ def test_serve_wakes_waiters_after_routing_updates(env, monkeypatch):
 
         def notify(self):
             notified.append(1)
+
+        def flush_activity(self):
+            pass
     left = [2]
 
     def keep_running():
