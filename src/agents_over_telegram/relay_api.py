@@ -52,8 +52,34 @@ class Unavailable(Exception):
     """No relay took the request; the caller may run it locally."""
 
 
+# Unix socket paths are limited to about 104 bytes (macOS) or 108 (Linux).
+MAX_SOCKET_PATH = 100
+
+
 def socket_path(state):
-    return Path(state) / SOCKET_DIR / SOCKET_NAME
+    """The relay socket for a state directory.
+
+    Normally ``<state>/relay/relay.sock``. A state directory whose path is too
+    long for a Unix socket gets a short one in a private per-user runtime
+    directory instead ($XDG_RUNTIME_DIR, or /tmp/aot-<uid>), named after the
+    state directory's path, so the relay and its agents agree on it.
+    """
+    state = Path(state).absolute()
+    path = state / SOCKET_DIR / SOCKET_NAME
+    if len(os.fsencode(path)) <= MAX_SOCKET_PATH:
+        return path
+    import hashlib
+    digest = hashlib.sha256(os.fsencode(os.path.realpath(state))).hexdigest()[:16]
+    runtime = os.environ.get('XDG_RUNTIME_DIR')
+    for base in ([Path(runtime)] if runtime and Path(runtime).is_absolute() else []) + [_short_base()]:
+        short = base / f'aot-relay-{digest}' / SOCKET_NAME
+        if len(os.fsencode(short)) <= MAX_SOCKET_PATH:
+            return short
+    return short
+
+
+def _short_base():
+    return Path('/tmp') / f'aot-{os.getuid()}'
 
 
 def peer_uid(connection):
@@ -138,6 +164,10 @@ class Relay:
     def start(self):
         """Listen on the socket; returns the server thread."""
         path = socket_path(self.state)
+        if self.state.absolute() not in path.parents:
+            # The short path's runtime directory must be ours too, not one
+            # another user created first in /tmp.
+            private_directory(path.parent.parent)
         private_directory(path.parent)
         try:
             info = path.lstat()

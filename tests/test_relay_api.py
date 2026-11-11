@@ -198,3 +198,46 @@ def test_the_mcp_server_falls_back_only_when_no_relay_took_the_call():
     assert relayed(None, 'messages_poll', {}) is None
     body = {'ok': False, 'error': {'code': 'relay_no_answer'}}
     assert relayed(lambda name, arguments: body, 'message_send', {}) is body
+
+
+@pytest.fixture
+def short_tmp(monkeypatch):
+    import shutil
+    import tempfile
+    from pathlib import Path
+    base = Path(tempfile.mkdtemp(prefix='aot', dir='/tmp'))
+    monkeypatch.setattr(relay_api, '_short_base', lambda: base / 'u')
+    yield base
+    shutil.rmtree(base, ignore_errors=True)
+
+
+def test_a_long_state_path_gets_a_short_private_socket(tmp_path, monkeypatch, short_tmp):
+    monkeypatch.delenv('XDG_RUNTIME_DIR', raising=False)
+    deep = tmp_path / ('d' * 60) / ('e' * 60) / 'state'
+    path = relay_api.socket_path(deep)
+    assert path.parent.parent == short_tmp / 'u' and len(str(path)) <= relay_api.MAX_SOCKET_PATH
+    assert relay_api.socket_path(deep) == path
+    # A runtime directory is preferred when its path is short enough, and skipped when not.
+    monkeypatch.setenv('XDG_RUNTIME_DIR', str(short_tmp / 'run'))
+    assert relay_api.socket_path(deep).parent.parent == short_tmp / 'run'
+    monkeypatch.setenv('XDG_RUNTIME_DIR', str(tmp_path / ('r' * 80)))
+    assert relay_api.socket_path(deep).parent.parent == short_tmp / 'u'
+    short_state = short_tmp / 's'
+    assert relay_api.socket_path(short_state) == short_state / 'relay' / 'relay.sock'
+
+
+def test_a_relay_works_for_a_long_state_path(tmp_path, monkeypatch, short_tmp):
+    monkeypatch.delenv('XDG_RUNTIME_DIR', raising=False)
+    from test_core import Clock
+    from agents_over_telegram.transport import FakeTransport
+    transport = FakeTransport()
+    core = Core(tmp_path / ('d' * 60) / ('e' * 60) / 'state', transport, clock=Clock())
+    core.register_account(transport.bot_id, transport.username)
+    client, credentials = bind(core, transport)
+    running = relay_api.Relay(core, core.state_dir)
+    running.start()
+    try:
+        body = relay_api.call(core.state_dir, credentials['client_secret'], 'connection_status', {})
+    finally:
+        running.stop()
+    assert body['ok'] is True
