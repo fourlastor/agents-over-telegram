@@ -64,6 +64,8 @@ MAX_ACTIVE = 32
 MAX_WAITS = 64
 # Hooks and inbox claims run inside host hooks with short time limits.
 NODE_TIMEOUT = 4.0
+# On stop, requests already in flight get this long to finish.
+DRAIN_SECONDS = 3.0
 # The relay records the socket it listens on here, inside the state
 # directory, so agents whose environment differs (another TMPDIR) find it.
 SOCKET_RECORD = 'relay-socket.json'
@@ -393,9 +395,12 @@ class Relay:
         with self.changed:
             self.closing = True
             self.changed.notify_all()
-        self.flush_activity()
         if self.server is not None:
+            # Stop accepting, then let the requests already in flight finish:
+            # a claim cut off mid-way leaves its agent with a lost answer and a
+            # "messages may be waiting" notice for nothing.
             self.server.shutdown()
+            self._drain()
             self.server.server_close()
             for leftover in (self.path or socket_path(self.state), self.state / SOCKET_RECORD):
                 try:
@@ -403,6 +408,18 @@ class Relay:
                 except OSError:
                     pass
             self.server = None
+        self.flush_activity()
+
+    def _drain(self):
+        """Wait up to DRAIN_SECONDS for every request in flight to finish."""
+        deadline, taken = time.monotonic() + DRAIN_SECONDS, 0
+        while taken < MAX_ACTIVE + MAX_WAITS:
+            left = deadline - time.monotonic()
+            if left <= 0 or not self.connections.acquire(timeout=left):
+                break
+            taken += 1
+        for _ in range(taken):
+            self.connections.release()
 
 
 def recorded_socket(state):

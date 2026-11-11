@@ -44,6 +44,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+# Owner-action answers (panel answers and edits, button answers) wait at most
+# this long per attempt; the core tries once more after a timeout. Telegram
+# drops a widget answer that comes later than 15 s anyway.
+OWNER_ANSWER_TIMEOUT = 5
+
+
 class TelegramTransport:
     def __init__(self, token, *, opener=None):
         self._token = validate_token(token)
@@ -106,8 +112,13 @@ class TelegramTransport:
             return result
         except TransportError:
             raise
-        except Exception:
-            raise UnknownSend() if sending else TransportError("transport_failure") from None
+        except Exception as error:
+            if sending:
+                raise UnknownSend() from None
+            # Named apart, so a call that hung until its timeout can be told
+            # from one the network refused.
+            timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
+            raise TransportError("timeout" if timed_out else "transport_failure") from None
 
     def get_me(self):
         result = self._call("getMe", {})
@@ -148,13 +159,14 @@ class TelegramTransport:
         return self._call("sendMessage", params, sending=True)
 
     def answer_callback_query(self, callback_query_id, text):
-        return self._call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text[:200]})
+        return self._call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text[:200]},
+                          timeout=OWNER_ANSWER_TIMEOUT)
 
     def set_my_commands(self, commands, scope):
         return self._call("setMyCommands", {"commands": commands, "scope": scope})
 
     def delete_message(self, chat_id, message_id):
-        return self._call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+        return self._call("deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=OWNER_ANSWER_TIMEOUT)
 
     def send_widget(self, chat_id, html, *, chat_data=None, allow_queries=False):
         params = {"chat_id": chat_id, "html": html, "allow_queries": allow_queries}
@@ -163,11 +175,12 @@ class TelegramTransport:
         return self._call("sendWidget", params, sending=True)
 
     def answer_widget_query(self, widget_query_id, data):
-        return self._call("answerWidgetQuery", {"widget_query_id": widget_query_id, "data": data})
+        return self._call("answerWidgetQuery", {"widget_query_id": widget_query_id, "data": data},
+                          timeout=OWNER_ANSWER_TIMEOUT)
 
     def edit_message_widget_data(self, chat_id, message_id, chat_data):
         return self._call("editMessageWidgetData", {"chat_id": chat_id, "message_id": message_id,
-                                                    "chat_data": chat_data})
+                                                    "chat_data": chat_data}, timeout=OWNER_ANSWER_TIMEOUT)
 
     def edit_message_text(self, chat_id, message_id, text):
         # Without reply_markup, Telegram removes the message's inline buttons.
