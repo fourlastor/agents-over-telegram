@@ -261,20 +261,33 @@ def install(state, *, run_command=subprocess.run, python=None):
 
 
 def uninstall(state, *, run_command=subprocess.run):
-    """Stop and remove the user service, the launcher and the pointer."""
+    """Stop and remove the user service, the launcher and the pointer.
+
+    The files are removed even when the service manager cannot be reached
+    (a sandbox refusing launchctl or systemctl), so nothing is left that
+    makes the service look installed.
+    """
     state = Path(state).absolute()
     unit = _unit_path(state)
+
+    def attempt(argv):
+        try:
+            run_command(argv, check=False, capture_output=True)
+        except (OSError, subprocess.SubprocessError):
+            pass
     if sys.platform == 'darwin':
-        run_command(['launchctl', 'bootout', f'gui/{os.getuid()}', str(unit)], check=False, capture_output=True)
+        attempt(['launchctl', 'bootout', f'gui/{os.getuid()}', str(unit)])
     else:
-        run_command(['systemctl', '--user', 'disable', '--now', f'{name(state)}.service'], check=False,
-                    capture_output=True)
+        attempt(['systemctl', '--user', 'disable', '--now', f'{name(state)}.service'])
     removed = unit.exists()
     for path in (unit, state / LAUNCHER, state / POINTER):
-        if path.exists() or path.is_symlink():
-            path.unlink()
+        try:
+            if path.exists() or path.is_symlink():
+                path.unlink()
+        except OSError:
+            pass
     if sys.platform != 'darwin':
-        run_command(['systemctl', '--user', 'daemon-reload'], check=False, capture_output=True)
+        attempt(['systemctl', '--user', 'daemon-reload'])
     return {'installed': False, 'removed': removed}
 
 
