@@ -65,9 +65,11 @@ def socket_path(state):
     """The relay socket for a state directory.
 
     Normally ``<state>/relay/relay.sock``. A state directory whose path is too
-    long for a Unix socket gets a short one in a private per-user runtime
-    directory instead ($XDG_RUNTIME_DIR, or /tmp/aot-<uid>), named after the
-    state directory's path, so the relay and its agents agree on it.
+    long for a Unix socket gets a short one in a private per-user directory
+    instead, named after the state directory's path, so the relay and its
+    agents agree on it: $XDG_RUNTIME_DIR (Linux), $TMPDIR (per-user on
+    macOS), whichever exists, is ours and private and fits, else
+    /tmp/aot-<uid>.
     """
     state = Path(state).absolute()
     path = state / SOCKET_DIR / SOCKET_NAME
@@ -75,12 +77,25 @@ def socket_path(state):
         return path
     import hashlib
     digest = hashlib.sha256(os.fsencode(os.path.realpath(state))).hexdigest()[:16]
-    runtime = os.environ.get('XDG_RUNTIME_DIR')
-    for base in ([Path(runtime)] if runtime and Path(runtime).is_absolute() else []) + [_short_base()]:
+    for base in [*_private_runtime_dirs(), _short_base()]:
         short = base / f'aot-relay-{digest}' / SOCKET_NAME
         if len(os.fsencode(short)) <= MAX_SOCKET_PATH:
             return short
     return short
+
+
+def _private_runtime_dirs():
+    """Per-user runtime directories from the environment that exist, are ours and nobody else's."""
+    for name in ('XDG_RUNTIME_DIR', 'TMPDIR'):
+        value = os.environ.get(name)
+        if not value or not os.path.isabs(value):
+            continue
+        try:
+            info = os.lstat(value)
+        except OSError:
+            continue
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077:
+            yield Path(value)
 
 
 def _short_base():
