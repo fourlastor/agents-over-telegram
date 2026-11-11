@@ -167,3 +167,45 @@ def test_waits_have_their_own_slots(project):
     finally:
         for _ in range(relay_api.MAX_ACTIVE):
             relay.active.release()
+
+
+def test_a_lost_setup_answer_keeps_the_waiter_running(project, monkeypatch):
+    result, relay = project
+    node = relay_api.Node(result['state_dir'], secret(result))
+
+    def lost(announce_backlog):
+        raise relay_api.Lost('watch_prepare')
+    monkeypatch.setattr(node, 'prepare_watch', lost)
+    state = Path(result['state_dir'])
+    core = relay_api.LazyCore(lambda: Core(state, make_transport(state, fake=True), recover_sends=False))
+    rounds = [0]
+
+    def keep_running():
+        rounds[0] += 1
+        return rounds[0] <= 1
+    outcome = push.watch(core, result['client_id'], lambda e: None, collect=False, duration=0,
+                         keep_running=keep_running, remote=node)
+    assert outcome['reason'] == 'parent_exited'
+
+
+def test_the_lost_claim_notice_is_sent_once_until_a_claim_succeeds(project, monkeypatch):
+    result, relay = project
+    node = relay_api.Node(result['state_dir'], secret(result))
+    monkeypatch.setattr(node, 'prepare_watch', lambda announce_backlog: None)
+    monkeypatch.setattr(node, 'wait', lambda timeout: True)
+    outcomes = iter(['lost', 'lost', None, 'lost'])
+
+    def claim(surface):
+        outcome = next(outcomes)
+        if outcome == 'lost':
+            raise relay_api.Lost('claim')
+        return outcome
+    monkeypatch.setattr(node, 'claim', claim)
+    events, rounds = [], [0]
+
+    def keep_running():
+        rounds[0] += 1
+        return rounds[0] <= 4
+    push.watch(relay_api.LazyCore(lambda: None), result['client_id'], events.append, duration=0,
+               keep_running=keep_running, remote=node)
+    assert events == [push.LOST_CLAIM_EVENT, push.LOST_CLAIM_EVENT]

@@ -269,13 +269,15 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
     if relay:
         try:
             remote.prepare_watch(announce_backlog)
-        except Unavailable:
+        except (Unavailable, Lost):
+            # Setting up is idempotent, so a lost answer is safe to redo here.
             relay = False
         except CoreError as error:
             if error.code in FATAL_CODES:
                 return stopped(error.code)
             raise
     local_ready = False
+    lost_announced = False
 
     def ready_locally():
         nonlocal local_ready
@@ -306,10 +308,13 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
         if relayed and remote is not None:
             try:
                 event = remote.claim('watch')
+                lost_announced = False
             except Lost:
                 # The relay may have recorded the claim already; a local claim
-                # would find nothing. Announce that work may be waiting.
-                event = LOST_CLAIM_EVENT
+                # would find nothing. Announce that work may be waiting, once
+                # until a claim gets through again.
+                event = None if lost_announced else LOST_CLAIM_EVENT
+                lost_announced = True
             except Unavailable:
                 event = _NO_RELAY
             except CoreError as error:

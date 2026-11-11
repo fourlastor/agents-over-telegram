@@ -638,7 +638,7 @@ def serve(state_dir: str | Path, client_file: str | Path, transport: Any = None)
         # The client file is checked at startup: by the relay when one answers,
         # otherwise against the database here.
         try:
-            body = relay_api.call(state, secret, "connection_status", {})
+            body = relay_api.call(state, secret, "connection_status", {}, timeout=relay_api.NODE_TIMEOUT * 2)
             if not body.get("ok"):
                 raise ValueError("Client rejected by the relay")
         except relay_api.Unavailable:
