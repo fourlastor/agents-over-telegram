@@ -626,7 +626,7 @@ def serve(state_dir: str | Path, client_file: str | Path, transport: Any = None)
         from . import relay_api
         state = Path(state_dir)
         # Calls go to the always-on collector when one answers, else run here.
-        forward = (lambda name, arguments: relay_api.call(state, secret, name, arguments)) if transport is None else None
+        forward = lambda name, arguments: relay_api.call(state, secret, name, arguments)
         server = create_server(core, client_id, client_file, forward=forward)
     except Exception:
         raise RuntimeError("MCP startup failed. Check private setup, state directory and client file.") from None

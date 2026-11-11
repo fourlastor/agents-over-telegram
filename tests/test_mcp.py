@@ -583,3 +583,42 @@ async def test_malformed_limit_details_fall_back_to_the_fixed_message(code, deta
         error = payload(await session.call_tool("messages_history", {}))["error"]
         assert set(error) == {"code", "message"}
         assert error["code"] == (code if code != "not_a_public_code" else "internal_error")
+
+
+@pytest.mark.anyio
+async def test_calls_go_to_the_relay_first_and_run_here_only_without_one():
+    from agents_over_telegram.relay_api import Unavailable
+
+    core = AdapterCore()
+    forwarded = []
+    relay_up = [True]
+
+    def forward(name, arguments):
+        forwarded.append(name)
+        if not relay_up[0]:
+            raise Unavailable("no_relay")
+        return {"ok": True, "result": {"from": "relay"}}
+    async with create_connected_server_and_client_session(create_server(core, "client-a", forward=forward)) as session:
+        relayed = payload(await session.call_tool("connection_status", {}))
+        assert relayed == {"ok": True, "result": {"from": "relay"}} and core.calls == []
+        relay_up[0] = False
+        local = payload(await session.call_tool("connection_status", {}))
+        assert local["ok"] is True and local["result"] != {"from": "relay"}
+        # Invalid arguments never reach the relay.
+        assert payload(await session.call_tool("message_send", {"text": "x"}))["error"]["code"] == "invalid_arguments"
+    assert forwarded == ["connection_status", "connection_status"]
+
+
+def test_the_stdio_server_forwards_to_the_relay(tmp_path, monkeypatch):
+    from agents_over_telegram import mcp_server, relay_api
+
+    state, core, transport, clients, files = _real_state(tmp_path)
+    created = []
+    monkeypatch.setattr(mcp_server, "create_server", lambda *args, **kwargs: created.append(kwargs) or object())
+
+    async def capture(server):
+        pass
+    monkeypatch.setattr(mcp_server, "_run_stdio", capture)
+    mcp_server.serve(state, files[0], transport=transport)
+    with pytest.raises(relay_api.Unavailable):
+        created[0]["forward"]("connection_status", {})
