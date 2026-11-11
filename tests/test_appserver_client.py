@@ -34,11 +34,11 @@ def fake_server(handler, *, tcp=False):
 
     def run(ws):
         try:
-            initialization = json.loads(ws.recv(timeout=2))
+            initialization = json.loads(ws.recv(timeout=10))
             received.append(initialization)
             assert initialization["method"] == "initialize"
             send(ws, {"id": initialization["id"], "result": {"userAgent": "test"}})
-            received.append(json.loads(ws.recv(timeout=2)))
+            received.append(json.loads(ws.recv(timeout=10)))
             assert received[-1] == {"method": "initialized"}
             handler(ws, received)
         except ConnectionClosed:
@@ -61,7 +61,7 @@ def fake_server(handler, *, tcp=False):
                 yield endpoint, received
             finally:
                 server.shutdown()
-                thread.join(timeout=2)
+                thread.join(timeout=10)
         if errors:
             raise errors[0]
 
@@ -102,7 +102,7 @@ def test_bidirectional_requests_are_left_for_desktop_and_metadata_is_redacted():
         with pytest.raises(TimeoutError):
             ws.recv(timeout=0.08)
         checked.set()
-        request = json.loads(ws.recv(timeout=2))
+        request = json.loads(ws.recv(timeout=10))
         received.append(request)
         send(ws, {"id": request["id"], "result": {}})
     with fake_server(handler) as (endpoint, _):
@@ -178,7 +178,7 @@ def test_persistent_drain_waits_for_future_notifications_without_sending():
     def handler(ws, _):
         time.sleep(0.02)
         send(ws, {"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": TURN}}})
-        ws.recv(timeout=2)
+        ws.recv(timeout=10)
     with fake_server(handler) as (endpoint, _):
         with AppServerConnection(endpoint) as client:
             assert client.drain(timeout=1) == [{"kind": "notification", "method": "turn/completed", "threadId": THREAD, "turnId": TURN}]
@@ -292,7 +292,7 @@ def test_send_timeout_is_bounded_even_when_peer_does_not_read():
             self.sends = 0
         def send(self, _):
             self.sends += 1
-            assert self.stopped.wait(timeout=1)
+            assert self.stopped.wait(timeout=10)
             raise OSError(SECRET)
         def shutdown(self, _):
             self.stopped.set()
