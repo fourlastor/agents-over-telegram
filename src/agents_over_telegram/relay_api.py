@@ -185,6 +185,8 @@ class Relay:
         # When an agent last called or waited (time.monotonic), for a
         # collector started on demand that stops when idle.
         self.last_activity = None
+        # Call entries for the activity log, written once per collector cycle.
+        self._activity = []
 
     def notify(self):
         """Wake every waiting agent; each then checks its own inbox."""
@@ -239,6 +241,33 @@ class Relay:
             self.notify()
         return {'protocol': PROTOCOL, 'ok': True, 'body': body}
 
+    def _record(self, request, answer, started):
+        """Log a call's duration and outcome; waits are not logged, they block by design."""
+        op = request.get('op') if isinstance(request, dict) else None
+        name = op or (request.get('tool') if isinstance(request, dict) else None)
+        body = answer.get('body') if isinstance(answer, dict) else None
+        if not isinstance(answer, dict) or not answer.get('ok'):
+            outcome = (answer or {}).get('error') or 'bad_request'
+        elif answer.get('error_code'):
+            outcome = answer['error_code']
+        elif isinstance(body, dict) and not body.get('ok'):
+            outcome = (body.get('error') or {}).get('code') or 'error'
+        else:
+            outcome = 'ok'
+        entry = ('relay', {'call': name if isinstance(name, str) else 'unknown', 'outcome': outcome,
+                           'ms': round((time.monotonic() - started) * 1000)}, self.core.clock())
+        # Buffered: a write per call would add a transaction to every hook.
+        # The collector writes them once per cycle (flush_activity).
+        with self.changed:
+            self._activity.append(entry)
+            del self._activity[:-self.core.ACTIVITY_KEEP]
+
+    def flush_activity(self):
+        """Write the buffered call entries to the activity log in one transaction."""
+        with self.changed:
+            entries, self._activity = self._activity, []
+        self.core.record_activities(entries)
+
     def _node_op(self, op, client_id, request):
         """The inbox work of hooks and waiters, run here so agents never open the database."""
         from . import push
@@ -288,11 +317,14 @@ class Relay:
                 return
             try:
                 connection.settimeout(CALL_TIMEOUT)
+                started = time.monotonic()
                 try:
                     answer = self.answer(request)
                 except Exception:
                     answer = {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
                 _send(connection, answer)
+                if slot is self.active:
+                    self._record(request, answer, started)
             finally:
                 slot.release()
         except OSError:
@@ -361,6 +393,7 @@ class Relay:
         with self.changed:
             self.closing = True
             self.changed.notify_all()
+        self.flush_activity()
         if self.server is not None:
             self.server.shutdown()
             self.server.server_close()
