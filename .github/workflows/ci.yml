@@ -56,9 +56,9 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             # A test that hangs for two minutes dumps every thread and exits,
             # so the log survives instead of running into the job limit.
-            AOT_TEST_HANG_SECONDS=120 "$python" -m pytest -q
+            AOT_TEST_HANG_SECONDS=120 "$python" -m pytest -q --durations=40
           else
-            "$python" -m pytest -q
+            "$python" -m pytest -q --durations=40
           fi
 
       - name: Validate the plugin package
