@@ -48,8 +48,9 @@ def test_a_wrong_secret_reaches_no_inbox(env, relay):
 def test_invalid_arguments_are_refused_by_the_relay_too(env, relay):
     core, transport, clock = env
     client, credentials = bind(core, transport)
-    body = relay_api.call(core.state_dir, credentials['client_secret'], 'message_send', {'text': 'x'})
-    assert body['error']['code'] == 'invalid_arguments'
+    # Nothing runs on the relay; the agent's own validation then refuses it.
+    with pytest.raises(relay_api.Unavailable):
+        relay_api.call(core.state_dir, credentials['client_secret'], 'message_send', {'text': 'x'})
 
 
 def test_no_relay_means_the_node_runs_the_call(env):
@@ -360,3 +361,71 @@ def test_a_relay_works_for_a_long_state_path(tmp_path, monkeypatch, short_tmp):
     finally:
         running.stop()
     assert body['ok'] is True
+
+
+def test_a_deeply_nested_request_gets_an_answer(env, relay):
+    core, transport, clock = env
+    connection = socket.socket(socket.AF_UNIX)
+    connection.connect(str(relay_api.socket_path(core.state_dir)))
+    connection.sendall(b'[' * 200000 + b'\n')
+    answer = json.loads(relay_api._read_line(connection, 1 << 20))
+    connection.close()
+    assert answer['error'] == 'bad_request'
+
+
+def test_an_unknown_peer_is_refused(env, relay, monkeypatch):
+    core, transport, clock = env
+    monkeypatch.setattr(relay_api, 'peer_uid', lambda connection: None)
+    with pytest.raises(relay_api.Unavailable):
+        relay_api.call(core.state_dir, 'secret', 'messages_poll', {})
+
+
+def test_a_tool_the_relay_does_not_know_runs_in_the_agent(env, relay, monkeypatch):
+    from agents_over_telegram import mcp_server
+    core, transport, clock = env
+    client, credentials = bind(core, transport)
+    monkeypatch.setattr(mcp_server, '_TOOL_MAP', {})
+    with pytest.raises(relay_api.Unavailable):
+        relay_api.call(core.state_dir, credentials['client_secret'], 'connection_status', {})
+
+
+def test_a_trickling_request_is_cut_off(env, relay, monkeypatch):
+    import time
+    core, transport, clock = env
+    monkeypatch.setattr(relay_api, 'REQUEST_DEADLINE', 0.5)
+    connection = socket.socket(socket.AF_UNIX)
+    connection.connect(str(relay_api.socket_path(core.state_dir)))
+    started = time.monotonic()
+    connection.sendall(b'{"protocol"')
+    answer = json.loads(relay_api._read_line(connection, 1 << 20))
+    connection.close()
+    assert answer['error'] == 'bad_request' and time.monotonic() - started < 5
+
+
+def test_too_many_requests_at_once_run_in_the_agents(env, relay):
+    core, transport, clock = env
+    for _ in range(relay_api.MAX_ACTIVE):
+        relay.active.acquire()
+    try:
+        with pytest.raises(relay_api.Unavailable):
+            relay_api.call(core.state_dir, 'secret', 'messages_poll', {})
+    finally:
+        for _ in range(relay_api.MAX_ACTIVE):
+            relay.active.release()
+
+
+def test_agents_find_the_socket_the_relay_recorded(env, relay, monkeypatch):
+    core, transport, clock = env
+    client, credentials = bind(core, transport)
+    assert relay_api.recorded_socket(core.state_dir) == relay.path
+    # An agent whose environment would pick another path still finds it.
+    monkeypatch.setattr(relay_api, 'socket_path', lambda state: core.state_dir / 'elsewhere.sock')
+    assert relay_api.call(core.state_dir, credentials['client_secret'], 'connection_status', {})['ok'] is True
+
+
+def test_image_sends_stay_with_the_agent():
+    from agents_over_telegram.mcp_server import relayed
+    called = []
+    assert relayed(lambda name, arguments: called.append(name), 'message_send',
+                   {'text': 'x', 'idempotency_key': 'k', 'image_path': '/tmp/a.png'}) is None
+    assert called == []
