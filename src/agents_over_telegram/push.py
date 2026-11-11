@@ -203,11 +203,17 @@ def pending_summary(core, client_id: str) -> dict[str, Any] | None:
             f'for this agent. {NOTICE_GUIDANCE}'}
 
 
+# How long one wait on the always-on collector lasts before the watcher checks
+# that its host is still there.
+RELAY_WAIT = 20.0
+
+
 def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool = False,
           duration: float = 0, interval: float = 2.0, poll_timeout: int = 10,
           clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
           announce_backlog: bool = True,
-          keep_running: Callable[[], bool] | None = None) -> dict[str, Any]:
+          keep_running: Callable[[], bool] | None = None,
+          wait_for_change: Callable[[float], bool] | None = None) -> dict[str, Any]:
     """Emit one event per batch of new deliveries until the duration ends.
 
     ``keep_running`` is checked once per cycle; the CLI uses it to stop when the
@@ -216,6 +222,10 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
     ``duration`` 0 runs until the process is stopped. With ``collect`` the watcher
     long-polls the shared collector; another process that holds the collector lock
     makes this one fall back to watching the shared inbox. Nothing is sent.
+
+    ``wait_for_change`` (relay_api.Waiter) blocks until the always-on collector
+    reports news. While it answers, this watcher neither collects nor paces
+    itself; when it returns False (no relay), the watcher works as above.
     """
     if not isinstance(duration, (int, float)) or duration < 0:
         raise CoreError('invalid_watch_duration')
@@ -248,8 +258,11 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
     while True:
         if keep_running is not None and not keep_running():
             return {'events': events, 'reason': 'parent_exited'}
-        waited = collected = False
-        if collect and clock() >= next_collect:
+        waited = collected = relayed = False
+        if wait_for_change is not None:
+            limit = RELAY_WAIT if deadline is None else max(0.0, min(RELAY_WAIT, deadline - clock()))
+            relayed = wait_for_change(limit)
+        if collect and not relayed and clock() >= next_collect:
             timeout = poll_timeout
             if deadline is not None:
                 # Do not let a long poll run past the requested duration.
@@ -286,7 +299,7 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
                 events += 1
         if deadline is not None and clock() >= deadline:
             return {'events': events, 'reason': 'duration_elapsed'}
-        if not waited:
+        if not waited and not relayed:
             # Pace the shared database checks, without passing the deadline.
             pause = interval if deadline is None else max(0.0, min(interval, deadline - clock()))
             sleep(pause)

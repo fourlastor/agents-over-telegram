@@ -145,13 +145,13 @@ def run(core, state, *, poll_timeout=POLL_TIMEOUT, sleep=time.sleep, keep_runnin
             log(f'aot serve: not answering agents ({type(error).__name__}); they run their calls themselves')
             relay = None
     try:
-        return _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog)
+        return _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay)
     finally:
         if relay is not None:
             relay.stop()
 
 
-def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog):
+def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay=None):
     from .hosts import RUNTIME_MOVED_EXIT
     failures = 0
     while keep_running is None or keep_running():
@@ -172,6 +172,9 @@ def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog):
         if failures:
             log('aot serve: collecting again')
         failures = 0
+        if relay is not None and result.get('updates'):
+            # Waiting agents check their inboxes now instead of on their next poll.
+            relay.notify()
         if result.get('status') == 'busy':
             # Another collector holds the lock (an older one still stopping).
             sleep(BUSY_PAUSE)

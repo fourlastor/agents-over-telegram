@@ -27,6 +27,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import secrets
 import socket
 import socketserver
 import stat
@@ -46,6 +47,10 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # A call can wait on a Telegram request (a send, an attachment download).
 CALL_TIMEOUT = 90.0
 CONNECT_TIMEOUT = 2.0
+# The longest a waiting agent's request is held before it is answered anyway.
+WAIT_LIMIT = 50.0
+# Calls after which other agents may have something new (a peer delivery).
+_CHANGING_TOOLS = frozenset({'message_send'})
 
 
 class Unavailable(Exception):
@@ -99,6 +104,25 @@ class Relay:
         self.core, self.state = core, Path(state)
         self.log = log or (lambda text: None)
         self.server = None
+        # Waiting agents hold a request until the generation moves: after a
+        # collection routed updates, or a call that may deliver to a peer. The
+        # instance tells a waiter that the relay restarted.
+        self.instance = secrets.token_hex(8)
+        self.generation = 0
+        self.closing = False
+        self.changed = threading.Condition()
+
+    def notify(self):
+        """Wake every waiting agent; each then checks its own inbox."""
+        with self.changed:
+            self.generation += 1
+            self.changed.notify_all()
+
+    def _wait(self, instance, generation, timeout):
+        with self.changed:
+            if instance == self.instance and generation == self.generation:
+                self.changed.wait_for(lambda: self.generation != generation or self.closing, timeout)
+            return {'instance': self.instance, 'generation': self.generation}
 
     def answer(self, request):
         """One request's answer; never raises."""
@@ -112,13 +136,22 @@ class Relay:
         if request['protocol'] > PROTOCOL:
             return {'protocol': PROTOCOL, 'ok': False, 'error': 'relay_too_old'}
         secret, tool, arguments = request.get('secret'), request.get('tool'), request.get('arguments')
-        if not isinstance(secret, str) or not isinstance(tool, str):
+        if not isinstance(secret, str) or not (isinstance(tool, str) or request.get('op') == 'wait'):
             return {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
         try:
             client_id = self.core.authenticate(secret)
         except CoreError:
             return {'protocol': PROTOCOL, 'ok': True, 'body': _error_body('authentication_failed')}
-        return {'protocol': PROTOCOL, 'ok': True, 'body': call_tool(self.core, client_id, tool, arguments)}
+        if request.get('op') == 'wait':
+            timeout = request.get('timeout')
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 <= timeout <= WAIT_LIMIT:
+                return {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
+            return {'protocol': PROTOCOL, 'ok': True,
+                    'wait': self._wait(request.get('instance'), request.get('generation'), timeout)}
+        body = call_tool(self.core, client_id, tool, arguments)
+        if tool in _CHANGING_TOOLS and body.get('ok'):
+            self.notify()
+        return {'protocol': PROTOCOL, 'ok': True, 'body': body}
 
     def handle(self, connection):
         try:
@@ -178,6 +211,9 @@ class Relay:
         return thread
 
     def stop(self):
+        with self.changed:
+            self.closing = True
+            self.changed.notify_all()
         if self.server is not None:
             self.server.shutdown()
             self.server.server_close()
@@ -188,12 +224,8 @@ class Relay:
             self.server = None
 
 
-def call(state, secret, tool, arguments, timeout=CALL_TIMEOUT):
-    """Run one tool call on the relay and return its body.
-
-    Raises Unavailable when no relay took the request (no socket, nobody
-    listening, a relay older than this node); the caller then runs it itself.
-    """
+def _request(state, request, timeout):
+    """Send one request; its answer, None when the answer was lost, Unavailable when nobody took it."""
     path = socket_path(state)
     try:
         info = path.parent.lstat()
@@ -212,22 +244,59 @@ def call(state, secret, tool, arguments, timeout=CALL_TIMEOUT):
             raise Unavailable('foreign_relay')
         connection.settimeout(timeout)
         try:
-            _send(connection, {'protocol': PROTOCOL, 'secret': secret, 'tool': tool, 'arguments': arguments})
+            _send(connection, {'protocol': PROTOCOL, **request})
             answer = json.loads(_read_line(connection, MAX_RESPONSE))
         except (OSError, ValueError, UnicodeDecodeError):
-            # The request may have run; never run it a second time here.
-            from .mcp_server import _error_body
-            return _error_body('relay_no_answer')
+            return None
     finally:
         connection.close()
     if not isinstance(answer, dict):
-        from .mcp_server import _error_body
+        return None
+    if answer.get('error') == 'relay_too_old':
+        raise Unavailable('relay_too_old')
+    return answer
+
+
+def call(state, secret, tool, arguments, timeout=CALL_TIMEOUT):
+    """Run one tool call on the relay and return its body.
+
+    Raises Unavailable when no relay took the request (no socket, nobody
+    listening, a relay older than this node); the caller then runs it itself.
+    A request that was sent is never run again: a lost answer comes back as
+    relay_no_answer.
+    """
+    from .mcp_server import _error_body
+    answer = _request(state, {'secret': secret, 'tool': tool, 'arguments': arguments}, timeout)
+    if answer is None:
         return _error_body('relay_no_answer')
     if answer.get('ok') and isinstance(answer.get('body'), dict):
         return answer['body']
-    if answer.get('error') == 'relay_too_old':
-        raise Unavailable('relay_too_old')
-    from .mcp_server import _error_body
     if answer.get('error') == 'node_too_old':
         return _error_body('node_too_old')
     return _error_body('relay_refused')
+
+
+class Waiter:
+    """Blocks a watching agent until the relay has news, instead of polling the inbox.
+
+    Calling it waits up to ``timeout`` seconds and returns True when the relay
+    answered (with news or not), False when no relay is there; the watcher
+    then collects and paces itself as before.
+    """
+
+    def __init__(self, state, secret):
+        self.state, self.secret = Path(state), secret
+        self.instance = self.generation = None
+
+    def __call__(self, timeout):
+        timeout = max(0.0, min(float(timeout), WAIT_LIMIT))
+        try:
+            answer = _request(self.state, {'op': 'wait', 'secret': self.secret, 'instance': self.instance,
+                                           'generation': self.generation, 'timeout': timeout}, timeout + 10)
+        except Unavailable:
+            return False
+        wait = answer.get('wait') if isinstance(answer, dict) else None
+        if not isinstance(wait, dict):
+            return False
+        self.instance, self.generation = wait.get('instance'), wait.get('generation')
+        return True
