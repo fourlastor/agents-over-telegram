@@ -422,6 +422,8 @@ def _collector_choice(args, state, executable):
                       'rerun setup with --serve.',
              'install_with': _serve_command(executable, state, '--install')}
     if getattr(args, 'no_serve', False):
+        # Also keeps agents from starting a collector on demand.
+        serve.opt_out(state)
         return {'installed': False, 'declined': True}
     chosen = getattr(args, 'serve', False)
     if not chosen and not args.prepare_only and sys.stdin.isatty():

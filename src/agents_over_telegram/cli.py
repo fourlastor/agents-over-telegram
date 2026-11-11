@@ -290,6 +290,8 @@ def parser():
     action.add_argument("--install", action="store_true", help="Run it as a user service (systemd or launchd)")
     action.add_argument("--uninstall", action="store_true", help="Stop and remove the user service")
     action.add_argument("--status", action="store_true", help="Show whether the user service is set up")
+    action.add_argument("--on-demand", action="store_true",
+                        help="Started by an agent: stop when idle, when the service is installed or a newer runtime takes over")
     flush = sub.add_parser("flush")
     flush.add_argument("--client-file", type=Path)
     peer = sub.add_parser("configure-peer")
@@ -507,11 +509,16 @@ def run(args):
         if args.install:
             return serve.install(state_dir)
         if args.uninstall:
-            return serve.uninstall(state_dir)
+            # Removing it on purpose also means no collector started on demand;
+            # serve --install or setup --serve turns collecting back on.
+            result = serve.uninstall(state_dir)
+            serve.opt_out(state_dir)
+            return {**result, 'on_demand': False}
         if args.status:
             return serve.status(state_dir)
         from .relay_api import Relay
-        raise SystemExit(serve.run(core, state_dir, watchdog=serve.Watchdog(), relay=Relay(core, state_dir)))
+        raise SystemExit(serve.run(core, state_dir, watchdog=serve.Watchdog(), relay=Relay(core, state_dir),
+                                   on_demand=args.on_demand))
     if args.command == "flush":
         return core.flush(client_id=_client(core, args.client_file, args.expected_client_id) if args.client_file else None)
     if args.command == "account-status":
@@ -657,7 +664,9 @@ def run(args):
             raise SystemExit(RUNTIME_MOVED_EXIT)
         return None
     if args.command == "mcp":
+        from .hosts import _start_collector
         from .mcp_server import serve
+        _start_collector(state_dir)
         serve(state_dir, args.client_file, transport=core.transport)
         return None
     raise CredentialError("unknown_command")
