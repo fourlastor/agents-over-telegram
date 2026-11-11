@@ -121,3 +121,21 @@ def test_the_service_never_moves_to_an_older_runtime(tmp_path, monkeypatch):
                        overwrite=True)
     assert serve.follow(state, tmp_path / 'this' / 'aot') is True
     assert serve.pointer_version(state) == serve._pointer_value('x')['aot_version']
+
+
+def test_a_sandbox_that_blocks_the_service_manager_leaves_nothing_behind(home):
+    def blocked(argv, **kw):
+        raise PermissionError('sandbox')
+    result = REAL_INSTALL_COLLECTOR(home, run_command=blocked, executable='/opt/aot/bin/aot')
+    assert result['installed'] is False and result['reason'] == 'PermissionError'
+    assert serve.pointer(home) is None and not (home / serve.LAUNCHER).exists()
+    assert not serve._unit_path(home).exists()
+    # So the next setup does not think it is installed.
+    assert serve.status(home)['installed'] is False
+
+
+def test_no_offer_where_no_service_can_be_installed(tmp_path, monkeypatch):
+    monkeypatch.setattr('shutil.which', lambda name: None)
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    result, calls = live_setup(tmp_path, monkeypatch)
+    assert result['always_on_collector'] == {'installed': False, 'reason': 'unsupported_platform'}
