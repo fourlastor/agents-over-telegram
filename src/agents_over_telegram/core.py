@@ -65,6 +65,36 @@ def _timed(into, name):
         into[name] = round((time.monotonic() - started) * 1000)
 
 
+# Network failures and timeouts are tried once more; a Telegram rejection is not.
+_RETRIED_CODES = {'timeout', 'transport_failure', 'http_failure'}
+
+
+def _owner_call(calls, name, call):
+    """Run one Telegram call that answers an owner action; never raises.
+
+    Its duration goes into ``calls`` as ``<name>_ms`` for the activity log,
+    with ``<name>_attempts`` when it was retried and ``<name>_error`` when it
+    failed, so a slow or lost answer shows its cause.
+    """
+    started, attempts = time.monotonic(), 0
+    while True:
+        attempts += 1
+        try:
+            call()
+            break
+        except TransportError as error:
+            if attempts < 2 and error.code in _RETRIED_CODES:
+                continue
+            calls[name + '_error'] = str(error.code)
+            break
+        except Exception as error:
+            calls[name + '_error'] = type(error).__name__
+            break
+    calls[name + '_ms'] = round((time.monotonic() - started) * 1000)
+    if attempts > 1:
+        calls[name + '_attempts'] = attempts
+
+
 def _panel_answer_kind(data):
     """What a settings panel answer was, for the activity log: view, warning, error or closed."""
     try:
@@ -3507,13 +3537,11 @@ class Core:
                     continue
             calls = {}
             if row['chat_data'] and row['chat_id'] and row['message_id']:
-                with _timed(calls, 'edit_ms'), contextlib.suppress(Exception):
-                    self.transport.edit_message_widget_data(row['chat_id'], row['message_id'], row['chat_data'])
-            with _timed(calls, 'answer_ms'), contextlib.suppress(Exception):
-                self.transport.answer_widget_query(row['query_id'], row['data'])
+                _owner_call(calls, 'edit', lambda: self.transport.edit_message_widget_data(
+                    row['chat_id'], row['message_id'], row['chat_data']))
+            _owner_call(calls, 'answer', lambda: self.transport.answer_widget_query(row['query_id'], row['data']))
             if row['remove'] and row['chat_id'] and row['message_id']:
-                with _timed(calls, 'delete_ms'), contextlib.suppress(Exception):
-                    self.transport.delete_message(row['chat_id'], row['message_id'])
+                _owner_call(calls, 'delete', lambda: self.transport.delete_message(row['chat_id'], row['message_id']))
             self.record_activity('owner', {'action': 'panel_tap', 'answer': _panel_answer_kind(row['data']),
                                            'routed_to_answered_ms': round((self.clock() - row['created']) * 1000),
                                            **calls})
@@ -3528,15 +3556,13 @@ class Core:
                 if not db.execute('DELETE FROM callback_answers WHERE callback_id=?', (row['callback_id'],)).rowcount:
                     continue
             calls = {}
-            with _timed(calls, 'answer_ms'), contextlib.suppress(Exception):
-                self.transport.answer_callback_query(row['callback_id'], row['text'])
+            _owner_call(calls, 'answer', lambda: self.transport.answer_callback_query(row['callback_id'], row['text']))
             if row['edit_text'] and row['chat_id'] and row['ephemeral_id'] and row['receiver_id']:
-                with _timed(calls, 'edit_ms'), contextlib.suppress(Exception):
-                    self.transport.edit_ephemeral_message_text(row['chat_id'], row['receiver_id'],
-                                                               row['ephemeral_id'], row['edit_text'])
+                _owner_call(calls, 'edit', lambda: self.transport.edit_ephemeral_message_text(
+                    row['chat_id'], row['receiver_id'], row['ephemeral_id'], row['edit_text']))
             elif row['edit_text'] and row['chat_id'] and row['message_id']:
-                with _timed(calls, 'edit_ms'), contextlib.suppress(Exception):
-                    self.transport.edit_message_text(row['chat_id'], row['message_id'], row['edit_text'])
+                _owner_call(calls, 'edit', lambda: self.transport.edit_message_text(
+                    row['chat_id'], row['message_id'], row['edit_text']))
             self.record_activity('owner', {'action': 'button_press',
                                            'routed_to_answered_ms': round((self.clock() - row['created']) * 1000),
                                            **calls})
