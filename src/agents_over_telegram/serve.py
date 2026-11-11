@@ -77,11 +77,13 @@ def executable():
         return json.load(stream)['executable']
 
 
-# Tells the collector it runs for the service, so it stops once the service is removed.
-os.environ['AOT_SERVE_SUPERVISED'] = '1'
 if os.name != 'nt':
     program = executable()
     os.execv(program, [program, '--state-dir', state, 'serve'])
+
+# Windows: this launcher supervises the collector. Mark it, so the collector
+# stops once the service is removed even if stopping the task left it running.
+os.environ['AOT_SERVE_SUPERVISED'] = '1'
 
 import subprocess
 import time
@@ -381,7 +383,8 @@ def _loop(core, state, poll_timeout, sleep, keep_running, log, watchdog, relay=N
         if watchdog is not None:
             watchdog.beat()
         reason = done() if done is not None else None
-        if reason is None and os.environ.get('AOT_SERVE_SUPERVISED') and pointer(state) is None:
+        if (reason is None and os.environ.get('AOT_SERVE_SUPERVISED')
+                and not os.path.lexists(Path(state) / POINTER)):
             # The service was uninstalled; a service manager that stopped only
             # the launcher (Task Scheduler) must not leave this collector behind.
             reason = 'the always-on service was removed'

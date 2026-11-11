@@ -24,8 +24,15 @@ def private_directory(path):
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
         if created and not compat.restrict_directory(path):
             # Windows: a new private folder that keeps its parent's ACL may be
-            # readable by others; better not to use it at all.
+            # readable by others. Remove it, so the next call tries again
+            # instead of finding it and using it.
+            try:
+                path.rmdir()
+            except OSError:
+                pass
             raise CredentialError("state_directory_acl_failed")
+        # A junction or other reparse point could send private files elsewhere.
+        compat.refuse_link(path)
         info = path.lstat()
         if not stat.S_ISDIR(info.st_mode) or not compat.owned(info) or not compat.private(info, 0o077):
             raise CredentialError("unsafe_state_directory")

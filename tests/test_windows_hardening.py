@@ -14,19 +14,31 @@ from agents_over_telegram.credentials import CredentialError, private_directory,
 from test_core import env  # noqa: F401 (env is a fixture)
 
 
+def windows_tools(sid='S-1-5-21-1-2-3-1001', icacls=0):
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if argv[0] == 'whoami':
+            return subprocess.CompletedProcess(argv, 0 if sid else 1, stdout=f'"HOME\\ada","{sid}"\n' if sid else '')
+        return subprocess.CompletedProcess(argv, icacls)
+    return run, calls
+
+
 def test_a_private_folder_gets_its_own_acl_on_windows(tmp_path, monkeypatch):
     monkeypatch.setattr(compat, 'WINDOWS', True)
-    monkeypatch.setenv('USERNAME', 'ada')
-    monkeypatch.setenv('USERDOMAIN', 'HOME')
-    calls = []
-    assert compat.restrict_directory(tmp_path, run=lambda argv, **kw: calls.append(argv) or
-                                     subprocess.CompletedProcess(argv, 0)) is True
-    assert calls == [['icacls', str(tmp_path), '/inheritance:r', '/grant:r', 'HOME\\ada:(OI)(CI)F',
-                      '*S-1-5-18:(OI)(CI)F']]
-    assert compat.restrict_directory(tmp_path, run=lambda argv, **kw: subprocess.CompletedProcess(argv, 5)) is False
+    run, calls = windows_tools()
+    assert compat.restrict_directory(tmp_path, run=run) is True
+    assert calls[-1] == ['icacls', str(tmp_path), '/inheritance:r', '/grant:r', '*S-1-5-21-1-2-3-1001:(OI)(CI)F',
+                         '*S-1-5-18:(OI)(CI)F']
+    assert compat.restrict_directory(tmp_path, run=windows_tools(icacls=5)[0]) is False
+    # Without the user's SID nothing is granted by name instead.
+    run, calls = windows_tools(sid=None)
+    assert compat.restrict_directory(tmp_path, run=run) is False
+    assert [argv[0] for argv in calls] == ['whoami']
 
     def missing(argv, **kw):
-        raise FileNotFoundError('icacls')
+        raise FileNotFoundError(argv[0])
     assert compat.restrict_directory(tmp_path, run=missing) is False
 
 
@@ -39,6 +51,10 @@ def test_a_new_private_folder_that_cannot_be_restricted_is_refused(tmp_path, mon
     with pytest.raises(CredentialError) as error:
         private_directory(tmp_path / 'state')
     assert error.value.code == 'state_directory_acl_failed'
+    # The folder is removed, so the next call refuses it again rather than using it.
+    assert not (tmp_path / 'state').exists()
+    with pytest.raises(CredentialError):
+        private_directory(tmp_path / 'state')
     # An existing folder is not restricted again on every use.
     (tmp_path / 'existing').mkdir(mode=0o700)
     assert private_directory(tmp_path / 'existing') == tmp_path / 'existing'
@@ -96,8 +112,39 @@ def test_an_unsupervised_collector_ignores_the_missing_pointer(env, monkeypatch)
     assert left[0] < 0
 
 
-def test_the_launcher_marks_the_collector_as_supervised():
-    assert "os.environ['AOT_SERVE_SUPERVISED'] = '1'" in serve.LAUNCHER_SOURCE
+def test_only_the_windows_launcher_marks_the_collector_as_supervised():
+    source = serve.LAUNCHER_SOURCE
+    # On POSIX the service manager stops the collector itself; the mark comes after the execv.
+    assert source.index("os.execv(") < source.index("os.environ['AOT_SERVE_SUPERVISED'] = '1'")
+
+
+def test_an_unreadable_pointer_does_not_stop_a_supervised_collector(env, monkeypatch):
+    core, transport, clock = env
+    monkeypatch.setenv('AOT_SERVE_SUPERVISED', '1')
+    (core.state_dir / serve.POINTER).write_text('not json', encoding='utf-8', newline='\n')
+    monkeypatch.setattr(serve, 'moved', lambda state: False)
+    monkeypatch.setattr(core, 'collect', lambda **kw: {'status': 'ok'})
+    monkeypatch.setattr(core, 'flush', lambda **kw: None)
+    left = [3]
+
+    def keep_running():
+        left[0] -= 1
+        return left[0] >= 0
+    assert serve.run(core, core.state_dir, poll_timeout=0, sleep=lambda s: None, keep_running=keep_running,
+                     log=lambda t: None) == 0
+    assert left[0] < 0
+
+
+def test_a_junction_as_a_private_folder_is_refused(tmp_path, monkeypatch):
+    target = tmp_path / 'elsewhere'
+    target.mkdir(mode=0o700)
+    monkeypatch.setattr(compat, 'WINDOWS', True)
+    monkeypatch.setattr(compat, 'restrict_directory', lambda path, run=None: True)
+    real = os.lstat(target)
+    monkeypatch.setattr(compat.os, 'lstat', lambda path: types.SimpleNamespace(st_mode=real.st_mode,
+                                                                                st_file_attributes=0x400))
+    with pytest.raises(CredentialError):
+        private_directory(target)
 
 
 @pytest.mark.skipif(not hasattr(socket, 'AF_UNIX'), reason='needs Unix sockets')

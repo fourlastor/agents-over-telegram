@@ -160,6 +160,9 @@ def own_aot():
     return Path(sys.executable).absolute().parent / executable_name('aot')
 
 
+_SID = None
+
+
 def restrict_directory(path, run=None):
     """On Windows, give a private folder an ACL of its own: full control for this
     user and SYSTEM, nothing inherited. True when applied, False when it failed.
@@ -172,15 +175,33 @@ def restrict_directory(path, run=None):
     if not WINDOWS:
         return True
     import subprocess
-    user = os.environ.get('USERNAME')
-    if not user:
+    global _SID
+    if run is None:
+        # The SID never changes for this process; ask whoami once.
+        if _SID is None:
+            _SID = _user_sid(subprocess.run)
+        sid, run = _SID, subprocess.run
+    else:
+        sid = _user_sid(run)
+    if sid is None:
         return False
-    if os.environ.get('USERDOMAIN'):
-        user = os.environ['USERDOMAIN'] + '\\' + user
-    run = run or subprocess.run
     try:
-        result = run(['icacls', str(path), '/inheritance:r', '/grant:r', f'{user}:(OI)(CI)F',
+        # By SID, not by name, so a renamed account or a name that is also a
+        # group cannot pick up the grant.
+        result = run(['icacls', str(path), '/inheritance:r', '/grant:r', f'*{sid}:(OI)(CI)F',
                       '*S-1-5-18:(OI)(CI)F'], capture_output=True, check=False)
     except (OSError, subprocess.SubprocessError):
         return False
     return getattr(result, 'returncode', 1) == 0
+
+
+def _user_sid(run):
+    """This user's SID (S-1-5-21-...), from whoami, or None."""
+    import re
+    import subprocess
+    try:
+        result = run(['whoami', '/user', '/fo', 'csv', '/nh'], capture_output=True, text=True, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r'"(S-1-[0-9-]+)"', getattr(result, 'stdout', '') or '')
+    return match.group(1) if match and getattr(result, 'returncode', 1) == 0 else None
