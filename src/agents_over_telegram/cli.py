@@ -156,6 +156,8 @@ def parser():
     setup.add_argument("--client-file", type=Path, help="Reuse this existing protected client file")
     setup.add_argument("--receiver-handoff-confirmed", action="store_true")
     setup.add_argument("--prepare-only", action="store_true", help="Prepare profile and pairing without collecting or confirming")
+    setup.add_argument("--no-serve", action="store_true",
+                       help="Do not install the always-on collector (aot serve) as a user service")
     setup.add_argument("--host", choices=["codex", "claude", "pi", "amp"], default="codex",
                        help="Agent host to prepare; codex writes .codex/config.toml, plugin hosts use the runtime pointer")
     register = sub.add_parser("account-register", help="Prompt privately for one bot token, validate without polling")

@@ -330,6 +330,10 @@ def setup(args):
     # An installed always-on collector moves to this runtime too.
     from . import serve
     serve.follow(state, Path(_entry(state, client, fake)['command']))
+    collector = None
+    if not fake:
+        collector = ({'installed': serve.pointer(state) is not None, 'skipped': 'no_serve'}
+                     if getattr(args, 'no_serve', False) else _install_collector(state))
     status = core.connection_status(client_id)
     next_setup = _next_setup(args, state, fake, project, client)
     result = {'project_dir': str(project), 'profile_file': str(project / PROFILE_NAME),
@@ -338,6 +342,8 @@ def setup(args):
               'client_id': client_id, 'label': args.label,
               'mode': new_profile['mode'], 'state_dir': str(state), 'client_file': str(client), 'connected': status['connected'],
               'host_trust_changed': False, 'automatic_delivery': False}
+    if collector is not None:
+        result['always_on_collector'] = collector
     if status['connected']:
         result['connection'] = status
         result['next_step'] = HOST_NEXT_STEPS[host]
@@ -385,6 +391,36 @@ def setup(args):
     status = core.confirm_pairing(pairing['id'])
     result.update(connected=True, connection=status, next_step=HOST_NEXT_STEPS[host])
     return result
+
+
+def _install_collector(state, run_command=None):
+    """Install aot serve as a user service unless it is already there; never fails setup.
+
+    Settings taps, approvals and /settings are answered only while something
+    collects, so setup installs the always-on collector by default. Hosts that
+    cannot install a service (a sandbox, no systemd) keep working as before.
+    """
+    import shutil
+    import subprocess
+    from . import serve
+    if serve.status(state)['installed']:
+        return {'installed': True, 'already_installed': True, 'service': serve.name(state)}
+    if sys.platform not in ('linux', 'darwin') or (sys.platform == 'linux' and not shutil.which('systemctl')):
+        return {'installed': False, 'reason': 'unsupported_platform'}
+    try:
+        installed = serve.install(state, run_command=run_command or subprocess.run)
+    except (OSError, subprocess.SubprocessError) as error:
+        # Leave nothing half-installed: a pointer without a running service
+        # would make status report a collector that is down.
+        try:
+            serve.uninstall(state, run_command=lambda *args, **kwargs: None)
+        except OSError:
+            pass
+        return {'installed': False, 'reason': type(error).__name__,
+                'next_step': 'Run "aot serve --install" outside the sandbox to answer settings and '
+                             'approvals while no agent is running.'}
+    return {**installed, 'remove_with': 'aot serve --uninstall',
+            'opt_out': 'setup --no-serve skips this step'}
 
 
 def collector_down_text(collector):

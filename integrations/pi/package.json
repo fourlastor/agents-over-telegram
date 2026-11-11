@@ -1,6 +1,6 @@
 {
   "name": "agents-over-telegram-pi",
-  "version": "0.9.25",
+  "version": "0.9.26",
   "private": true,
   "description": "Push delivery of Agents over Telegram notices into running Pi sessions",
   "license": "Apache-2.0",
