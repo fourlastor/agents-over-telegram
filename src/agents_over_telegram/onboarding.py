@@ -42,6 +42,12 @@ HOST_NEXT_STEPS = {
         'Configure the Agents over Telegram Amp integration for this project (see docs/HOSTS.md), start Amp in this '
         'exact folder and ask "Telegram status".'
     ),
+    'grok-bot': (
+        'In Grok Bot, add a custom connector of type Command with the command and arguments under "connector" in '
+        'this result (Connect apps, or ask the Bot to add it), then ask "Telegram status". For wakeups, create a '
+        'routine with a webhook trigger, store its URL and key with "aot webhook-save", and keep '
+        '"aot watch --webhook-file ... --collect" running; docs/HOSTS.md has the steps. Grok Bot support is untested.'
+    ),
 }
 
 
@@ -354,6 +360,9 @@ def setup(args):
               'host_trust_changed': False, 'automatic_delivery': False}
     if collector is not None:
         result['always_on_collector'] = collector
+    if host == 'grok-bot':
+        # Grok Bot keeps its connectors in its app, not in a project file.
+        result['connector'] = {'type': 'Command', **_entry(state, client, fake)}
     if status['connected']:
         result['connection'] = status
         result['next_step'] = HOST_NEXT_STEPS[host]
