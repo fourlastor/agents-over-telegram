@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from . import compat
 from .credentials import CredentialError, read_private_json, write_private_json
 from .net import RacingHTTPSHandler
 
@@ -77,6 +78,13 @@ def save(path, url, key):
     """Store the URL and key in a private file; return what can be shown about it."""
     path = Path(path)
     config = {'version': 1, 'url': validate_url(url), 'key': validate_key(key)}
+    folder = path.absolute().parent
+    if folder.is_dir() and not folder.is_symlink():
+        # Name the problem: a folder made with a plain mkdir is readable by
+        # others. A missing folder is created private below.
+        info = folder.lstat()
+        if not compat.owned(info) or not compat.private(info, 0o077):
+            raise CredentialError('webhook_folder_not_private')
     write_private_json(path, config, overwrite=path.exists())
     return describe(path)
 

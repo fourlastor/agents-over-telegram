@@ -306,3 +306,24 @@ def test_the_webhook_watcher_exits_3_when_setup_moves_the_runtime(tmp_path, hook
     finally:
         if process.poll() is None:
             process.kill()
+
+
+@posix_only
+def test_webhook_save_names_a_folder_others_can_read(tmp_path):
+    folder = tmp_path / 'webhooks'
+    folder.mkdir(mode=0o755)
+    os.chmod(folder, 0o755)
+    with pytest.raises(CredentialError) as raised:
+        webhook.save(folder / 'grok.json', 'https://hooks.example/run', 'k3y')
+    assert raised.value.args[0].startswith('webhook_folder_not_private')
+    assert not (folder / 'grok.json').exists()
+    os.chmod(folder, 0o700)
+    assert webhook.save(folder / 'grok.json', 'https://hooks.example/run', 'k3y')['host'] == 'hooks.example'
+
+
+def test_webhook_save_creates_a_missing_folder_private(tmp_path):
+    folder = tmp_path / 'state' / 'webhooks'
+    folder.parent.mkdir(mode=0o700)
+    webhook.save(folder / 'grok.json', 'https://hooks.example/run', 'k3y')
+    if os.name != 'nt':
+        assert folder.stat().st_mode & 0o077 == 0
