@@ -77,7 +77,13 @@ def save(path, url, key):
     """Store the URL and key in a private file; return what can be shown about it."""
     path = Path(path)
     config = {'version': 1, 'url': validate_url(url), 'key': validate_key(key)}
-    write_private_json(path, config, overwrite=path.exists())
+    try:
+        write_private_json(path, config, overwrite=path.exists())
+    except CredentialError as error:
+        if error.code == 'unsafe_state_directory':
+            # Usually a folder made with mkdir (mode 755); name the real problem.
+            raise CredentialError('webhook_directory_not_private') from None
+        raise
     return describe(path)
 
 

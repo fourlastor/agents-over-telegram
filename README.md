@@ -4,7 +4,7 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.9.36 supports **Codex**, **Claude Code**, **Pi** and **Amp**, and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.10.0 supports **Codex**, **Claude Code**, **Pi** and **Amp**, and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
 | Host | Integration | Push delivery |
 |---|---|---|

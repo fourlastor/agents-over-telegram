@@ -408,8 +408,20 @@ def setup(args):
         result['next_step'] = 'No destination was confirmed. To review it again, run: ' + next_setup
         return result
     status = core.confirm_pairing(pairing['id'])
-    result.update(connected=True, connection=status, next_step=HOST_NEXT_STEPS[host])
+    result.update(connected=True, connection=status, next_step=HOST_NEXT_STEPS[host] + ' ' + _owner_start_step(core))
     return result
+
+
+def _owner_start_step(core):
+    """Tell the owner to /start the bot, or owner_notify and approvals cannot reach them."""
+    try:
+        with core._db() as db:
+            username = core._account(db)['username']
+    except Exception:
+        username = None
+    bot = '@' + username if username else 'the bot'
+    return (f'Also send /start to {bot} once in a private chat. Telegram does not let a bot start a private chat, '
+            'so until then the agent cannot reach you with owner_notify or approval requests.')
 
 
 def _serve_command(executable, state, option):

@@ -194,6 +194,45 @@ def test_webhook_save_reads_url_and_key_from_a_pipe(tmp_path, monkeypatch, capsy
     assert raised.value.args[0] == 'webhook_input_must_be_piped'
 
 
+
+@posix_only
+def test_webhook_save_names_a_folder_others_can_read(tmp_path):
+    path = tmp_path / 'webhooks' / 'grok.json'
+    path.parent.mkdir()
+    path.parent.chmod(0o755)
+    with pytest.raises(CredentialError) as raised:
+        webhook.save(path, 'https://hooks.example/run/abc', 'k3y-secret')
+    assert raised.value.code == 'webhook_directory_not_private'
+    assert not path.exists()
+
+
+@posix_only
+def test_webhook_save_creates_a_missing_folder_as_private(tmp_path):
+    path = tmp_path / 'new' / 'webhooks' / 'grok.json'
+    webhook.save(path, 'https://hooks.example/run/abc', 'k3y-secret')
+    assert path.parent.stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize('code, hinted', [
+    ('destination_already_bound', True),
+    ('webhook_directory_not_private', True),
+    ('pairing_unavailable', False),
+])
+def test_cli_errors_carry_a_fixed_hint_when_the_fix_is_not_obvious(monkeypatch, capsys, code, hinted):
+    from agents_over_telegram.core import CoreError
+
+    def fail(args):
+        raise CoreError(code)
+    monkeypatch.setattr(cli, 'run', fail)
+    monkeypatch.setattr(cli.sys, 'argv', ['aot', 'account-status'])
+    assert cli.main() == 1
+    body = json.loads(capsys.readouterr().err)
+    assert body['error'] == code
+    assert ('hint' in body) is hinted
+    if hinted:
+        assert body['hint'] == cli.ERROR_HINTS[code]
+
+
 # Waking
 
 def test_the_body_holds_counts_and_fixed_guidance_only(hook):
@@ -306,3 +345,22 @@ def test_the_webhook_watcher_exits_3_when_setup_moves_the_runtime(tmp_path, hook
     finally:
         if process.poll() is None:
             process.kill()
+
+
+def test_a_new_pairing_tells_the_owner_to_start_the_bot():
+    import contextlib
+    from agents_over_telegram import onboarding
+
+    class Stub:
+        def __init__(self, username):
+            self.username = username
+
+        @contextlib.contextmanager
+        def _db(self):
+            yield None
+
+        def _account(self, db):
+            return {'username': self.username}
+
+    assert '/start to @aot_test_bot ' in onboarding._owner_start_step(Stub('aot_test_bot'))
+    assert '/start to the bot ' in onboarding._owner_start_step(Stub(None))
