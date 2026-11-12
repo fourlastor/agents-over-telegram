@@ -174,10 +174,17 @@ def parser():
                               help="Install the always-on collector (aot serve) as a login service; ask the human first")
     serve_choice.add_argument("--no-serve", action="store_true",
                               help="Do not install the always-on collector, and do not ask")
-    setup.add_argument("--host", choices=["codex", "claude", "pi", "amp"], default="codex",
-                       help="Agent host to prepare; codex writes .codex/config.toml, plugin hosts use the runtime pointer")
+    setup.add_argument("--host", choices=["codex", "claude", "pi", "amp", "grok-bot"], default="codex",
+                       help="Agent host to prepare; codex writes .codex/config.toml, plugin hosts use the runtime pointer, "
+                            "grok-bot prints the custom connector to add in Grok Bot")
     register = sub.add_parser("account-register", help="Prompt privately for one bot token, validate without polling")
     register.add_argument("--receiver-handoff-confirmed", action="store_true", help="Assert other receivers are stopped; webhooks are never changed")
+    register.add_argument("--token-stdin", action="store_true",
+                          help="Read the token from a pipe instead of the hidden prompt, for hosts whose terminal "
+                               "nobody can type into; a terminal on stdin is refused")
+    webhook_save = sub.add_parser("webhook-save", help="Store a wake webhook (URL on the first line, key on the "
+                                                       "second, piped on stdin) in a private file for watch --webhook-file")
+    webhook_save.add_argument("--file", type=Path, required=True)
     sub.add_parser("account-status")
     sub.add_parser("codex-hooks", help="Show whether Codex still runs AOT's plugin hooks or wants them "
                                         "approved again with /hooks (read-only)")
@@ -217,6 +224,9 @@ def parser():
             command.add_argument("--poll-timeout", type=int, default=10, help="Telegram long-poll seconds when collecting (0-20)")
             command.add_argument("--format", choices=["text", "jsonl"], default="text")
             command.add_argument("--no-backlog", action="store_true", help="Announce only deliveries that arrive after start")
+            command.add_argument("--webhook-file", type=Path,
+                                 help="Also POST a fixed notice (counts only, no message text) to the webhook saved "
+                                      "by webhook-save; keeps running without a parent host")
         if name == "status":
             command.add_argument("--human", action="store_true", help="Show a concise local status instead of JSON")
         if name == "history":
@@ -367,17 +377,32 @@ def parser():
     return p
 
 
-def register_account(core, state_dir, fake, receiver_handoff_confirmed):
+def _piped_token():
+    """The bot token from a pipe; a terminal is refused, since it would echo."""
+    if sys.stdin is None or sys.stdin.isatty():
+        raise CredentialError("token_stdin_must_be_piped")
+    lines = [line.strip() for line in sys.stdin.read(4096).splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise CredentialError("invalid_token")
+    return lines[0]
+
+
+def register_account(core, state_dir, fake, receiver_handoff_confirmed, token_stdin=False):
     if not fake and not receiver_handoff_confirmed:
         raise CredentialError("receiver_handoff_confirmation_required")
     credential_path = state_dir / "credentials.json"
     if fake:
         transport = make_transport(state_dir, fake=True)
     else:
-        if not credential_path.exists() and not sys.stdin.isatty():
+        if credential_path.exists():
+            token = read_private_json(credential_path)["token"]
+        elif token_stdin:
+            token = _piped_token()
+        elif not sys.stdin.isatty():
             raise CredentialError("private_terminal_required")
-        token = validate_token(read_private_json(credential_path)["token"] if credential_path.exists()
-                               else getpass.getpass("Telegram bot token (hidden, stored locally): "))
+        else:
+            token = getpass.getpass("Telegram bot token (hidden, stored locally): ")
+        token = validate_token(token)
         transport = TelegramTransport(token)
     bot = transport.get_me()
     if transport.get_webhook_info().get("url"):
@@ -450,6 +475,10 @@ def run(args):
     if args.command == "wake":
         from .hosts import run_wake
         return run_wake(args)
+    if args.command == "webhook-save":
+        from . import webhook
+        url, key = webhook.read_stdin_pair(sys.stdin)
+        return webhook.save(args.file, url, key)
     from .onboarding import resolve_args
     args = resolve_args(args)
     if args.command == "codex-hooks":
@@ -510,7 +539,7 @@ def run(args):
             return store.bind(client_id, args.thread_id, args.project_dir,
                               include_pending=args.include_pending)
     if args.command == "account-register":
-        return register_account(core, state_dir, args.fake, args.receiver_handoff_confirmed)
+        return register_account(core, state_dir, args.fake, args.receiver_handoff_confirmed, args.token_stdin)
     if args.command == "judge-config":
         return judge_config(state_dir, args)
     if args.command == "client-create":
@@ -649,7 +678,14 @@ def run(args):
         return render_plugin(state_dir, args.client_file, args.output, args.name)
     if args.command == "watch":
         from .push import watch
+        waker = None
+        if args.webhook_file is not None:
+            from . import webhook
+            waker = webhook.Waker(*webhook.load(args.webhook_file))
+
         def emit(event):
+            if waker is not None:
+                waker.notify(event)
             if args.format == "jsonl":
                 print(json.dumps(event, separators=(",", ":")), flush=True)
             elif event.get("type") == "telegram_messages":
@@ -663,6 +699,10 @@ def run(args):
         moved = []
 
         def keep_running():
+            if waker is not None:
+                # A webhook watcher has no host process to follow; it runs
+                # until stopped, on the runtime it started with.
+                return True
             # A host can die without stopping its watcher (for example on SIGKILL).
             # Re-parenting means the host is gone, so stop instead of polling forever.
             if os.getppid() != parent:
@@ -675,9 +715,13 @@ def run(args):
 
         from .relay_api import Node
         remote = Node(state_dir, read_private_json(args.client_file)["client_secret"])
-        watch(core, client_id, emit, collect=args.collect, duration=args.duration, interval=args.interval,
-              poll_timeout=args.poll_timeout, announce_backlog=not args.no_backlog,
-              keep_running=keep_running, remote=remote)
+        try:
+            watch(core, client_id, emit, collect=args.collect, duration=args.duration, interval=args.interval,
+                  poll_timeout=args.poll_timeout, announce_backlog=not args.no_backlog,
+                  keep_running=keep_running, remote=remote)
+        finally:
+            if waker is not None:
+                waker.stop(timeout=webhook.TIMEOUT + 1)
         if moved:
             raise SystemExit(RUNTIME_MOVED_EXIT)
         return None
