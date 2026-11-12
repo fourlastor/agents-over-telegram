@@ -181,6 +181,8 @@ class Waker:
             if ok:
                 self.sent += 1
                 failures = 0
+            elif stopping:
+                self._log(f'[Agents over Telegram] Webhook wake failed ({reason}); stopping without retrying.')
             elif failures < len(self._retry_delays):
                 failures += 1
                 with self._changed:
@@ -204,6 +206,7 @@ class Waker:
                 return 200 <= response.status < 300, f'http_{response.status}'
         except urllib.error.HTTPError as error:
             # Never echo the URL, the key or the response body.
+            error.close()
             return False, f'http_{error.code}'
         except Exception as error:
             timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, 'reason', None), TimeoutError)

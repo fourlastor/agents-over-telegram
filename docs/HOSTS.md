@@ -126,15 +126,15 @@ Run these in the Bot's terminal (or have the Bot run them):
    printf '%s\n%s\n' "$ROUTINE_URL" "$ROUTINE_KEY" | "$AOT_BIN" webhook-save --file "$AOT_STATE/webhooks/grok.json"
    ```
 
-6. Start the watcher in the background. It collects from Telegram and POSTs when deliveries are new:
+6. Start the watcher in the background, from the project folder, with the runtime that `.aot-runtime.json` names. It collects from Telegram and POSTs when deliveries are new:
 
    ```sh
-   nohup "$AOT_BIN" --state-dir "$AOT_STATE" watch --client-file "$CLIENT_FILE" --collect --webhook-file "$AOT_STATE/webhooks/grok.json" > "$AOT_STATE/webhook-watch.log" 2>&1 &
+   cd "$PROJECT_DIR" && nohup "$AOT_BIN" --state-dir "$AOT_STATE" watch --client-file "$CLIENT_FILE" --collect --webhook-file "$AOT_STATE/webhooks/grok.json" > "$AOT_STATE/webhook-watch.log" 2>&1 &
    ```
 
-7. Idle Grok Bot computers hibernate, which stops the watcher. Add a second routine on a schedule (every 15 minutes, say) that starts the watcher again if it is not running, and handles any waiting messages.
+7. Add a second routine on a schedule (every 15 minutes, say) that starts the watcher again when it is not running, using the executable `.aot-runtime.json` names at that moment, and handles any waiting messages. The watcher stops for two reasons: an idle Grok Bot computer hibernates, and after an update setup points `.aot-runtime.json` at the new runtime, at which point the watcher exits with status 3. So this routine also moves the watcher onto new versions.
 
-What the POST contains: `{"event": "telegram_messages_waiting", "new": N, "pending": M, "guidance": "..."}` with fixed guidance text, sent with `Authorization: Bearer <key>`. It never contains message text or sender names. Only https is allowed, plain http only to this computer. Redirects are not followed and proxies from the environment are ignored. POSTs are at most 30 s apart, so a busy chat stays well under Grok Bot's 200 runs an hour per routine. A failed POST is retried after 5, 30 and 120 seconds. The watcher has no host process to follow, so it runs until it is stopped.
+What the POST contains: `{"event": "telegram_messages_waiting", "new": N, "pending": M, "guidance": "..."}` with fixed guidance text, sent with `Authorization: Bearer <key>`. It never contains message text or sender names. Only https is allowed, plain http only to this computer. Redirects are not followed and proxies from the environment are ignored. POSTs are at most 30 s apart, so a busy chat stays well under Grok Bot's 200 runs an hour per routine. A failed POST is retried after 5, 30 and 120 seconds. The watcher has no host process to follow; it runs until it is stopped or the project's runtime changes.
 
 ## What was tested
 

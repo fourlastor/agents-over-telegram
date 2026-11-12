@@ -700,8 +700,14 @@ def run(args):
 
         def keep_running():
             if waker is not None:
-                # A webhook watcher has no host process to follow; it runs
-                # until stopped, on the runtime it started with.
+                # A webhook watcher has no host process to follow. It stops when
+                # setup moved the project to another runtime, so whatever keeps
+                # it running (a scheduled routine) starts it on the new one.
+                from .hosts import read_runtime_pointer
+                pointer = read_runtime_pointer(project)
+                if pointer is not None and os.path.realpath(pointer) != os.path.realpath(compat.own_aot()):
+                    moved.append(True)
+                    return False
                 return True
             # A host can die without stopping its watcher (for example on SIGKILL).
             # Re-parenting means the host is gone, so stop instead of polling forever.

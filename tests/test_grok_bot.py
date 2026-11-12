@@ -13,7 +13,7 @@ import pytest
 from agents_over_telegram import cli, webhook
 from agents_over_telegram.credentials import CredentialError, read_private_json
 from conftest import posix_only
-from test_hosts import RUNTIME, clean_env, connected, invoke, prepare, receive
+from test_hosts import RUNTIME, clean_env, connected, invoke, prepare, receive, stub_runtime, write_pointer
 
 
 class Hook:
@@ -272,3 +272,37 @@ def test_watch_posts_to_the_webhook_and_keeps_text_local(tmp_path, hook):
     assert request['body']['new'] == 1 and request['auth'] == 'Bearer k3y'
     assert 'private message' not in json.dumps(request['body']) and 'owner_name' not in json.dumps(request['body'])
     assert 'k3y' not in done.stdout + done.stderr and hook.url not in done.stdout + done.stderr
+
+
+def test_a_failed_post_while_stopping_says_it_stops(hook):
+    hook.statuses = [200, 500]
+    logged = []
+    waker = webhook.Waker(hook.url, 'k3y', min_gap=60, log=logged.append)
+    waker.notify(EVENT)
+    hook.wait_for(1)
+    waker.notify({**EVENT, 'pending': 9})
+    waker.stop(5)
+    assert len(hook.requests) == 2 and logged == [
+        '[Agents over Telegram] Webhook wake failed (http_500); stopping without retrying.']
+
+
+@posix_only
+def test_the_webhook_watcher_exits_3_when_setup_moves_the_runtime(tmp_path, hook):
+    # No AOT_FOLLOW_RUNTIME: a webhook watcher always follows, since nothing
+    # else restarts it on a new runtime.
+    result = connected(tmp_path, host='grok-bot')
+    project = Path(result['project_dir'])
+    write_pointer(project, {'version': 1, 'executable': str(RUNTIME)})
+    path = tmp_path / 'grok-hook.json'
+    webhook.save(path, hook.url, 'k3y')
+    process = subprocess.Popen([str(RUNTIME), 'watch', '--webhook-file', str(path), '--duration', '20',
+                                '--interval', '0.1'], cwd=project, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               stdin=subprocess.DEVNULL, env=clean_env(), text=True)
+    try:
+        time.sleep(1.0)
+        assert process.poll() is None
+        write_pointer(project, {'version': 1, 'executable': str(stub_runtime(tmp_path))})
+        assert process.wait(timeout=30) == 3
+    finally:
+        if process.poll() is None:
+            process.kill()
