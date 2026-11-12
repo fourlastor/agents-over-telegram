@@ -738,6 +738,11 @@ class Core:
                     with self._tx() as db:
                         self._recover_sends(db)
 
+    # Every commit reaches the disk before it returns, so an accepted send or
+    # ack survives a power loss. The test suite runs with NORMAL instead: it
+    # never cuts the power, and a flush per commit costs minutes on Windows.
+    SQLITE_SYNCHRONOUS = 'FULL'
+
     @contextlib.contextmanager
     def _db(self):
         db = None
@@ -745,7 +750,7 @@ class Core:
             db = sqlite3.connect(self.database, timeout=5, isolation_level=None)
             db.row_factory = sqlite3.Row
             db.execute('PRAGMA foreign_keys=ON')
-            db.execute('PRAGMA synchronous=FULL')
+            db.execute('PRAGMA synchronous=' + {'FULL': 'FULL', 'NORMAL': 'NORMAL'}[self.SQLITE_SYNCHRONOUS])
             yield db
         except sqlite3.Error as error:
             code = getattr(error, 'sqlite_errorcode', None)

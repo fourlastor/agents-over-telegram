@@ -14,8 +14,16 @@ collect_ignore = ([
     'test_bootstrap_runtime.py',
 ] if os.name == 'nt' else [])
 
+from agents_over_telegram import core as _core
 from agents_over_telegram import onboarding as _onboarding
 from agents_over_telegram import serve as _serve
+
+# The production setting, for the test that checks it.
+REAL_SQLITE_SYNCHRONOUS = _core.Core.SQLITE_SYNCHRONOUS
+# No test cuts the power, so commits need not wait for the disk; on Windows
+# that wait made up a third of the suite's time. Child processes the tests
+# start keep the production setting.
+_core.Core.SQLITE_SYNCHRONOUS = 'NORMAL'
 
 # The real steps, for the tests that check them with fakes.
 REAL_INSTALL_COLLECTOR = _onboarding._install_collector
