@@ -1047,3 +1047,13 @@ def test_offline_gap_visible_after_reconnect(env):
     status = core.accounts_status(a)['accounts'][0]
     assert status['possible_offline_gap'] is True
     assert status['last_gap_at'] == clock()
+
+
+def test_production_commits_wait_for_the_disk(env, monkeypatch):
+    from conftest import REAL_SQLITE_SYNCHRONOUS
+    core, transport, clock = env
+    assert REAL_SQLITE_SYNCHRONOUS == 'FULL'
+    monkeypatch.setattr(core, 'SQLITE_SYNCHRONOUS', REAL_SQLITE_SYNCHRONOUS)
+    with core._db() as db:
+        # 2 is FULL.
+        assert db.execute('PRAGMA synchronous').fetchone()[0] == 2
