@@ -550,7 +550,10 @@ def run(args):
         write_private_json(args.client_file, result)
         return {"client_id": result["client_id"], "client_file": str(args.client_file.absolute()), "label": args.label}
     if args.command == "pair-confirm":
-        return core.confirm_pairing(args.pairing_id) if args.confirm else core.pairing_status(args.pairing_id)
+        if not args.confirm:
+            return core.pairing_status(args.pairing_id)
+        from .onboarding import _owner_start_step
+        return {**core.confirm_pairing(args.pairing_id), 'next_step': _owner_start_step(core)}
     if args.command == "collect":
         return core.collect()
     if args.command == "unassigned":
@@ -762,8 +765,9 @@ ERROR_HINTS = {
         "active connection per chat or topic. Disconnect the old one first (aot disconnect --client-file "
         "<its client file>), then confirm the pairing again."),
     "webhook_directory_not_private": (
-        "The folder for the webhook file already exists and other users can read it. Run chmod 700 on that "
-        "folder, or name a file in a folder that does not exist yet; webhook-save then creates it as private."),
+        "The folder for the webhook file already exists, and other users can read it or it is not yours. Run "
+        "chmod 700 on a folder you own, or name a file in a folder that does not exist yet; webhook-save then "
+        "creates it as private."),
 }
 
 

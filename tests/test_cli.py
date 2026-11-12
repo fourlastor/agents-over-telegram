@@ -36,6 +36,7 @@ def test_private_cli_setup_once_two_clients_and_pairing(tmp_path):
         assert preview
         result = command(state, "pair-confirm", "--pairing-id", pair["pairing_id"], "--confirm")
         assert result["connected"]
+        assert "/start" in result["next_step"]
     command(state, "grant-peer", "--source-client-file", str(client_a), "--target-client-file", str(client_b))
     command(state, "allow-sender", "--client-file", str(client_a), "--sender-id", "202", "--bot")
     policy_args = ("bot-exchange-policy", "--client-file", str(client_a), "--sender-id", "202")
