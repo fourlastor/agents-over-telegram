@@ -754,6 +754,19 @@ def _hook_invocation(argv):
     return False
 
 
+# Fixed advice for errors whose fix is not obvious from the code alone. The text
+# never includes values from the request, so it cannot leak paths or secrets.
+ERROR_HINTS = {
+    "destination_already_bound": (
+        "Another connection already uses this chat or topic, or this client is already connected. AOT allows one "
+        "active connection per chat or topic. Disconnect the old one first (aot disconnect --client-file "
+        "<its client file>), then confirm the pairing again."),
+    "webhook_directory_not_private": (
+        "The folder for the webhook file already exists and other users can read it. Run chmod 700 on that "
+        "folder, or name a file in a folder that does not exist yet; webhook-save then creates it as private."),
+}
+
+
 def main():
     from .core import CoreError
     try:
@@ -809,6 +822,8 @@ def main():
         code = str(error.code)
         safe = code if re.fullmatch(r"[a-z0-9_]{1,64}", code) else "operation_failed"
         body = {"ok": False, "error": safe}
+        if safe in ERROR_HINTS:
+            body["hint"] = ERROR_HINTS[safe]
         details = getattr(error, "details", None)
         if isinstance(details, dict):
             # Rolling limit details are numbers only; drop anything else.

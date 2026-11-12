@@ -180,7 +180,7 @@ Review the observed numeric sender, chat and topic IDs locally. Confirm that obs
 "$AOT_BIN" --state-dir "$AOT_STATE" status --client-file "$AOT_STATE/clients/alpha.json"
 ```
 
-For Beta, repeat `client-create`, `pair-begin`, collection and confirmation with `beta.json` and a different group/topic. Do not repeat bot creation or token registration. Only one logical agent can own a destination in this MVP. Group IDs and topic IDs are not interchangeable; no ordinary channel or private-bot-DM setup is promised.
+For Beta, repeat `client-create`, `pair-begin`, collection and confirmation with `beta.json` and a different group/topic. Do not repeat bot creation or token registration. Only one logical agent can own a destination in this MVP. To move a destination to a new client, `disconnect` the old client first: while it is connected, confirming the new pairing fails with `destination_already_bound`. Group IDs and topic IDs are not interchangeable; no ordinary channel or private-bot-DM setup is promised.
 
 ### Additional senders and peers
 
