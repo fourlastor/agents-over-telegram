@@ -4,7 +4,7 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.10.0 supports **Codex**, **Claude Code**, **Pi** and **Amp**, and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.10.1 supports **Codex**, **Claude Code**, **Pi** and **Amp**, and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
 | Host | Integration | Push delivery |
 |---|---|---|
@@ -94,7 +94,7 @@ The agent uses these MCP tools. Each tool works only on the agent's own connecti
 Incoming deliveries carry more than text:
 
 - **Media.** A new connection accepts documents, photos, videos, audio, voice notes and animations. The agent downloads them with `attachment_fetch`. When the owner turns media off, a media message still arrives with a `media_refused` list instead of files.
-- **Quoted replies and forwards.** A reply carries the message it replies to under `reply_to_message`. A forwarded message carries its origin under `forwarded_from`.
+- **Quoted replies and forwards.** A reply carries the message it replies to under `reply_to_message`, and the selected part under `reply_to_message.quote` when it quotes only part of it. A forwarded message carries its origin under `forwarded_from`.
 - **Reactions.** People's reactions arrive as deliveries of kind `reaction`. Telegram sends reactions to a bot only while the bot is an administrator in the group. See [message reactions](docs/REACTIONS.md).
 
 You can ask the agent in plain words, for example **"Telegram status"**, **"Pause Telegram"**, **"Resume Telegram"**, **"Show recent Telegram context"** or **"React 👍 to that message"**.

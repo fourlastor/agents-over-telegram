@@ -393,6 +393,38 @@ def test_quoted_text_is_bounded_and_marks_allowed_senders(group):
     assert quoted['sender']['allowed'] is True
 
 
+def test_a_partial_quote_carries_the_selected_part(group):
+    core, transport, clock, client = group
+    append(transport, 'about this bit', reply_to_message={
+        'message_id': 7, 'from': {'id': 101, 'is_bot': False}, 'text': 'first part. second part.'},
+        quote={'text': 'second part.', 'position': 12, 'is_manual': True})
+    core.collect()
+    [delivery] = deliveries(core, client)
+    assert delivery['reply_to_message']['quote'] == {'text': 'second part.', 'position': 12}
+    assert delivery['reply_to_message']['text'] == 'first part. second part.'
+
+
+@pytest.mark.parametrize('quote', [None, {}, {'text': ''}, {'text': 5}, 'text'])
+def test_a_reply_without_a_usable_quote_has_none(group, quote):
+    core, transport, clock, client = group
+    extra = {} if quote is None else {'quote': quote}
+    append(transport, 'plain reply', reply_to_message={
+        'message_id': 7, 'from': {'id': 101, 'is_bot': False}, 'text': 'earlier'}, **extra)
+    core.collect()
+    [delivery] = deliveries(core, client)
+    assert 'quote' not in delivery['reply_to_message']
+
+
+def test_a_quote_is_bounded_and_a_bad_position_is_dropped(group):
+    core, transport, clock, client = group
+    append(transport, 'long quote', reply_to_message={
+        'message_id': 7, 'from': {'id': 101, 'is_bot': False}, 'text': 'y' * 4096},
+        quote={'text': 'y' * 4096, 'position': -3})
+    core.collect()
+    [delivery] = deliveries(core, client)
+    assert delivery['reply_to_message']['quote'] == {'text': 'y' * 1024}
+
+
 def test_forum_topic_root_is_not_quoted(group):
     core, transport, clock, client = group
     # In a forum, Telegram sets reply_to_message to the topic's creation message.
@@ -409,7 +441,8 @@ def test_a_full_page_of_long_quoted_replies_fits_the_result_cap(group):
     core, transport, clock, client = group
     wide = '\U0001F600' * 4096
     for _ in range(50):
-        append(transport, wide, reply_to_message={'message_id': 7, 'from': {'id': 303, 'is_bot': False}, 'text': wide})
+        append(transport, wide, reply_to_message={'message_id': 7, 'from': {'id': 303, 'is_bot': False}, 'text': wide},
+               quote={'text': wide, 'position': 0})
     core.collect()
     body = _result_body(core.poll(client, limit=50))
     assert body['ok'] is True and len(body['result']['deliveries']) == 50
