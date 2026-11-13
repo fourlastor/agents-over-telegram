@@ -665,6 +665,25 @@ def wait_for_owner(result, session, process, previous=None, timeout=30):
         time.sleep(0.05)
     pytest.fail('the waiter never registered as its session owner')
 
+def retire(result, session, process, timeout=60):
+    """End a waiter the way a newer turn would: a new owner token, then a clean exit.
+
+    Killing it instead is TerminateProcess on Windows, which can stop it while
+    it holds the collector lock. Windows releases a dead process's byte locks
+    only when it gets around to it, so the next waiter could find collection
+    busy for longer than a test waits.
+    """
+    from agents_over_telegram.hosts import _write_owner, wake_key
+    owner = Path(result['state_dir']) / 'wake-locks' / f"{wake_key(result['client_id'], session)}.owner"
+    _write_owner(owner, 'retired-by-test')
+    return process.communicate(timeout=timeout)
+
+
+def wake_log_text(result):
+    path = Path(result['state_dir']) / 'wake.log'
+    return path.read_text(encoding='utf-8') if path.exists() else '(no wake.log)'
+
+
 def start_wake(project, session, duration=60):
     return subprocess.Popen([str(RUNTIME), 'wake', '--host', 'claude', '--project-dir', project,
                              '--session', session, '--duration', str(duration)], stdout=subprocess.PIPE,
@@ -690,10 +709,13 @@ def test_newest_waiter_takes_over_its_session(tmp_path):
         # Another session keeps its own waiter.
         assert other.poll() is None
         # Both sessions share a client; only one waiter may see the next message.
-        other.kill()
-        other.communicate(timeout=10)
+        out, err = retire(result, 'other', other)
+        assert (other.returncode, out, err) == (0, '', '')
         fake_message(result['state_dir'], 'after handover')
-        out, err = second.communicate(timeout=30)
+        try:
+            out, err = second.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            pytest.fail('the new waiter did not report the message; wake.log:\n' + wake_log_text(result))
         assert second.returncode == 2 and '1 new Telegram message' in err
     finally:
         for process in (first, second, other):
