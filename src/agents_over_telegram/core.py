@@ -666,6 +666,10 @@ class Core:
                 db.execute('ALTER TABLE bindings ADD COLUMN wake_interval INTEGER NOT NULL DEFAULT 0')
             if 'wake_exempt' not in binding_columns:
                 db.execute("ALTER TABLE bindings ADD COLUMN wake_exempt TEXT NOT NULL DEFAULT 'addressed,owner'")
+            # When the agent last read overflow kept for a full queue in its
+            # history; queue_full_kept counts only overflow newer than that.
+            if 'queue_full_seen' not in {row['name'] for row in db.execute('PRAGMA table_info(clients)')}:
+                db.execute('ALTER TABLE clients ADD COLUMN queue_full_seen REAL')
             # A notice can answer the owner's reply in the private chat.
             owner_columns = {row['name'] for row in db.execute('PRAGMA table_info(owner_outbox)')}
             if 'reply_to' not in owner_columns:
@@ -1385,7 +1389,7 @@ class Core:
         label = db.execute('SELECT label FROM clients WHERE id=?', (client_id,)).fetchone()['label']
         title = ' '.join(str(binding['title']).split())
         text = (f'[Agents over Telegram | {title}]\n'
-                f'The agent "{label}" has {pending} unread messages, its queue limit. New messages for it are '
+                f'The agent "{label}" has reached its limit of {pending} unread messages. New messages for it are '
                 'kept in its history only, and it is not told about them. Start the agent so it handles '
                 'them, or disconnect it if it is no longer used. This notice repeats at most once a day.')
         key = self.QUEUE_FULL_NOTICE_KEY + str(int(now))
@@ -1411,9 +1415,11 @@ class Core:
                 self._flush_owner_notes(notes)
 
     def _queue_full_kept(self, db, client_id):
-        """How many messages from the history window were kept as context because the queue was full."""
+        """How many messages kept as context for a full queue the agent has not read in history yet."""
         return db.execute("SELECT count(*) FROM inbox WHERE client_id=? AND context=1 "
-                          "AND json_extract(payload,'$.context_reason')='queue_full'", (client_id,)).fetchone()[0]
+                          "AND json_extract(payload,'$.context_reason')='queue_full' "
+                          "AND created>(SELECT COALESCE(queue_full_seen,0) FROM clients WHERE id=?)",
+                          (client_id, client_id)).fetchone()[0]
 
     def _unmatched(self, db, update_id, chat_id, reason, now):
         db.execute('INSERT OR IGNORE INTO unmatched(update_id,chat_id,reason,created) VALUES(?,?,?,?)', (update_id, chat_id, reason, now))
@@ -2724,10 +2730,13 @@ class Core:
             params.append(limit + 1)
             events = db.execute(query, params).fetchall()
             messages = []
+            seen = None
             for event in events[:limit]:
                 if event['stream'] == 0:
                     row = db.execute('SELECT * FROM inbox WHERE id=? AND client_id=?', (event['id'], client_id)).fetchone()
                     message = json.loads(row['payload'])
+                    if row['context'] and message.get('context_reason') == 'queue_full':
+                        seen = max(seen or row['created'], row['created'])
                     message.update(direction='incoming', delivery_id=row['id'], conversation_id=row['conversation_id'],
                                    status='context' if row['context'] else 'acknowledged' if row['acknowledged'] else 'pending',
                                    event_at=event['stamp'], captured_at=row['created'], context_only=True)
@@ -2748,13 +2757,21 @@ class Core:
                 last = events[limit - 1]
                 snapshot['last'] = [last['stamp'], last['stream'], last['sequence']]
                 next_cursor = self._history_cursor(snapshot, key)
-            return {'context_only': True, 'messages': messages, 'next_cursor': next_cursor,
+            result = {'context_only': True, 'messages': messages, 'next_cursor': next_cursor,
                     'coverage': {'kind': 'captured_only', 'description': 'Captured messages only; this does not backfill Telegram history.',
                                  'window_start': start, 'window_end': end, 'window_seconds': self.HISTORY_WINDOW,
                                  'snapshot_expires_at': end + self.HISTORY_CURSOR_TTL, 'statuses_as_of': now,
                                  'timestamp_policy': 'Telegram event time when valid; otherwise capture time.',
                                  'connected_at': binding['created'], 'last_gap_at': account['last_gap_at'],
                                  'possible_offline_gap': account['last_gap_at'] is not None or (account['last_intake'] is not None and now - account['last_intake'] >= self.HISTORY_WINDOW)}}
+        if seen is not None:
+            # The agent has now read overflow up to this capture time, so
+            # queue_full_kept stops counting it. Reading is otherwise side-effect
+            # free; this one mark is what lets the poll note clear.
+            with self._tx() as db:
+                db.execute('UPDATE clients SET queue_full_seen=MAX(COALESCE(queue_full_seen,0),?) WHERE id=?',
+                           (seen, client_id))
+        return result
 
     def ack(self, client_id, delivery_ids, lease_token):
         if not isinstance(delivery_ids, list) or not 1 <= len(delivery_ids) <= 100 or any(not isinstance(i, str) for i in delivery_ids) or not isinstance(lease_token, str) or len(lease_token) > 128:
