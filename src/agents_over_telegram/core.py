@@ -1235,6 +1235,7 @@ class Core:
             row = db.execute('SELECT * FROM bindings WHERE client_id=? AND connected=1', (client_id,)).fetchone()
             pairing = db.execute('SELECT id,expires,sender_id,chat_id,thread_id,title FROM pairings WHERE client_id=? AND consumed=0 AND expires>? ORDER BY expires DESC LIMIT 1', (client_id, now)).fetchone()
             pending = db.execute('SELECT count(*) FROM inbox WHERE client_id=? AND acknowledged=0', (client_id,)).fetchone()[0]
+            kept = self._queue_full_kept(db, client_id)
             counts = {r['status']: r['n'] for r in db.execute('SELECT status,count(*) n FROM outbox WHERE client_id=? GROUP BY status', (client_id,))}
             peers = [dict(r) for r in db.execute('SELECT c.id AS client_id,c.label FROM grants g JOIN clients c ON c.id=g.target WHERE g.source=? AND c.active=1', (client_id,))]
             senders = [{'sender_id': r['sender_id'], 'is_bot': bool(r['is_bot'])}
@@ -1296,6 +1297,9 @@ class Core:
                 elif pending:
                     action = 'poll_messages'
                     message = 'Check the inbox to handle pending messages, then acknowledge only completed work.'
+                    if kept:
+                        message += (f' Your queue reached its limit, so {kept} newer messages were kept in history '
+                                    'only; read them with messages_history after the pending ones.')
                 elif gap:
                     action = 'review_gap'
                     message = 'Captured history may have a gap. Check for new messages when ready and allow for missing context.'
@@ -1309,6 +1313,7 @@ class Core:
                 'destination': {'chat_id': row['chat_id'], 'thread_id': row['thread_id'] or None,
                                 'title': row['title'], 'owner_id': row['owner_id']} if row else None,
                 'pairing': dict(pairing) if pairing else None, 'pending_messages': pending,
+                'queue_full_kept': kept,
                 'outbox': counts, 'permitted_peers': peers,
                 'bot': {'id': account['bot_id'], 'username': account['username']},
                 'allowed_senders': senders,
@@ -1357,6 +1362,59 @@ class Core:
     # (for example one consumed by an older runtime) must not leave it stale.
     BOT_ADMIN_RECHECK = 3600
 
+    # The owner hears about a full queue at most this often per agent.
+    QUEUE_FULL_NOTICE_INTERVAL = 86400
+    QUEUE_FULL_NOTICE_KEY = 'aot-queue-full:'
+
+    def _queue_full_notice(self, db, client_id, pending, now):
+        """Tell the owner privately that this agent's queue is full; at most once a day.
+
+        The agent may not be running at all, which is often why its queue
+        filled, so the owner is the one who can act. This is the runtime's own
+        notice, not the agent's, so the agent's owner_notify setting does not
+        apply; it still needs the owner to have started a private chat with
+        the bot, like every owner notice.
+        """
+        if db.execute('SELECT 1 FROM owner_outbox WHERE client_id=? AND idempotency_key LIKE ? AND created>?',
+                      (client_id, self.QUEUE_FULL_NOTICE_KEY + '%', now - self.QUEUE_FULL_NOTICE_INTERVAL)).fetchone():
+            return
+        binding = db.execute('SELECT owner_id,title FROM bindings WHERE client_id=? AND connected=1',
+                             (client_id,)).fetchone()
+        if binding is None or binding['owner_id'] is None:
+            return
+        label = db.execute('SELECT label FROM clients WHERE id=?', (client_id,)).fetchone()['label']
+        title = ' '.join(str(binding['title']).split())
+        text = (f'[Agents over Telegram | {title}]\n'
+                f'The agent "{label}" has {pending} unread messages, its queue limit. New messages for it are '
+                'kept in its history only, and it is not told about them. Start the agent so it handles '
+                'them, or disconnect it if it is no longer used. This notice repeats at most once a day.')
+        key = self.QUEUE_FULL_NOTICE_KEY + str(int(now))
+        db.execute("INSERT INTO owner_outbox(id,client_id,owner_id,text,idempotency_key,request_hash,status,"
+                   "created,updated,due) VALUES(?,?,?,?,?,?,'queued',?,?,?)",
+                   ('owner_' + secrets.token_hex(12), client_id, binding['owner_id'], text, key,
+                    _digest(json.dumps([text])), now, now, now))
+
+    def _send_queue_full_notices(self):
+        """Send queued full-queue notices from the collector.
+
+        Other owner notices go out with their agent's own tool calls, but an
+        agent whose queue filled is often not running, so the collector sends
+        these itself.
+        """
+        with self._db() as db:
+            notes = db.execute("SELECT id FROM owner_outbox WHERE status='queued' AND due<=? AND idempotency_key LIKE ? "
+                               'ORDER BY created,rowid LIMIT 5', (self.clock(), self.QUEUE_FULL_NOTICE_KEY + '%')).fetchall()
+        if not notes:
+            return
+        with self._lock('sender') as acquired:
+            if acquired:
+                self._flush_owner_notes(notes)
+
+    def _queue_full_kept(self, db, client_id):
+        """How many messages from the history window were kept as context because the queue was full."""
+        return db.execute("SELECT count(*) FROM inbox WHERE client_id=? AND context=1 "
+                          "AND json_extract(payload,'$.context_reason')='queue_full'", (client_id,)).fetchone()[0]
+
     def _unmatched(self, db, update_id, chat_id, reason, now):
         db.execute('INSERT OR IGNORE INTO unmatched(update_id,chat_id,reason,created) VALUES(?,?,?,?)', (update_id, chat_id, reason, now))
         db.execute('DELETE FROM unmatched WHERE update_id NOT IN (SELECT update_id FROM unmatched ORDER BY update_id DESC LIMIT ?)', (self.UNMATCHED_LIMIT,))
@@ -1381,6 +1439,7 @@ class Core:
             self._keep_context(db, client_id, event_key, {**payload, 'context_reason': 'queue_full'},
                                conversation_id, now, now if event_at is None else event_at)
             self._overflowed += 1
+            self._queue_full_notice(db, client_id, count, now)
             return
         keys = _telegram_message_keys(payload) or (None, None)
         db.execute('INSERT INTO inbox(id,client_id,event_key,payload,created,conversation_id,outbox_id,event_at,tg_chat_id,tg_message_id) VALUES(?,?,?,?,?,?,?,?,?,?)', ('msg_' + secrets.token_hex(12), client_id, event_key, json.dumps(payload, ensure_ascii=False), now, conversation_id, outbox_id, now if event_at is None else event_at, *keys))
@@ -2339,6 +2398,12 @@ class Core:
                     pass
                 mark = step('start_replies', mark)
                 try:
+                    self._send_queue_full_notices()
+                except Exception:
+                    # The notice is retried at the next collection.
+                    pass
+                mark = step('queue_full_notices', mark)
+                try:
                     if judge:
                         before = self._delivery_count() if routed is not None else None
                         self._judge_pending()
@@ -2558,7 +2623,15 @@ class Core:
                     published = db.execute('SELECT status,message_id FROM outbox WHERE id=?', (row['outbox_id'],)).fetchone()
                     delivery['publication'] = {'outbox_id': row['outbox_id'], 'status': published['status'], 'message_id': published['message_id']}
                 deliveries.append(delivery)
-        return {'deliveries': deliveries, 'lease_token': token if deliveries else None, 'lease_expires_at': now + lease_seconds if deliveries else None, 'paused': False, 'suspended': None}
+            kept = self._queue_full_kept(db, client_id)
+        result = {'deliveries': deliveries, 'lease_token': token if deliveries else None, 'lease_expires_at': now + lease_seconds if deliveries else None, 'paused': False, 'suspended': None}
+        if kept:
+            # Only when it happened, so a normal poll result stays the same.
+            result['queue_full_kept'] = {
+                'count': kept,
+                'note': ('Your queue reached its limit, so these newer messages were kept in history only, '
+                         'with context_reason "queue_full". Read them with messages_history.')}
+        return result
 
     @staticmethod
     def _history_encode(value):

@@ -934,6 +934,50 @@ def test_same_bot_broker_needs_grant_no_echo_and_no_duplicate_delivery(env):
         core.send(b, 'reply', 'reply', recipient=a, conversation_id=item['conversation_id'])
 
 
+def full_queue_notices(transport, start=0):
+    return [m for m in transport.sent[start:] if 'its queue limit' in m['text']]
+
+
+def test_a_full_queue_is_reported_to_the_agent_and_at_most_daily_to_the_owner(env):
+    core, transport, clock = env
+    core.queue_limit = 1
+    a, _ = bind(core, transport)
+    append(transport, 'fill')
+    core.collect()
+    assert core.connection_status(a)['queue_full_kept'] == 0
+    start = len(transport.sent)
+    append(transport, 'over one')
+    append(transport, 'over two')
+    core.collect()
+    # The collector itself tells the owner privately, once, without the agent running.
+    [notice] = full_queue_notices(transport, start)
+    assert notice['chat']['id'] == 101
+    assert '"Alpha" has 1 unread messages' in notice['text'] and 'over one' not in notice['text']
+    # The agent learns it from its own status and poll.
+    status = core.connection_status(a)
+    assert status['queue_full_kept'] == 2 and 'messages_history' in status['next_action']['message']
+    page = core.poll(a)
+    assert page['queue_full_kept']['count'] == 2
+    # Within a day, a further overflow does not notify the owner again.
+    append(transport, 'over three')
+    core.collect()
+    assert len(full_queue_notices(transport, start)) == 1
+    clock.advance(core.QUEUE_FULL_NOTICE_INTERVAL + 1)
+    append(transport, 'over four')
+    core.collect()
+    assert len(full_queue_notices(transport, start)) == 2
+    # Once the old overflow leaves the history window, only the new one counts.
+    assert core.connection_status(a)['queue_full_kept'] == 1
+
+
+def test_a_poll_without_overflow_is_unchanged(env):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    append(transport, 'hello')
+    core.collect()
+    assert 'queue_full_kept' not in core.poll(a)
+
+
 def test_broker_capacity_failure_rolls_back_outbox(env):
     core, transport, clock = env
     core.queue_limit = 1
