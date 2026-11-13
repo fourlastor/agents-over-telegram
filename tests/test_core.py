@@ -977,6 +977,25 @@ def test_a_full_queue_is_reported_to_the_agent_and_at_most_daily_to_the_owner(en
     assert core.connection_status(a)['queue_full_kept'] == 1
 
 
+def test_reading_one_page_of_overflow_clears_only_that_page(env):
+    core, transport, clock = env
+    core.queue_limit = 1
+    a, _ = bind(core, transport)
+    for text in ('fill', 'over one', 'over two', 'over three'):
+        append(transport, text)
+    core.collect()
+    assert core.connection_status(a)['queue_full_kept'] == 3
+    # History is newest first: one page of one shows only the newest overflow.
+    page = core.history(a, limit=1)
+    assert [m['text'] for m in page['messages']] == ['over three']
+    assert core.connection_status(a)['queue_full_kept'] == 2
+    # Reading the same row again changes nothing; the next page reads the next one.
+    core.history(a, limit=1)
+    assert core.connection_status(a)['queue_full_kept'] == 2
+    core.history(a, limit=1, cursor=page['next_cursor'])
+    assert core.connection_status(a)['queue_full_kept'] == 1
+
+
 def test_a_history_page_without_overflow_does_not_clear_the_count(env):
     core, transport, clock = env
     core.queue_limit = 1
