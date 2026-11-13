@@ -935,7 +935,7 @@ def test_same_bot_broker_needs_grant_no_echo_and_no_duplicate_delivery(env):
 
 
 def full_queue_notices(transport, start=0):
-    return [m for m in transport.sent[start:] if 'its queue limit' in m['text']]
+    return [m for m in transport.sent[start:] if 'has reached its limit of' in m['text']]
 
 
 def test_a_full_queue_is_reported_to_the_agent_and_at_most_daily_to_the_owner(env):
@@ -952,21 +952,62 @@ def test_a_full_queue_is_reported_to_the_agent_and_at_most_daily_to_the_owner(en
     # The collector itself tells the owner privately, once, without the agent running.
     [notice] = full_queue_notices(transport, start)
     assert notice['chat']['id'] == 101
-    assert '"Alpha" has 1 unread messages' in notice['text'] and 'over one' not in notice['text']
+    assert '"Alpha" has reached its limit of 1 unread messages' in notice['text'] and 'over one' not in notice['text']
     # The agent learns it from its own status and poll.
     status = core.connection_status(a)
     assert status['queue_full_kept'] == 2 and 'messages_history' in status['next_action']['message']
     page = core.poll(a)
     assert page['queue_full_kept']['count'] == 2
+    # Reading them in history clears the count, so the poll note goes away.
+    assert {m['text'] for m in core.history(a, limit=50)['messages']} >= {'over one', 'over two'}
+    assert core.connection_status(a)['queue_full_kept'] == 0
+    assert 'queue_full_kept' not in core.poll(a)
     # Within a day, a further overflow does not notify the owner again.
+    clock.advance()
     append(transport, 'over three')
     core.collect()
     assert len(full_queue_notices(transport, start)) == 1
+    # Only overflow after the last read counts.
+    assert core.connection_status(a)['queue_full_kept'] == 1
     clock.advance(core.QUEUE_FULL_NOTICE_INTERVAL + 1)
     append(transport, 'over four')
     core.collect()
     assert len(full_queue_notices(transport, start)) == 2
-    # Once the old overflow leaves the history window, only the new one counts.
+    # "over three" has left the history window by now; "over four" counts.
+    assert core.connection_status(a)['queue_full_kept'] == 1
+
+
+def test_reading_one_page_of_overflow_clears_only_that_page(env):
+    core, transport, clock = env
+    core.queue_limit = 1
+    a, _ = bind(core, transport)
+    for text in ('fill', 'over one', 'over two', 'over three'):
+        append(transport, text)
+    core.collect()
+    assert core.connection_status(a)['queue_full_kept'] == 3
+    # History is newest first: one page of one shows only the newest overflow.
+    page = core.history(a, limit=1)
+    assert [m['text'] for m in page['messages']] == ['over three']
+    assert core.connection_status(a)['queue_full_kept'] == 2
+    # Reading the same row again changes nothing; the next page reads the next one.
+    core.history(a, limit=1)
+    assert core.connection_status(a)['queue_full_kept'] == 2
+    core.history(a, limit=1, cursor=page['next_cursor'])
+    assert core.connection_status(a)['queue_full_kept'] == 1
+
+
+def test_a_history_page_without_overflow_does_not_clear_the_count(env):
+    core, transport, clock = env
+    core.queue_limit = 1
+    a, _ = bind(core, transport)
+    append(transport, 'fill')
+    append(transport, 'over')
+    core.collect()
+    for number in range(3):
+        core.send(a, f'reply {number}', f'reply-{number}')
+    clock.advance()
+    # The newest page holds only the agent's own replies, not the overflow.
+    assert [m['direction'] for m in core.history(a, limit=3)['messages']] == ['outgoing'] * 3
     assert core.connection_status(a)['queue_full_kept'] == 1
 
 
