@@ -251,7 +251,7 @@ def test_unmatched_retention_is_bounded_and_contains_no_text(env):
     assert core.connection_status(a)['pending_messages'] == 0
 
 
-def test_queue_pressure_rolls_back_whole_batch_and_cursor(env):
+def test_a_full_queue_keeps_the_overflow_as_context_and_intake_moves_on(env):
     core, transport, clock = env
     core.queue_limit = 1
     a, _ = bind(core, transport)
@@ -261,15 +261,22 @@ def test_queue_pressure_rolls_back_whole_batch_and_cursor(env):
     before = rows(core, 'SELECT cursor FROM account')[0][0]
     append(transport, 'b first', chat=-200)
     append(transport, 'a overflow')
-    with pytest.raises(CoreError, match='queue_full'):
-        core.collect()
-    assert rows(core, 'SELECT cursor FROM account')[0][0] == before
-    assert core.connection_status(b)['pending_messages'] == 0
+    assert core.collect()['updates'] == 2
+    # One agent's full queue no longer holds back the page for everyone.
+    assert rows(core, 'SELECT cursor FROM account')[0][0] == before + 2
+    assert core.connection_status(b)['pending_messages'] == 1
+    assert core.connection_status(a)['pending_messages'] == 1
+    # The overflow is not lost: history has it, marked as kept for a full queue.
+    kept = [m for m in core.history(a, limit=50)['messages'] if m.get('text') == 'a overflow']
+    assert len(kept) == 1 and kept[0]['context_reason'] == 'queue_full'
+    assert core.activity()[-1]['queue_full'] == 1
+    # Draining the queue lets new messages through again, without duplicates.
     page = core.poll(a)
+    assert [d['text'] for d in page['deliveries']] == ['fill']
     core.ack(a, [page['deliveries'][0]['delivery_id']], page['lease_token'])
+    append(transport, 'a after drain')
     core.collect()
-    assert core.poll(a)['deliveries'][0]['text'] == 'a overflow'
-    assert core.poll(b)['deliveries'][0]['text'] == 'b first'
+    assert [d['text'] for d in core.poll(a)['deliveries']] == ['a after drain']
 
 
 def test_crash_during_route_rolls_back_and_replays(env, monkeypatch):
