@@ -435,6 +435,9 @@ class Core:
         # When the last fetch from Telegram returned (time.monotonic), for the activity log.
         self._poll_end = None
         self.queue_limit = queue_limit
+        # Deliveries kept as context because their agent's queue was full,
+        # counted per collection for the activity log.
+        self._overflowed = 0
         # The model judge loads from the protected judge file on first use;
         # tests pass a callable, and None turns it off.
         self._judge = judge
@@ -1358,12 +1361,24 @@ class Core:
         db.execute('INSERT OR IGNORE INTO unmatched(update_id,chat_id,reason,created) VALUES(?,?,?,?)', (update_id, chat_id, reason, now))
         db.execute('DELETE FROM unmatched WHERE update_id NOT IN (SELECT update_id FROM unmatched ORDER BY update_id DESC LIMIT ?)', (self.UNMATCHED_LIMIT,))
 
-    def _enqueue(self, db, client_id, event_key, payload, conversation_id, now, outbox_id=None, event_at=None):
+    def _enqueue(self, db, client_id, event_key, payload, conversation_id, now, outbox_id=None, event_at=None,
+                 *, overflow='context'):
         if db.execute('SELECT 1 FROM inbox WHERE client_id=? AND event_key=?', (client_id, event_key)).fetchone():
             return
         count = db.execute('SELECT count(*) FROM inbox WHERE client_id=? AND acknowledged=0', (client_id,)).fetchone()[0]
         if count >= self.queue_limit:
-            raise CoreError('queue_full')
+            if overflow == 'raise':
+                raise CoreError('queue_full')
+            # Telegram intake routes one page for every agent on the bot in one
+            # transaction. Raising here would roll the page back for all of
+            # them and stall intake until this agent drains its queue, while
+            # Telegram drops what it holds after 24 hours. So the overflow is
+            # kept as context instead: history still has it, and the collector
+            # moves on.
+            self._keep_context(db, client_id, event_key, {**payload, 'context_reason': 'queue_full'},
+                               conversation_id, now, now if event_at is None else event_at)
+            self._overflowed += 1
+            return
         keys = _telegram_message_keys(payload) or (None, None)
         db.execute('INSERT INTO inbox(id,client_id,event_key,payload,created,conversation_id,outbox_id,event_at,tg_chat_id,tg_message_id) VALUES(?,?,?,?,?,?,?,?,?,?)', ('msg_' + secrets.token_hex(12), client_id, event_key, json.dumps(payload, ensure_ascii=False), now, conversation_id, outbox_id, now if event_at is None else event_at, *keys))
 
@@ -2257,6 +2272,7 @@ class Core:
                     raise CoreError('invalid_transport_response')
                 if any(not isinstance(u, dict) or not _integer(u.get('update_id')) or u['update_id'] < 0 for u in updates):
                     raise CoreError('invalid_transport_response')
+                self._overflowed = 0
                 with self._tx() as db:
                     accepted = 0
                     for update in sorted(updates, key=lambda u: u['update_id']):
@@ -2336,10 +2352,12 @@ class Core:
                     for update in updates:
                         kind = next((key for key in update if key != 'update_id'), 'unknown')
                         kinds[kind] = kinds.get(kind, 0) + 1
-                    self.record_activity('cycle', {
-                        'updates': accepted, 'kinds': kinds, 'long_poll': timeout > 0,
-                        'gap_ms': gap, 'work_ms': work,
-                        'steps_ms': {name: ms for name, ms in steps.items() if ms}})
+                    detail = {'updates': accepted, 'kinds': kinds, 'long_poll': timeout > 0,
+                              'gap_ms': gap, 'work_ms': work,
+                              'steps_ms': {name: ms for name, ms in steps.items() if ms}}
+                    if self._overflowed:
+                        detail['queue_full'] = self._overflowed
+                    self.record_activity('cycle', detail)
                 return {'status': 'ok', 'updates': accepted, 'cursor': cursor}
             except (TransportError, CoreError) as error:
                 code = error.code if isinstance(error, CoreError) else 'telegram_intake_failed'
@@ -3063,7 +3081,8 @@ class Core:
                     db.execute('UPDATE conversations SET send_count=send_count+1 WHERE id=?', (conversation,))
                     if recipient:
                         payload = {'origin': 'broker', 'kind': 'message', 'text': text, 'logical_sender': {'client_id': client_id, 'label': client['label']}, 'actual_bot': {'id': account['bot_id'], 'username': account['username']}, 'chat_id': binding['chat_id'], 'thread_id': binding['thread_id'] or None}
-                        self._enqueue(db, recipient, 'broker:' + outbox_id, payload, conversation, now, outbox_id)
+                        self._enqueue(db, recipient, 'broker:' + outbox_id, payload, conversation, now, outbox_id,
+                                      overflow='raise')
                 except BaseException:
                     if stored_image is not None:
                         self._delete_outbox_image(stored_image)
