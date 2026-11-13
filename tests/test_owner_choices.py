@@ -3,7 +3,7 @@ import pytest
 
 from agents_over_telegram.core import CoreError
 from agents_over_telegram.mcp_server import TOOLS
-from test_core import bind, env  # noqa: F401 (env is a fixture)
+from test_core import append, bind, env  # noqa: F401 (env is a fixture)
 from test_owner_approval import OWNER, ask, press
 
 QUESTION = 'Deploy 0.9.20 now?'
@@ -75,6 +75,18 @@ def test_the_owners_press_is_delivered_once_and_closes_the_buttons(owner):
     core.collect()
     assert core.poll(client)['deliveries'] == []
     assert transport.callback_answers[-1] == {'id': second, 'text': 'Already answered: Yes.'}
+
+
+def test_the_owners_answer_reaches_an_agent_with_a_full_queue(owner):
+    core, transport, clock, client = owner
+    core.queue_limit = 1
+    status = notify(core, client)
+    append(transport, 'fills the queue')
+    core.collect()
+    tap(transport, status, 1)
+    core.collect()
+    # The owner was told "Answered: No", so the agent gets it despite the bound.
+    assert [d.get('choice') for d in deliveries(core, client)] == [None, 'No']
 
 
 def test_a_free_text_reply_still_works_and_keeps_the_buttons(owner):

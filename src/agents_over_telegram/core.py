@@ -1366,7 +1366,10 @@ class Core:
         if db.execute('SELECT 1 FROM inbox WHERE client_id=? AND event_key=?', (client_id, event_key)).fetchone():
             return
         count = db.execute('SELECT count(*) FROM inbox WHERE client_id=? AND acknowledged=0', (client_id,)).fetchone()[0]
-        if count >= self.queue_limit:
+        # The owner's own answers (a button press, a reply to a notice, an
+        # approval outcome) are rare and already confirmed to the owner, so
+        # they always reach the agent; the bound is for group traffic.
+        if count >= self.queue_limit and not payload.get('owner_notice'):
             if overflow == 'raise':
                 raise CoreError('queue_full')
             # Telegram intake routes one page for every agent on the bot in one

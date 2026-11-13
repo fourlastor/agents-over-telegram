@@ -270,7 +270,7 @@ def test_a_full_queue_keeps_the_overflow_as_context_and_intake_moves_on(env):
     kept = [m for m in core.history(a, limit=50)['messages'] if m.get('text') == 'a overflow']
     assert len(kept) == 1 and kept[0]['context_reason'] == 'queue_full'
     assert core.activity()[-1]['queue_full'] == 1
-    # Collecting the same update again changes nothing.
+    # Draining the queue lets new messages through again, without duplicates.
     page = core.poll(a)
     assert [d['text'] for d in page['deliveries']] == ['fill']
     core.ack(a, [page['deliveries'][0]['delivery_id']], page['lease_token'])
