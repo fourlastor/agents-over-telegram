@@ -228,6 +228,30 @@ def _wake_log(state: Path, key: str, event: str, reason: str) -> None:
         pass
 
 
+def _log_signal_exits(state: Path, key: str) -> None:
+    """Log an exit line when the host stops the waiter with a signal.
+
+    The handler then lets the signal end the process as before. SIGKILL
+    cannot be caught: such a waiter leaves a start line with no exit line.
+    """
+    import signal
+
+    def handler(number, frame):
+        _wake_log(state, key, 'exit', f'signal:{signal.Signals(number).name}')
+        signal.signal(number, signal.SIG_DFL)
+        os.kill(os.getpid(), number)
+
+    for name in ('SIGTERM', 'SIGHUP', 'SIGINT'):
+        number = getattr(signal, name, None)
+        if number is None:
+            continue
+        try:
+            signal.signal(number, handler)
+        except (ValueError, OSError):
+            # Not the main thread, or the platform refuses: log nothing.
+            pass
+
+
 def _alive(pid: int) -> bool:
     return compat.pid_alive(pid)
 
@@ -320,6 +344,7 @@ def _wake(args, log=None) -> int:
     if log is not None:
         log[:] = [state, key]
     _wake_log(state, key, 'start', 'turn_end')
+    _log_signal_exits(state, key)
     # The newest waiter for a session takes over, so the time limit counts
     # from the latest turn end, not from the first waiter. It records itself
     # as the owner; the running waiter sees that and exits, freeing the lock.

@@ -702,6 +702,23 @@ def test_newest_waiter_takes_over_its_session(tmp_path):
                 process.communicate(timeout=10)
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX signals')
+def test_wake_logs_a_signal_and_still_dies_of_it(tmp_path):
+    import signal
+    result = connected(tmp_path)
+    waiter = start_wake(result['project_dir'], 'sig')
+    try:
+        wait_for_owner(result, 'sig', waiter)
+        waiter.send_signal(signal.SIGTERM)
+        out, err = waiter.communicate(timeout=30)
+    finally:
+        if waiter.poll() is None:
+            waiter.kill()
+            waiter.communicate(timeout=10)
+    assert waiter.returncode == -signal.SIGTERM
+    assert exits(result) == ['signal:SIGTERM']
+
+
 def test_wake_is_silent_in_unconfigured_folders_and_on_bad_arguments(tmp_path):
     plain = tmp_path / 'plain'
     plain.mkdir()
