@@ -297,6 +297,12 @@ def _quoted_message(msg, accept_media, allowed_sender):
         item['attachments'] = attachments
     elif attachments:
         item['media_refused'] = sorted({a['kind'] for a in attachments})
+    # A partial quote: the part of the replied message the reply is about.
+    selected = _mapping(msg.get('quote'))
+    if isinstance(selected.get('text'), str) and selected['text']:
+        item['quote'] = {'text': selected['text'][:QUOTED_TEXT_LIMIT]}
+        if _integer(selected.get('position')) and selected['position'] >= 0:
+            item['quote']['position'] = selected['position']
     return item
 
 
