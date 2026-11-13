@@ -201,6 +201,57 @@ class _Woken(Exception):
     pass
 
 
+WAKE_LOG = 'wake.log'
+WAKE_LOG_LIMIT = 256 * 1024
+
+
+def _wake_log(state: Path, key: str, event: str, reason: str) -> None:
+    """Append one line about a waiter's start or exit; never fails the caller.
+
+    A waiter that stops without waking its session is silent, so this private
+    log is the only record of why a session stopped hearing Telegram. It holds
+    no message text. Past WAKE_LOG_LIMIT bytes the old log moves to wake.log.1.
+    """
+    try:
+        path = state / WAKE_LOG
+        try:
+            if path.stat().st_size > WAKE_LOG_LIMIT:
+                os.replace(path, path.with_name(WAKE_LOG + '.1'))
+        except FileNotFoundError:
+            pass
+        line = json.dumps({'at': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'pid': os.getpid(),
+                           'session': key, 'event': event, 'reason': reason}) + '\n'
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | compat.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, 'a', encoding='utf-8') as stream:
+            stream.write(line)
+    except Exception:
+        pass
+
+
+def _log_signal_exits(state: Path, key: str) -> None:
+    """Log an exit line when the host stops the waiter with a signal.
+
+    The handler then lets the signal end the process as before. SIGKILL
+    cannot be caught: such a waiter leaves a start line with no exit line.
+    """
+    import signal
+
+    def handler(number, frame):
+        _wake_log(state, key, 'exit', f'signal:{signal.Signals(number).name}')
+        signal.signal(number, signal.SIG_DFL)
+        os.kill(os.getpid(), number)
+
+    for name in ('SIGTERM', 'SIGHUP', 'SIGINT'):
+        number = getattr(signal, name, None)
+        if number is None:
+            continue
+        try:
+            signal.signal(number, handler)
+        except (ValueError, OSError):
+            # Not the main thread, or the platform refuses: log nothing.
+            pass
+
+
 def _alive(pid: int) -> bool:
     return compat.pid_alive(pid)
 
@@ -214,9 +265,12 @@ def run_wake(args) -> int:
     notice; every other outcome exits 0 without output. One waiter runs per
     client and host session; a newer start takes over from the running one.
     """
+    log = []
     try:
-        return _wake(args)
-    except Exception:
+        return _wake(args, log)
+    except Exception as error:
+        if log:
+            _wake_log(*log, 'exit', f'error:{type(error).__name__}')
         return 0
 
 
@@ -255,7 +309,7 @@ def wake_key(client_id: str, session: str | None) -> str:
     return hashlib.sha256(f'{client_id}\0{session or ""}'.encode()).hexdigest()[:24]
 
 
-def _wake(args) -> int:
+def _wake(args, log=None) -> int:
     from .cli import LazyTransport, _client, _mode
     from .core import Core
     from .onboarding import read_profile
@@ -287,6 +341,10 @@ def _wake(args) -> int:
     locks = state / 'wake-locks'
     locks.mkdir(mode=0o700, exist_ok=True)
     key = wake_key(client_id, args.session)
+    if log is not None:
+        log[:] = [state, key]
+    _wake_log(state, key, 'start', 'turn_end')
+    _log_signal_exits(state, key)
     # The newest waiter for a session takes over, so the time limit counts
     # from the latest turn end, not from the first waiter. It records itself
     # as the owner; the running waiter sees that and exits, freeing the lock.
@@ -298,18 +356,32 @@ def _wake(args) -> int:
     host = getattr(args, 'host_pid', None)
 
     moved = []
+    stopped = []
+
+    def stop(reason):
+        if not stopped:
+            stopped.append(reason)
+        return False
 
     def keep_running():
         # Re-parenting or a missing host process means the host is gone,
         # so stop instead of polling forever. A newer owner replaces this waiter.
-        if not (os.getppid() == parent and (not host or _alive(host)) and _read_owner(owner) == token):
-            return False
+        if os.getppid() != parent:
+            return stop('parent_changed')
+        if host and not _alive(host):
+            return stop('host_gone')
+        if _read_owner(owner) != token:
+            return stop('replaced')
         # An updated project runtime takes over: the launcher restarts this
         # waiter on it, so collection never runs older code than the pointer.
         if runtime_moved(project):
             moved.append(True)
-            return False
+            return stop('runtime_moved')
         return True
+
+    def done(code, reason=None):
+        _wake_log(state, key, 'exit', reason or (stopped[0] if stopped else 'unknown'))
+        return code
 
     # The running waiter notices the new owner only at the end of its cycle,
     # which can take longer than a Telegram long poll. Wait without a fixed
@@ -317,7 +389,7 @@ def _wake(args) -> int:
     while True:
         if not keep_running():
             os.close(fd)
-            return 0
+            return done(0)
         try:
             compat.lock(fd)
             break
@@ -338,9 +410,9 @@ def _wake(args) -> int:
         # The asyncRewake waiter runs only for Claude Code.
         sys.stderr.write(with_shell_fallback(notices[0]) + '\n')
         sys.stderr.flush()
-        return WAKE_EXIT
+        return done(WAKE_EXIT, 'woken')
     if moved:
-        return RUNTIME_MOVED_EXIT
+        return done(RUNTIME_MOVED_EXIT)
     # A new waiter starts only when a turn ends. Without this, a session idle
     # for longer than the time limit would stop hearing Telegram for good.
     # With keep-alive on, the session's current waiter wakes it once when time
@@ -348,6 +420,8 @@ def _wake(args) -> int:
     if result.get('reason') == 'duration_elapsed' and _keep_alive(core, client_id, remote) and keep_running():
         sys.stderr.write(REFRESH_NOTICE + '\n')
         sys.stderr.flush()
-        return WAKE_EXIT
+        return done(WAKE_EXIT, 'keep_alive_refresh')
     # The last check may itself have seen a moved runtime.
-    return RUNTIME_MOVED_EXIT if moved else 0
+    if moved:
+        return done(RUNTIME_MOVED_EXIT)
+    return done(0, stopped[0] if stopped else f"watch_ended:{result.get('reason') or 'unknown'}")
