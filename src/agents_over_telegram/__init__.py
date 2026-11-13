@@ -1,2 +1,2 @@
 """Local, scoped communication between agents and a human-owned Telegram bot."""
-__version__ = "0.10.3"
+__version__ = "0.10.4"
