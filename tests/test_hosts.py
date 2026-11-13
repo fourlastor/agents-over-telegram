@@ -547,6 +547,20 @@ def run_wake(*args, cwd=None, timeout=60):
                           text=True, cwd=cwd, env=clean_env(), timeout=timeout, stdin=subprocess.DEVNULL)
 
 
+def wake_log(result):
+    """The waiter's start and exit lines, oldest first."""
+    path = Path(result['state_dir']) / 'wake.log'
+    if not path.exists():
+        return []
+    if os.name != 'nt':
+        assert path.stat().st_mode & 0o777 == 0o600
+    return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
+
+
+def exits(result):
+    return [line['reason'] for line in wake_log(result) if line['event'] == 'exit']
+
+
 def test_wake_exits_2_with_a_notice_when_a_message_waits(tmp_path):
     result = connected(tmp_path)
     project = result['project_dir']
@@ -558,6 +572,10 @@ def test_wake_exits_2_with_a_notice_when_a_message_waits(tmp_path):
     # The delivery is announced once; with nothing new the waiter ends quietly.
     quiet = run_wake('--project-dir', project, '--duration', '0.5')
     assert (quiet.returncode, quiet.stdout, quiet.stderr) == (0, '', '')
+    # Each start and exit is logged with its reason, never the message text.
+    assert [line['event'] for line in wake_log(result)] == ['start', 'exit', 'start', 'exit']
+    assert exits(result) == ['woken', 'watch_ended:duration_elapsed']
+    assert 'secret message body' not in (Path(result['state_dir']) / 'wake.log').read_text(encoding='utf-8')
 
 
 def keep_alive(result, value='on'):
@@ -581,6 +599,7 @@ def test_keep_alive_wakes_the_session_once_at_the_time_limit(tmp_path):
     keep_alive(result, 'off')
     quiet = run_wake('--project-dir', result['project_dir'], '--duration', '0.5')
     assert (quiet.returncode, quiet.stderr) == (0, '')
+    assert exits(result) == ['keep_alive_refresh', 'watch_ended:duration_elapsed']
 
 
 def test_keep_alive_is_quiet_when_the_host_is_gone_or_a_newer_waiter_runs(tmp_path):
@@ -590,6 +609,7 @@ def test_keep_alive_is_quiet_when_the_host_is_gone_or_a_newer_waiter_runs(tmp_pa
     gone.wait()
     process = run_wake('--project-dir', result['project_dir'], '--duration', '0.5', '--host-pid', gone.pid)
     assert (process.returncode, process.stdout, process.stderr) == (0, '', '')
+    assert exits(result) == ['host_gone']
     # A waiter that handed over to a newer one never wakes the session.
     first = start_wake(result['project_dir'], 'kept', duration=60)
     second = None
@@ -598,6 +618,7 @@ def test_keep_alive_is_quiet_when_the_host_is_gone_or_a_newer_waiter_runs(tmp_pa
         second = start_wake(result['project_dir'], 'kept', duration=60)
         out, err = first.communicate(timeout=30)
         assert (first.returncode, out, err) == (0, '', '')
+        assert exits(result)[-1] == 'replaced'
     finally:
         for waiter in (first, second):
             if waiter is not None and waiter.poll() is None:
@@ -679,6 +700,23 @@ def test_newest_waiter_takes_over_its_session(tmp_path):
             if process is not None and process.poll() is None:
                 process.kill()
                 process.communicate(timeout=10)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX signals')
+def test_wake_logs_a_signal_and_still_dies_of_it(tmp_path):
+    import signal
+    result = connected(tmp_path)
+    waiter = start_wake(result['project_dir'], 'sig')
+    try:
+        wait_for_owner(result, 'sig', waiter)
+        waiter.send_signal(signal.SIGTERM)
+        out, err = waiter.communicate(timeout=30)
+    finally:
+        if waiter.poll() is None:
+            waiter.kill()
+            waiter.communicate(timeout=10)
+    assert waiter.returncode == -signal.SIGTERM
+    assert exits(result) == ['signal:SIGTERM']
 
 
 def test_wake_is_silent_in_unconfigured_folders_and_on_bad_arguments(tmp_path):
@@ -1302,3 +1340,15 @@ def test_launcher_moves_the_monitor_to_the_new_runtime(tmp_path):
     watch = launch(project, 'watch', '--idle-if-unconfigured', '--format', 'text')
     assert watch.returncode == 0, watch.stderr
     assert watch.stdout.splitlines() == [str(project), 'watch', '--format', 'text']
+
+
+def test_wake_log_is_bounded_and_never_fails(tmp_path):
+    from agents_over_telegram import hosts
+    state = tmp_path / 'state'
+    state.mkdir()
+    (state / 'wake.log').write_text('x' * (hosts.WAKE_LOG_LIMIT + 1), encoding='utf-8')
+    hosts._wake_log(state, 'k', 'start', 'turn_end')
+    assert (state / 'wake.log.1').stat().st_size == hosts.WAKE_LOG_LIMIT + 1
+    assert json.loads((state / 'wake.log').read_text(encoding='utf-8'))['reason'] == 'turn_end'
+    hosts._wake_log(tmp_path / 'missing', 'k', 'exit', 'woken')
+    assert not (tmp_path / 'missing').exists()
