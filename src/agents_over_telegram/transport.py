@@ -20,13 +20,21 @@ from .credentials import load_token, private_directory, read_private_json, valid
 
 
 class TransportError(Exception):
-    def __init__(self, code="transport_failure", retry_after=None, migrate_to_chat_id=None):
+    def __init__(self, code="transport_failure", retry_after=None, migrate_to_chat_id=None, bad_entities=False):
         # Codes are controlled by us; never use Telegram descriptions/URLs here.
         self.code = code if isinstance(code, (int, str)) else "transport_failure"
         self.retry_after = retry_after
         # Set only on a 400 that says the group became this supergroup.
         self.migrate_to_chat_id = migrate_to_chat_id
+        # Set only on a 400 that says the formatted text could not be parsed.
+        # Nothing was sent, so the caller may send the plain text instead.
+        self.bad_entities = bad_entities
         super().__init__(str(self.code))
+
+
+def _bad_entities(description):
+    """True when a 400 description says Telegram could not parse the formatting."""
+    return isinstance(description, str) and "can't parse entities" in description.lower()
 
 
 def _migrate_to(parameters):
@@ -82,12 +90,14 @@ class TelegramTransport:
                         retry = 30
                     raise TransportError(429, retry) from None
                 if code == 400:
-                    # Only the integer migrate_to_chat_id is read from the body.
+                    # Only the integer migrate_to_chat_id and whether the
+                    # formatting failed to parse are read from the body.
                     try:
-                        migrate = _migrate_to(json.loads(error.read(16384)).get("parameters"))
+                        raw = json.loads(error.read(16384))
+                        migrate, bad = _migrate_to(raw.get("parameters")), _bad_entities(raw.get("description"))
                     except Exception:
-                        migrate = None
-                    raise TransportError(code, migrate_to_chat_id=migrate) from None
+                        migrate, bad = None, False
+                    raise TransportError(code, migrate_to_chat_id=migrate, bad_entities=bad) from None
                 if 400 <= code < 500:
                     raise TransportError(code) from None
                 raise UnknownSend() if sending else TransportError("http_failure") from None
@@ -103,7 +113,8 @@ class TelegramTransport:
                     if retry is not None:
                         retry = max(1, min(86400, int(retry)))
                     migrate = _migrate_to(payload.get("parameters")) if code == 400 else None
-                    raise TransportError(code, retry, migrate_to_chat_id=migrate)
+                    bad = code == 400 and _bad_entities(payload.get("description"))
+                    raise TransportError(code, retry, migrate_to_chat_id=migrate, bad_entities=bad)
                 raise UnknownSend() if sending else TransportError("invalid_response")
             result = payload["result"]
             if sending and expects == "message" and (not isinstance(result, dict) or type(result.get("message_id")) is not int):
@@ -147,8 +158,11 @@ class TelegramTransport:
             raise TransportError("invalid_updates")
         return result
 
-    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None, ephemeral_to=None):
+    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None, ephemeral_to=None,
+                     parse_mode=None):
         params = {"chat_id": chat_id, "text": text, "link_preview_options": {"is_disabled": True}}
+        if parse_mode is not None:
+            params["parse_mode"] = parse_mode
         if thread_id is not None:
             params["message_thread_id"] = thread_id
         if reply_to is not None:
@@ -184,10 +198,13 @@ class TelegramTransport:
         return self._call("editMessageWidgetData", {"chat_id": chat_id, "message_id": message_id,
                                                     "chat_data": chat_data}, timeout=OWNER_ANSWER_TIMEOUT)
 
-    def edit_message_text(self, chat_id, message_id, text):
+    def edit_message_text(self, chat_id, message_id, text, parse_mode=None):
         # Without reply_markup, Telegram removes the message's inline buttons.
-        return self._call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text,
-                                              "link_preview_options": {"is_disabled": True}})
+        params = {"chat_id": chat_id, "message_id": message_id, "text": text,
+                  "link_preview_options": {"is_disabled": True}}
+        if parse_mode is not None:
+            params["parse_mode"] = parse_mode
+        return self._call("editMessageText", params)
 
     def edit_ephemeral_message_text(self, chat_id, receiver_user_id, ephemeral_message_id, text):
         # Without reply_markup, Telegram removes the message's inline buttons.
@@ -196,21 +213,24 @@ class TelegramTransport:
                                                        "link_preview_options": {"is_disabled": True}})
 
     def send_photo(self, chat_id, data, *, caption=None, filename="photo.png",
-                   mime="image/png", thread_id=None, reply_to=None):
+                   mime="image/png", thread_id=None, reply_to=None, parse_mode=None):
         """Upload one local image as a photo; caption length is the caller's duty."""
-        return self._send_media("sendPhoto", "photo", chat_id, data, caption=caption,
-                                filename=filename, mime=mime, thread_id=thread_id, reply_to=reply_to)
+        return self._send_media("sendPhoto", "photo", chat_id, data, caption=caption, filename=filename,
+                                mime=mime, thread_id=thread_id, reply_to=reply_to, parse_mode=parse_mode)
 
     def send_document(self, chat_id, data, *, caption=None, filename="document.bin",
-                      mime="application/octet-stream", thread_id=None, reply_to=None):
+                      mime="application/octet-stream", thread_id=None, reply_to=None, parse_mode=None):
         """Upload one local file as a document; caption length is the caller's duty."""
-        return self._send_media("sendDocument", "document", chat_id, data, caption=caption,
-                                filename=filename, mime=mime, thread_id=thread_id, reply_to=reply_to)
+        return self._send_media("sendDocument", "document", chat_id, data, caption=caption, filename=filename,
+                                mime=mime, thread_id=thread_id, reply_to=reply_to, parse_mode=parse_mode)
 
-    def _send_media(self, method, field, chat_id, data, *, caption, filename, mime, thread_id, reply_to):
+    def _send_media(self, method, field, chat_id, data, *, caption, filename, mime, thread_id, reply_to,
+                    parse_mode=None):
         fields = {"chat_id": str(chat_id)}
         if caption:
             fields["caption"] = caption
+            if parse_mode is not None:
+                fields["parse_mode"] = parse_mode
         if thread_id is not None:
             fields["message_thread_id"] = str(thread_id)
         if reply_to is not None:
@@ -311,7 +331,10 @@ def _fake_chat_member(members, chat_id, user_id):
 
 
 class FakeTransport:
-    """No sockets; modes sent/reject/rate_limit/unknown/crash model failure windows."""
+    """No sockets; modes sent/reject/rate_limit/unknown/crash model failure windows.
+
+    bad_entities rejects a formatted send the way Telegram rejects HTML it
+    cannot parse; it is not consumed by a plain send."""
     def __init__(self, updates=None, *, bot_id=900001, username="aot_test_bot", webhook="", outcomes=None):
         self.updates = list(updates or [])
         self.bot_id = bot_id
@@ -344,9 +367,10 @@ class FakeTransport:
             self.poll_offsets.append(offset)
             return copy.deepcopy(sorted((u for u in self.updates if u["update_id"] >= offset), key=lambda x:x["update_id"])[:100])
 
-    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None, ephemeral_to=None):
+    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None, ephemeral_to=None,
+                     parse_mode=None):
         with self._lock:
-            outcome = self.outcomes.pop(0) if self.outcomes else "sent"
+            outcome = self._outcome(parse_mode)
             if isinstance(outcome, BaseException):
                 raise outcome
             if outcome == "reject":
@@ -355,6 +379,8 @@ class FakeTransport:
                 raise TransportError(429, 30)
             message = {"message_id": len(self.sent)+1, "chat": {"id": chat_id}, "text": text,
                        "message_thread_id": thread_id, "reply_to_message_id": reply_to}
+            if parse_mode is not None:
+                message["parse_mode"] = parse_mode
             if reply_markup is not None:
                 message["reply_markup"] = copy.deepcopy(reply_markup)
             if ephemeral_to is not None:
@@ -367,16 +393,24 @@ class FakeTransport:
             return copy.deepcopy(message)
 
     def send_photo(self, chat_id, data, *, caption=None, filename=None, mime=None,
-                   thread_id=None, reply_to=None):
-        return self._send_media("photo", chat_id, data, caption, filename, mime, thread_id, reply_to)
+                   thread_id=None, reply_to=None, parse_mode=None):
+        return self._send_media("photo", chat_id, data, caption, filename, mime, thread_id, reply_to, parse_mode)
 
     def send_document(self, chat_id, data, *, caption=None, filename=None, mime=None,
-                      thread_id=None, reply_to=None):
-        return self._send_media("document", chat_id, data, caption, filename, mime, thread_id, reply_to)
+                      thread_id=None, reply_to=None, parse_mode=None):
+        return self._send_media("document", chat_id, data, caption, filename, mime, thread_id, reply_to, parse_mode)
 
-    def _send_media(self, kind, chat_id, data, caption, filename, mime, thread_id, reply_to):
+    def _outcome(self, parse_mode):
+        if self.outcomes and self.outcomes[0] == "bad_entities":
+            if parse_mode is None:
+                return "sent"
+            self.outcomes.pop(0)
+            return TransportError(400, bad_entities=True)
+        return self.outcomes.pop(0) if self.outcomes else "sent"
+
+    def _send_media(self, kind, chat_id, data, caption, filename, mime, thread_id, reply_to, parse_mode=None):
         with self._lock:
-            outcome = self.outcomes.pop(0) if self.outcomes else "sent"
+            outcome = self._outcome(parse_mode)
             if isinstance(outcome, BaseException):
                 raise outcome
             if outcome == "reject":
@@ -387,6 +421,8 @@ class FakeTransport:
                        "message_thread_id": thread_id, "reply_to_message_id": reply_to,
                        "media": {"kind": kind, "data": bytes(data), "filename": filename,
                                  "mime": mime, "sha256": hashlib.sha256(bytes(data)).hexdigest()}}
+            if parse_mode is not None:
+                message["parse_mode"] = parse_mode
             self.sent.append(message)
             if outcome == "unknown":
                 raise UnknownSend()
@@ -399,9 +435,15 @@ class FakeTransport:
             self.callback_answers.append({"id": callback_query_id, "text": text})
             return True
 
-    def edit_message_text(self, chat_id, message_id, text):
+    def edit_message_text(self, chat_id, message_id, text, parse_mode=None):
         with self._lock:
-            self.edits.append({"chat_id": chat_id, "message_id": message_id, "text": text})
+            outcome = self._outcome(parse_mode) if self.outcomes and self.outcomes[0] == "bad_entities" else None
+            if isinstance(outcome, BaseException):
+                raise outcome
+            edit = {"chat_id": chat_id, "message_id": message_id, "text": text}
+            if parse_mode is not None:
+                edit["parse_mode"] = parse_mode
+            self.edits.append(edit)
             return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
 
     def delete_message(self, chat_id, message_id):
@@ -520,11 +562,14 @@ class FileFakeTransport:
             data["poll_offsets"].append(offset)
             return sorted([u for u in data["updates"] if u["update_id"] >= offset], key=lambda x:x["update_id"])[:100]
 
-    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None, ephemeral_to=None):
+    def send_message(self, chat_id, text, thread_id=None, reply_to=None, reply_markup=None, ephemeral_to=None,
+                     parse_mode=None):
         with self._data() as data:
             outcome = data["outcomes"].pop(0) if data["outcomes"] else "sent"
             result = {"message_id": len(data["sent"])+1, "chat": {"id": chat_id}, "text": text,
                       "message_thread_id": thread_id, "reply_to_message_id": reply_to}
+            if parse_mode is not None:
+                result["parse_mode"] = parse_mode
             if reply_markup is not None:
                 result["reply_markup"] = reply_markup
             if ephemeral_to is not None:
@@ -542,11 +587,11 @@ class FileFakeTransport:
         return result
 
     def send_photo(self, chat_id, data, *, caption=None, filename=None, mime=None,
-                   thread_id=None, reply_to=None):
+                   thread_id=None, reply_to=None, parse_mode=None):
         return self._send_media("photo", chat_id, data, caption, filename, mime, thread_id, reply_to)
 
     def send_document(self, chat_id, data, *, caption=None, filename=None, mime=None,
-                      thread_id=None, reply_to=None):
+                      thread_id=None, reply_to=None, parse_mode=None):
         return self._send_media("document", chat_id, data, caption, filename, mime, thread_id, reply_to)
 
     def _send_media(self, kind, chat_id, data, caption, filename, mime, thread_id, reply_to):
@@ -574,7 +619,7 @@ class FileFakeTransport:
             data.setdefault("callback_answers", []).append({"id": callback_query_id, "text": text})
         return True
 
-    def edit_message_text(self, chat_id, message_id, text):
+    def edit_message_text(self, chat_id, message_id, text, parse_mode=None):
         with self._data() as data:
             data.setdefault("edits", []).append({"chat_id": chat_id, "message_id": message_id, "text": text})
         return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}

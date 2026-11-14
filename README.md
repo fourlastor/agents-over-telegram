@@ -4,7 +4,7 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.10.5 supports **Codex**, **Claude Code**, **Pi** and **Amp**, and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.10.6 supports **Codex**, **Claude Code**, **Pi** and **Amp**, and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
 | Host | Integration | Push delivery |
 |---|---|---|
@@ -90,6 +90,8 @@ The agent uses these MCP tools. Each tool works only on the agent's own connecti
 | `delivery_status` | Check the outcome of a send, reaction or owner notice without sending again. |
 | `connection_status`, `connections_list`, `accounts_status` | Show the bot, the destination, the pause state and the next step. |
 | `connection_begin`, `connection_pause`, `connection_disconnect` | Start a pairing, pause or resume, or revoke this agent's connection. |
+
+`message_send` and `owner_notify` show a small Markdown subset formatted in Telegram: inline code, code blocks, bold, italic, strikethrough, http(s) links, headings (shown bold) and bullets. AOT escapes everything else, so other Markdown, such as a table, shows as written. The agent label line always stays plain. If Telegram cannot parse the formatting, AOT sends the plain text instead. Approval requests are never formatted, so a link there always shows its target. In incoming messages, AOT writes code, code blocks and link targets back as Markdown, so the agent still sees them.
 
 Incoming deliveries carry more than text:
 
