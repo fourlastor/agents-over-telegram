@@ -24,6 +24,7 @@ from . import compat
 from .transport import TransportError, UnknownSend
 from .credentials import CredentialError, private_directory
 from . import judge as judge_module
+from . import markdown
 from . import __version__
 
 
@@ -198,6 +199,23 @@ def _attachment(kind, media):
     return item
 
 
+def _send_formatted(send, text, field='text', **params):
+    """Send agent text with its Markdown rendered, or plain when that is not possible.
+
+    Plain text goes out when there is nothing to format, and when Telegram
+    rejects the formatting. That rejection is a 400, so nothing was sent and
+    the second send cannot duplicate the message.
+    """
+    formatted = markdown.agent_html(text)
+    if formatted is not None:
+        try:
+            return send(**{field: formatted}, parse_mode='HTML', **params)
+        except TransportError as exc:
+            if not exc.bad_entities:
+                raise
+    return send(**{field: text}, **params)
+
+
 def _message_content(msg):
     """Return (text, attachments), or (None, []) for an unsupported message.
 
@@ -219,7 +237,10 @@ def _message_content(msg):
         text = '' if attachments else None
     if text is None or len(text) > 4096:
         return None, []
-    return text, attachments
+    # Telegram strips code markers and link targets into entities; put them
+    # back, so the agent reads what the sender meant.
+    entities = msg.get('entities') if isinstance(msg.get('text'), str) else msg.get('caption_entities')
+    return markdown.entities_markdown(text, entities), attachments
 
 
 def _addressed(msg, text, account):
@@ -717,7 +738,8 @@ class Core:
                 if column not in approval_columns:
                     db.execute(f'ALTER TABLE owner_approvals ADD COLUMN {column} INTEGER')
             answer_columns = {row['name'] for row in db.execute('PRAGMA table_info(callback_answers)')}
-            for column in ('receiver_id', 'ephemeral_id'):
+            # edit_format: the edit is an owner_notify notice, so it keeps its Markdown.
+            for column in ('receiver_id', 'ephemeral_id', 'edit_format'):
                 if column not in answer_columns:
                     db.execute(f'ALTER TABLE callback_answers ADD COLUMN {column} INTEGER')
             # When auto-allow added a sender (NULL for an explicit grant), and the
@@ -3424,14 +3446,15 @@ class Core:
                      and _integer(ephemeral_id) and ephemeral_id > 0
                      and _mapping(message.get('receiver_user')).get('id') == sender.get('id'))
 
-        def answer(text, edit=None):
+        def answer(text, edit=None, formatted=False):
             # The private chat id is kept only until the answer goes out, so the
             # message can be edited; _answer_callbacks deletes the row first.
             db.execute('INSERT OR IGNORE INTO callback_answers(callback_id,text,chat_id,message_id,edit_text,created,'
-                       'receiver_id,ephemeral_id) VALUES(?,?,?,?,?,?,?,?)',
+                       'receiver_id,ephemeral_id,edit_format) VALUES(?,?,?,?,?,?,?,?,?)',
                        (callback_id, text, chat.get('id') if private or ephemeral else None,
                         message.get('message_id') if private else None, edit, now,
-                        sender.get('id') if ephemeral else None, ephemeral_id if ephemeral else None))
+                        sender.get('id') if ephemeral else None, ephemeral_id if ephemeral else None,
+                        1 if formatted else None))
 
         if choice is not None and private:
             self._route_choice(db, update_id, choice, sender, message, answer, now)
@@ -3514,11 +3537,12 @@ class Core:
             answer(f'Already answered: {row["choice"]}.')
             return
         if row['choice_expires'] is not None and row['choice_expires'] <= now:
-            answer('This question expired. Reply to the message instead.', row['text'] + '\n\nThe buttons expired.')
+            answer('This question expired. Reply to the message instead.', row['text'] + '\n\nThe buttons expired.',
+                   formatted=True)
             return
         label = labels[index]
         db.execute('UPDATE owner_outbox SET choice=?,updated=? WHERE id=?', (label, now, row['id']))
-        answer(f'Answered: {label}', row['text'] + f'\n\nAnswered: {label}')
+        answer(f'Answered: {label}', row['text'] + f'\n\nAnswered: {label}', formatted=True)
         payload = {'origin': 'telegram', 'kind': 'owner_choice', 'update_id': update_id,
                    'sender': self._owner_sender(sender), 'notify_id': row['id'],
                    'notice_message_id': row['message_id'], 'choice': label, 'choice_index': index,
@@ -3684,7 +3708,13 @@ class Core:
             if row['edit_text'] and row['chat_id'] and row['ephemeral_id'] and row['receiver_id']:
                 _owner_call(calls, 'edit', lambda: self.transport.edit_ephemeral_message_text(
                     row['chat_id'], row['receiver_id'], row['ephemeral_id'], row['edit_text']))
+            elif row['edit_text'] and row['chat_id'] and row['message_id'] and row['edit_format']:
+                # A notice keeps its formatting when its buttons are answered.
+                _owner_call(calls, 'edit', lambda: _send_formatted(
+                    self.transport.edit_message_text, row['edit_text'],
+                    chat_id=row['chat_id'], message_id=row['message_id']))
             elif row['edit_text'] and row['chat_id'] and row['message_id']:
+                # Approval requests stay plain, so a link can never hide its target.
                 _owner_call(calls, 'edit', lambda: self.transport.edit_message_text(
                     row['chat_id'], row['message_id'], row['edit_text']))
             self.record_activity('owner', {'action': 'button_press',
@@ -3873,10 +3903,13 @@ class Core:
                 else:
                     try:
                         if media is None:
-                            response = self.transport.send_message(chat_id=row['chat_id'], text=row['text'], thread_id=row['thread_id'] or None, reply_to=row['reply_to'])
+                            response = _send_formatted(self.transport.send_message, row['text'], chat_id=row['chat_id'],
+                                                       thread_id=row['thread_id'] or None, reply_to=row['reply_to'])
                         else:
                             sender = self.transport.send_photo if media[1] == 'photo' else self.transport.send_document
-                            response = sender(chat_id=row['chat_id'], data=media[0], caption=row['text'], filename=row['image'], mime=media[2], thread_id=row['thread_id'] or None, reply_to=row['reply_to'])
+                            response = _send_formatted(sender, row['text'], field='caption', chat_id=row['chat_id'], data=media[0],
+                                                       filename=row['image'], mime=media[2],
+                                                       thread_id=row['thread_id'] or None, reply_to=row['reply_to'])
                         if not isinstance(response, dict) or not _integer(response.get('message_id')) or response['message_id'] <= 0:
                             raise UnknownSend()
                     except UnknownSend:
@@ -4007,11 +4040,9 @@ class Core:
             try:
                 if message_id is None:
                     markup = _choice_buttons(row['id'], row['choices'])
-                    if markup is None:
-                        response = self.transport.send_message(chat_id=row['owner_id'], text=row['text'], reply_to=row['reply_to'])
-                    else:
-                        response = self.transport.send_message(chat_id=row['owner_id'], text=row['text'],
-                                                               reply_to=row['reply_to'], reply_markup=markup)
+                    extra = {} if markup is None else {'reply_markup': markup}
+                    response = _send_formatted(self.transport.send_message, row['text'], chat_id=row['owner_id'],
+                                               reply_to=row['reply_to'], **extra)
                     if not isinstance(response, dict) or not _integer(response.get('message_id')) or response['message_id'] <= 0:
                         raise UnknownSend()
                     message_id = response['message_id']
