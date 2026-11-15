@@ -1,5 +1,6 @@
 """Isolated setup/profile contracts: no live Telegram or global host configuration."""
 import json
+import shutil
 import os
 from pathlib import Path
 import shlex
@@ -58,7 +59,7 @@ def isolated_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
 
-def test_prepare_only_is_idempotent_does_not_collect_and_writes_no_secrets(tmp_path):
+def test_prepare_only_is_idempotent_does_not_send_and_writes_no_secrets(tmp_path):
     first = prepare(tmp_path)
     private = read_private_json(Path(first['client_file']))
     before = {p: p.read_bytes() for p in Path(first['project_dir']).rglob('*') if p.is_file()}
@@ -66,7 +67,8 @@ def test_prepare_only_is_idempotent_does_not_collect_and_writes_no_secrets(tmp_p
     assert second['client_id'] == first['client_id']
     assert second['pairing'] == first['pairing']
     assert before == {p: p.read_bytes() for p in Path(first['project_dir']).rglob('*') if p.is_file()}
-    assert read_private_json(Path(first['state_dir']) / 'fake-transport.json')['poll_offsets'] == []
+    # The first run never collects; a rerun collects once to finish a posted pairing.
+    assert len(read_private_json(Path(first['state_dir']) / 'fake-transport.json')['poll_offsets']) <= 1
     assert read_private_json(Path(first['state_dir']) / 'fake-transport.json')['sent'] == []
     for payload in [json.dumps(first), *(p.read_text(encoding='utf-8') for p in before)]:
         assert private['client_secret'] not in payload
@@ -217,10 +219,39 @@ def test_profile_client_file_swap_is_rejected(tmp_path, monkeypatch):
         invoke('flush', '--client-file', a['client_file'])
 
 
-def test_wizard_confirms_only_explicit_local_yes_and_reuses_observation(tmp_path, monkeypatch, capsys):
+def test_wizard_connects_the_first_pairing_without_a_second_confirmation(tmp_path, monkeypatch, capsys):
+    result = prepare(tmp_path)
+    monkeypatch.setattr(sys.stdin, 'isatty', lambda: True)
+    asked = []
+
+    def answer():
+        asked.append(True)
+        append_pair(result, sender=456, chat=-200, thread=7)
+        return ''
+    monkeypatch.setattr('builtins.input', answer)
+    accepted = invoke('setup', '--label', 'Alpha', '--project-dir', result['project_dir'])
+    # One prompt: "press Enter after sending it". No yes/no about the destination.
+    assert len(asked) == 1
+    assert accepted['connected']
+    assert accepted['connection']['destination']['owner_id'] == 456
+    assert accepted['connection']['destination']['thread_id'] == 7
+    assert accepted['client_id'] == result['client_id']
+    assert accepted['automatic_delivery'] is False
+    assert 'native Telegram tools are loaded and connected' in accepted['next_step']
+    assert 'Setup does not start a listener' in accepted['next_step']
+    captured = capsys.readouterr().err
+    assert 'Connected:' in captured and '"owner_id": 456' in captured and '"chat_id": -200' in captured
+    assert 'add @' + result['connection']['bot']['username'] in captured
+
+
+def test_wizard_asks_locally_when_someone_else_posts_the_code(tmp_path, monkeypatch, capsys):
+    owner = prepare(tmp_path, 'Owner')
+    append_pair(owner, sender=999, chat=-999)
+    assert prepare(tmp_path, 'Owner')['connected']
     result = prepare(tmp_path)
     monkeypatch.setattr(sys.stdin, 'isatty', lambda: True)
     responses = iter(['', 'no'])
+
     def answer():
         value = next(responses)
         if value == '':
@@ -232,20 +263,21 @@ def test_wizard_confirms_only_explicit_local_yes_and_reuses_observation(tmp_path
     assert 'No destination was confirmed' in declined['next_step']
     captured = capsys.readouterr().err
     assert '"sender_id": 456' in captured and '"chat_id": -200' in captured
-    assert 'add @' + result['connection']['bot']['username'] in captured
     fake_path = Path(result['state_dir']) / 'fake-transport.json'
     polls = read_private_json(fake_path)['poll_offsets']
     monkeypatch.setattr('builtins.input', lambda: 'yes')
     accepted = invoke('setup', '--label', 'Alpha', '--project-dir', result['project_dir'])
-    assert accepted['connected']
-    assert accepted['connection']['destination']['owner_id'] == 456
-    assert accepted['connection']['destination']['thread_id'] == 7
-    assert accepted['client_id'] == result['client_id']
-    assert accepted['automatic_delivery'] is False
-    assert 'native Telegram tools are loaded and connected' in accepted['next_step']
-    assert 'Listen for Telegram in this chat for one hour and reply to my messages.' in accepted['next_step']
-    assert 'Setup does not start a listener' in accepted['next_step']
+    assert accepted['connected'] and accepted['connection']['destination']['owner_id'] == 456
     assert read_private_json(fake_path)['poll_offsets'] == polls
+
+
+def test_prepare_only_rerun_finishes_a_pairing_the_owner_posted(tmp_path):
+    result = prepare(tmp_path)
+    assert not result['connected']
+    append_pair(result, sender=456, chat=-200)
+    finished = prepare(tmp_path)
+    assert finished['connected'] and finished['connection']['destination']['owner_id'] == 456
+    assert '/start' in finished['next_step']
 
 
 def test_cancelling_wizard_keeps_same_client_and_pending_pairing(tmp_path, monkeypatch):
@@ -502,3 +534,88 @@ def test_relay_accepts_codex_config_with_or_without_approvals(tmp_path):
     path.write_text(full[:full.index('\n[mcp_servers.telegram.tools.')] + '\n', encoding='utf-8', newline='\n')
     _, current, proposed = _config_plan(project, entry, approvals=False)
     assert current == proposed
+
+
+def git(project, *args):
+    import subprocess
+    return subprocess.run(['git', '-C', str(project), *args], capture_output=True, text=True, check=True).stdout
+
+
+@pytest.mark.skipif(shutil.which('git') is None, reason='needs git')
+def test_setup_keeps_its_machine_files_out_of_git(tmp_path):
+    project = tmp_path / 'alpha'
+    project.mkdir()
+    git(project, 'init', '-q')
+    result = prepare(tmp_path, project=project)
+    exclude = (project / '.git' / 'info' / 'exclude').read_text(encoding='utf-8')
+    assert '/.aot-profile.json' in exclude and '/.aot-runtime.json' in exclude
+    assert result['git'] == {'repository': True, 'excluded': ['/.aot-profile.json', '/.aot-runtime.json']}
+    # The shared Codex config is not excluded: it may hold other settings.
+    assert git(project, 'status', '--porcelain', '--untracked-files=all').splitlines() == ['?? .codex/config.toml']
+    # A rerun adds nothing twice.
+    prepare(tmp_path, project=project)
+    assert (project / '.git' / 'info' / 'exclude').read_text(encoding='utf-8') == exclude
+
+
+@pytest.mark.skipif(shutil.which('git') is None, reason='needs git')
+def test_setup_warns_when_git_tracks_its_files(tmp_path):
+    project = tmp_path / 'alpha'
+    project.mkdir()
+    git(project, 'init', '-q')
+    prepare(tmp_path, project=project)
+    git(project, 'add', '-f', '.aot-runtime.json', '.codex/config.toml')
+    result = prepare(tmp_path, project=project)
+    assert sorted(Path(path).name for path in result['git']['tracked']) == ['.aot-runtime.json', 'config.toml']
+    assert 'git rm --cached' in result['git']['warning']
+
+
+@pytest.mark.skipif(shutil.which('git') is None, reason='needs git')
+def test_antigravity_plugin_folder_is_excluded_from_a_subfolder_project(tmp_path):
+    repo = tmp_path / 'repo'
+    project = repo / 'sub'
+    project.mkdir(parents=True)
+    git(repo, 'init', '-q')
+    result = invoke('--state-dir', tmp_path / 'state', '--fake', 'setup', '--label', 'Alpha', '--project-dir', project,
+                    '--prepare-only', '--host', 'antigravity')
+    assert '/sub/.agents/plugins/agents-over-telegram-project/' in result['git']['excluded']
+    assert git(repo, 'status', '--porcelain', '--untracked-files=all') == ''
+
+
+def test_setup_outside_git_says_so(tmp_path):
+    assert prepare(tmp_path)['git'] == {'repository': False}
+
+
+def test_setup_moves_the_same_client_to_this_runtime_in_codex_config(tmp_path):
+    result = prepare(tmp_path)
+    config = Path(result['config_file'])
+    text = config.read_text(encoding='utf-8')
+    old = json.dumps(str(compat.own_aot()))
+    config.write_text('# mine\n' + text.replace(old, json.dumps('/old/runtime/bin/aot')), encoding='utf-8')
+    prepare(tmp_path)
+    moved = config.read_text(encoding='utf-8')
+    assert moved.startswith('# mine\n') and '/old/runtime' not in moved
+    assert tomllib.loads(moved)['mcp_servers']['telegram']['command'] == str(compat.own_aot())
+
+
+def test_setup_still_refuses_another_clients_codex_entry(tmp_path):
+    result = prepare(tmp_path)
+    config = Path(result['config_file'])
+    config.write_text(config.read_text(encoding='utf-8').replace(result['client_file'], '/elsewhere/other.json'),
+                      encoding='utf-8')
+    with pytest.raises(Exception, match='project_mcp_config_conflict'):
+        prepare(tmp_path)
+
+
+@pytest.mark.parametrize('host,relative,key', [('pi', '.pi/mcp.json', 'mcpServers'),
+                                               ('amp', '.amp/settings.json', 'amp.mcpServers')])
+def test_setup_moves_the_same_client_to_this_runtime_in_json_config(tmp_path, host, relative, key):
+    project = tmp_path / 'alpha'
+    args = ['--state-dir', tmp_path / 'state', '--fake', 'setup', '--label', 'Alpha', '--project-dir', project,
+            '--prepare-only', '--host', host]
+    invoke(*args)
+    path = project / relative
+    value = json.loads(path.read_text(encoding='utf-8'))
+    value[key]['telegram']['command'] = '/old/runtime/bin/aot'
+    path.write_text(json.dumps(value), encoding='utf-8')
+    invoke(*args)
+    assert json.loads(path.read_text(encoding='utf-8'))[key]['telegram']['command'] == str(compat.own_aot())

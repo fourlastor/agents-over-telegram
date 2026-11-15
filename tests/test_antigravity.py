@@ -40,33 +40,63 @@ def start_waiter(result, session=SESSION):
 
 
 def plugin(result):
-    folder = Path(result['project_dir']) / '.agents' / 'plugins' / 'agents-over-telegram'
-    return {name: json.loads((folder / name).read_text(encoding='utf-8'))
-            for name in ('plugin.json', 'hooks.json', 'mcp_config.json')}
+    folder = Path(result['project_dir']) / '.agents' / 'plugins' / 'agents-over-telegram-project'
+    return {child.name: json.loads(child.read_text(encoding='utf-8')) for child in folder.iterdir()}
 
 
-def test_setup_writes_a_project_plugin_with_hooks_and_the_scoped_server(tmp_path):
+def test_setup_writes_a_project_plugin_with_only_the_scoped_server(tmp_path):
     result = connected(tmp_path, 'antigravity')
     files = plugin(result)
-    assert files['plugin.json']['name'] == 'agents-over-telegram'
+    assert sorted(files) == ['mcp_config.json', 'plugin.json']
+    assert files['plugin.json']['name'] == 'agents-over-telegram-project'
     server = files['mcp_config.json']['mcpServers']['telegram']
     assert server['command'] == str(RUNTIME) and server['args'][-2:] == ['--client-file', result['client_file']]
-    hooks = files['hooks.json']['agents-over-telegram']
-    assert set(hooks) == {'SessionStart', 'PreInvocation', 'Stop'}
     from agents_over_telegram.onboarding import HOST_NEXT_STEPS
-    assert '.agents/plugins/agents-over-telegram' in HOST_NEXT_STEPS['antigravity']
+    assert '.agents/plugins/agents-over-telegram-project' in HOST_NEXT_STEPS['antigravity']
 
 
-def test_the_plugin_hook_command_answers_from_any_folder(tmp_path):
+def test_the_user_plugin_hooks_answer_through_the_launcher(tmp_path):
     result = connected(tmp_path, 'antigravity')
     receive(result)
-    [handler] = plugin(result)['hooks.json']['agents-over-telegram']['PreInvocation']
-    payload = {'hookEventName': 'PreInvocation', 'conversationId': SESSION, 'cwd': str(tmp_path)}
-    # Antigravity runs hooks in the plugin folder through sh -c.
-    done = subprocess.run(['sh', '-c', handler['command']], cwd=tmp_path, input=json.dumps(payload),
+    hooks = json.loads((ROOT / 'hooks.json').read_text(encoding='utf-8'))['agents-over-telegram']
+    assert set(hooks) == {'SessionStart', 'PreInvocation', 'Stop'}
+    [handler] = hooks['PreInvocation']
+    # Antigravity runs plugin hooks in the plugin folder through sh -c; the
+    # agent may work in a subfolder, so the workspace names the project.
+    payload = {'hookEventName': 'PreInvocation', 'conversationId': SESSION,
+               'cwd': str(Path(result['project_dir']) / 'src'), 'workspacePaths': [result['project_dir']]}
+    done = subprocess.run(['sh', '-c', handler['command']], cwd=ROOT, input=json.dumps(payload),
                           capture_output=True, text=True, env=clean_env(), timeout=60)
     assert done.returncode == 0
     assert injected(json.loads(done.stdout)).startswith('[Agents over Telegram] 1 new Telegram message')
+
+
+def test_setup_removes_the_project_hooks_that_0_10_8_wrote(tmp_path):
+    result = connected(tmp_path, 'antigravity')
+    old = Path(result['project_dir']) / '.agents' / 'plugins' / 'agents-over-telegram'
+    old.mkdir()
+    (old / 'plugin.json').write_text(json.dumps({'name': 'agents-over-telegram', 'description':
+                                                 'Written by "aot setup --host antigravity"; run setup again.'}))
+    (old / 'hooks.json').write_text('{}')
+    (old / 'mcp_config.json').write_text('{}')
+    other = Path(result['project_dir']) / '.agents' / 'plugins' / 'other'
+    other.mkdir()
+    (other / 'plugin.json').write_text('{"name": "other"}')
+    from test_hosts import prepare
+    prepare(tmp_path, 'antigravity')
+    assert not old.exists() and other.exists()
+
+
+def test_a_folder_that_only_looks_like_the_old_plugin_is_kept(tmp_path):
+    result = connected(tmp_path, 'antigravity')
+    old = Path(result['project_dir']) / '.agents' / 'plugins' / 'agents-over-telegram'
+    old.mkdir()
+    (old / 'plugin.json').write_text('{"name": "agents-over-telegram", "description": "mine"}')
+    (old / 'hooks.json').write_text('{}')
+    (old / 'mcp_config.json').write_text('{}')
+    from test_hosts import prepare
+    prepare(tmp_path, 'antigravity')
+    assert old.exists()
 
 
 def test_setup_again_updates_the_plugin_and_keeps_other_plugins(tmp_path):
@@ -75,12 +105,26 @@ def test_setup_again_updates_the_plugin_and_keeps_other_plugins(tmp_path):
     other = folder / 'other' / 'plugin.json'
     other.parent.mkdir()
     other.write_text('{"name": "other"}\n', encoding='utf-8')
-    hooks = folder / 'agents-over-telegram' / 'hooks.json'
-    hooks.write_text('{}\n', encoding='utf-8')
+    servers = folder / 'agents-over-telegram-project' / 'mcp_config.json'
+    servers.write_text('{}\n', encoding='utf-8')
     from test_hosts import prepare
     prepare(tmp_path, 'antigravity')
-    assert set(json.loads(hooks.read_text(encoding='utf-8'))['agents-over-telegram']) == {'SessionStart', 'PreInvocation', 'Stop'}
+    assert 'telegram' in json.loads(servers.read_text(encoding='utf-8'))['mcpServers']
     assert other.read_text(encoding='utf-8') == '{"name": "other"}\n'
+
+
+def test_the_repository_is_an_antigravity_plugin_with_the_skills():
+    from agents_over_telegram import __version__
+    manifest = json.loads((ROOT / '.antigravity-plugin' / 'plugin.json').read_text(encoding='utf-8'))
+    assert manifest['name'] == 'agents-over-telegram' and manifest['version'] == __version__
+    # Pi installs the repository through its root package.json.
+    package = json.loads((ROOT / 'package.json').read_text(encoding='utf-8'))
+    assert package['version'] == __version__ and package['pi']['skills'] == ['./skills']
+    assert all((ROOT / path).is_file() for path in package['pi']['extensions'])
+    # Native plugins load hooks.json from the plugin root and nothing else here:
+    # the MCP server comes from each project's own plugin.
+    assert not (ROOT / 'mcp_config.json').exists()
+    assert {path.parent.name for path in (ROOT / 'skills').glob('*/SKILL.md')} == {'telegram-setup', 'telegram-coordinate'}
 
 
 def test_session_start_names_pending_work_and_the_exact_waiter(tmp_path):

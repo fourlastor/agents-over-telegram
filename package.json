@@ -1,0 +1,15 @@
+{
+  "name": "agents-over-telegram",
+  "version": "0.11.0",
+  "private": true,
+  "description": "Coordinate logical agents through one human-owned Telegram bot. Pi package: the push extension and the setup skills.",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/fourlastor/agents-over-telegram",
+  "pi": {
+    "extensions": ["./integrations/pi/agents-over-telegram.ts"],
+    "skills": ["./skills"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

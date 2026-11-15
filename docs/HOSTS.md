@@ -27,13 +27,15 @@ All hosts share the same parts:
 
 ## Set up a project
 
-Register the bot and pair the project once, as described in [local setup](OPERATIONS.md#codex-setup). Choose the host with `--host`:
+Install AOT once for the host (see [install](../README.md#install-aot-for-your-host-once)), then ask the agent to "Connect this agent to Telegram". The `telegram-setup` skill prepares the runtime and runs setup with the host you are in. Run by hand, setup looks like this:
 
 ```sh
-aot setup --label Alpha --project-dir /absolute/path/to/project --host claude
+aot setup --label Alpha --project-dir /absolute/path/to/project --host claude --prepare-only
 ```
 
-`--host` accepts `codex` (the default), `claude`, `pi`, `amp` and `antigravity`. Setup always writes `.aot-profile.json` and `.aot-runtime.json`. It also writes the host's MCP configuration: `.codex/config.toml` for Codex, `.pi/mcp.json` for Pi, `.amp/settings.json` for Amp and a project plugin for Antigravity. Claude Code gets its MCP server from the plugin. Setup keeps unrelated settings and refuses to replace a different `telegram` entry. You can run setup again with another `--host` to use the same project from a second host.
+`--host` accepts `codex` (the default), `claude`, `pi`, `amp` and `antigravity`. Setup always writes `.aot-profile.json` and `.aot-runtime.json`. It also writes the host's MCP configuration: `.codex/config.toml` for Codex, `.pi/mcp.json` for Pi, `.amp/settings.json` for Amp and a project plugin with the MCP server for Antigravity. Claude Code gets its MCP server from the plugin. Setup keeps unrelated settings. It refuses to replace another client's `telegram` entry, but it moves this project's own entry to the runtime that runs setup, for example after an update. You can run setup again with another `--host` to use the same project from a second host.
+
+Setup adds the files AOT owns to the repository's local `.git/info/exclude`: `.aot-profile.json`, `.aot-runtime.json` and the Antigravity project plugin. They hold this machine's paths and the client id, not secrets, and other clones cannot use them. A shared settings file such as `.codex/config.toml` may hold the project's other settings, so setup does not exclude it. The result's `git` field lists what it excluded and warns when git already tracks one of these files.
 
 ### Claude Code
 
@@ -97,22 +99,23 @@ Setup also approves four tools of the project's scoped `telegram` server in `.co
 
 ### Pi
 
-1. Run setup with `--host pi`. It writes `.pi/mcp.json` with `exposure: direct`, so the tools appear as `telegram/messages_poll` and so on.
-2. Load the extension. For one run: `pi -e /path/to/agents-over-telegram/integrations/pi/agents-over-telegram.ts`. To keep it for the project: `pi install /path/to/agents-over-telegram/integrations/pi -l`.
+1. Install once for your user: `pi install git:github.com/fourlastor/agents-over-telegram`. The repository's root `package.json` names the push extension and the skills.
+2. In the project, ask "Connect this agent to Telegram". Setup writes `.pi/mcp.json` with `exposure: direct`, so the tools appear as `telegram/messages_poll` and so on.
 3. Start Pi in the project folder and trust the project when Pi asks. Pi ignores `.pi/mcp.json` in untrusted projects.
 
 ### Amp
 
-1. Run setup with `--host amp`. It writes `amp.mcpServers.telegram` to `.amp/settings.json`.
-2. Approve the workspace server once: `amp mcp approve telegram`.
-3. Copy or link `integrations/amp/agents-over-telegram.ts` into the project's `.amp/plugins/` folder. Amp loads project plugins from there. Reload with the command palette action `plugins: reload`, or restart Amp.
+1. Install once for your user: `amp plugins add https://raw.githubusercontent.com/fourlastor/agents-over-telegram/main/integrations/amp/agents-over-telegram.ts` (the plugin, in `~/.config/amp/plugins`) and `amp skill add fourlastor/agents-over-telegram/skills --global` (the skills). Amp copies only the skill folders, so the setup skill fetches the bootstrap script into `~/.local/share/agents-over-telegram/source` when it needs it.
+2. In the project, ask "Connect this agent to Telegram". Setup writes `amp.mcpServers.telegram` to `.amp/settings.json`.
+3. Approve the workspace server once: `amp mcp approve telegram`. The plugin starts only in a workspace that was set up when Amp started, so reload with the command palette action `plugins: reload`, or restart Amp.
 
 ### Antigravity
 
-Antigravity is Google's agent host: the `agy` CLI and the Antigravity desktop app run the same agent, and both load plugins from a project's `.agents/plugins/` folder.
+Antigravity is Google's agent host: the `agy` CLI and the Antigravity desktop app run the same agent and share their plugins.
 
-1. Run setup with `--host antigravity`. It writes a small plugin to `.agents/plugins/agents-over-telegram/`: `plugin.json`, `hooks.json` and `mcp_config.json`. The hooks and the MCP server name this project's runtime and client directly, like the Codex, Pi and Amp entries. The folder belongs to AOT: running setup again replaces its three files, for example after an update, and leaves other plugins alone.
-2. Open the exact project folder in Antigravity and trust it when Antigravity asks. Ask "Telegram status".
+1. Install once for your user: `git clone --depth 1 https://github.com/fourlastor/agents-over-telegram ~/.local/share/agents-over-telegram/source && agy plugin install ~/.local/share/agents-over-telegram/source`. The repository root is an Antigravity plugin through `.antigravity-plugin/plugin.json`: it brings the skills and the hooks in `hooks.json`. Its hooks run `scripts/aot_host_launch.py`, which reads the project's `.aot-runtime.json` and stays silent in projects without AOT. To update, pull the clone and run `agy plugin install` again.
+2. In the project, ask "Connect this agent to Telegram". Setup writes a small project plugin to `.agents/plugins/agents-over-telegram-project/` with only `plugin.json` and `mcp_config.json`. A plugin installed for the user cannot tell its MCP server which project it serves, so the project carries its own `telegram` server, naming this project's runtime and client like the Codex, Pi and Amp entries. Version 0.10.8 wrote the hooks into the project as well, as `.agents/plugins/agents-over-telegram/`; setup removes that folder when it is exactly the one 0.10.8 wrote, so the hooks do not run twice.
+3. Open the exact project folder in Antigravity and trust it when Antigravity asks. Ask "Telegram status".
 
 **How an idle agent wakes up.** Antigravity hooks cannot run in the background, and a `Stop` hook that waits blocks the session: anything the user types waits until the hook returns. Antigravity does wake an idle agent when a **background command** the agent started finishes, and it shows the agent that command's output. AOT uses this:
 

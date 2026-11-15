@@ -929,18 +929,40 @@ class Core:
         now = self.clock()
         with self._tx() as db:
             row = db.execute('SELECT * FROM pairings WHERE id=?', (pairing_id,)).fetchone()
+            if row is not None and row['consumed'] and row['sender_id'] is not None and db.execute(
+                    'SELECT 1 FROM bindings WHERE client_id=? AND chat_id=? AND thread_id=? AND owner_id=? AND connected=1',
+                    (row['client_id'], row['chat_id'], row['thread_id'], row['sender_id'])).fetchone():
+                # It already connected when its owner posted it.
+                return self.connection_status(row['client_id'])
             if row is None or row['consumed'] or row['expires'] <= now:
                 raise CoreError('pairing_unavailable')
             self._client(db, row['client_id'])
             if row['sender_id'] is None:
                 raise CoreError('pairing_not_observed')
-            if db.execute('SELECT 1 FROM bindings WHERE connected=1 AND (client_id=? OR (chat_id=? AND thread_id=?))', (row['client_id'], row['chat_id'], row['thread_id'])).fetchone():
-                raise CoreError('destination_already_bound')
-            # New connections accept media: a refused photo is easy to miss.
-            db.execute('INSERT INTO bindings(client_id,chat_id,thread_id,owner_id,title,created,accept_media) VALUES(?,?,?,?,?,?,1)', (row['client_id'], row['chat_id'], row['thread_id'], row['sender_id'], row['title'], now))
-            db.execute('INSERT INTO allowed_senders(client_id,sender_id,is_bot) VALUES(?,?,0)', (row['client_id'], row['sender_id']))
-            db.execute('UPDATE pairings SET consumed=1 WHERE id=?', (pairing_id,))
+            self._bind_pairing(db, row, now)
         return self.connection_status(row['client_id'])
+
+    def _bind_pairing(self, db, row, now):
+        """Connect an observed pairing; raises before writing when the destination is taken."""
+        if db.execute('SELECT 1 FROM bindings WHERE connected=1 AND (client_id=? OR (chat_id=? AND thread_id=?))', (row['client_id'], row['chat_id'], row['thread_id'])).fetchone():
+            raise CoreError('destination_already_bound')
+        # New connections accept media: a refused photo is easy to miss.
+        db.execute('INSERT INTO bindings(client_id,chat_id,thread_id,owner_id,title,created,accept_media) VALUES(?,?,?,?,?,?,1)', (row['client_id'], row['chat_id'], row['thread_id'], row['sender_id'], row['title'], now))
+        db.execute('INSERT INTO allowed_senders(client_id,sender_id,is_bot) VALUES(?,?,0)', (row['client_id'], row['sender_id']))
+        db.execute('UPDATE pairings SET consumed=1 WHERE id=?', (row['id'],))
+
+    def _pairing_trusted(self, db, sender_id):
+        """Whether a pairing posted by this person connects without a local confirmation.
+
+        The pairing code is single-use, expires after ten minutes and is shown
+        only on this machine. When the bot already has connections, only one of
+        their owners may complete a pairing by posting it; a code that leaked to
+        someone else stays pending, and the local pair-confirm decides. A bot
+        with no connection yet has no owner to compare with, so the first post
+        connects and the setup result shows where.
+        """
+        owners = {row['owner_id'] for row in db.execute('SELECT DISTINCT owner_id FROM bindings WHERE connected=1')}
+        return not owners or sender_id in owners
 
     def allow_sender(self, client_id, sender_id, is_bot=False):
         if not _integer(sender_id) or sender_id <= 0 or not isinstance(is_bot, bool):
@@ -1299,10 +1321,12 @@ class Core:
                     message = "Connect this agent to a Telegram group or topic using the owner's existing shared bot."
                 elif pairing['sender_id'] is None:
                     state, action = 'pair_pending', 'send_pairing_command'
-                    message = 'Send the pairing command from connection setup in the chosen Telegram group or topic.'
+                    message = ('Send the pairing command from connection setup in the chosen Telegram group or topic. '
+                               'It connects as soon as AOT collects it, when the bot has no owner yet or its owner sends it.')
                 else:
                     state, action = 'pair_pending', 'confirm_pairing'
-                    message = 'Review the observed sender, group and topic locally, then confirm pairing.'
+                    message = ('Someone who does not own this bot\'s connections sent the pairing command, or its '
+                               'destination is taken. Review the observed sender, group and topic locally, then confirm pairing.')
             elif row['suspended']:
                 state, action = 'suspended', 'review_connection'
                 if row['suspended'].startswith('group_migrated:'):
@@ -1640,7 +1664,16 @@ class Core:
         command = re.fullmatch(r'/pair@([A-Za-z0-9_]+) ([A-F0-9]{12})', command_text)
         if command and command.group(1).lower() == account['username'].lower():
             if not sender['is_bot'] and kind == 'message':
-                db.execute('UPDATE pairings SET sender_id=?,chat_id=?,thread_id=?,title=?,observed=? WHERE code_hash=? AND consumed=0 AND expires>? AND sender_id IS NULL', (sender_id, chat_id, thread_id, _bounded(chat.get('title', ''), 128), now, _digest(command.group(2)), now))
+                code = _digest(command.group(2))
+                observed = db.execute('UPDATE pairings SET sender_id=?,chat_id=?,thread_id=?,title=?,observed=? WHERE code_hash=? AND consumed=0 AND expires>? AND sender_id IS NULL', (sender_id, chat_id, thread_id, _bounded(chat.get('title', ''), 128), now, code, now)).rowcount
+                if observed and self._pairing_trusted(db, sender_id):
+                    row = db.execute('SELECT * FROM pairings WHERE code_hash=? AND consumed=0', (code,)).fetchone()
+                    try:
+                        self._bind_pairing(db, row, now)
+                    except CoreError:
+                        # The destination is taken: the pairing stays observed,
+                        # and pair-confirm reports why it cannot connect.
+                        pass
             return
         binding = db.execute('SELECT b.* FROM bindings b JOIN clients c ON c.id=b.client_id WHERE b.chat_id=? AND b.thread_id=? AND b.connected=1 AND c.active=1', (chat_id, thread_id)).fetchone()
         if binding is None:
