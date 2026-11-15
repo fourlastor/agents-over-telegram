@@ -331,3 +331,143 @@ def test_only_the_owner_can_close(panel):
     core.collect()
     assert transport.deleted == []
     assert rows(core, 'SELECT count(*) FROM settings_panels')[0][0] == 1
+
+
+# The button menu, sent when Telegram refuses the widget.
+
+@pytest.fixture
+def menu(env):
+    core, transport, clock = env
+    client, credentials = bind(core, transport)
+    transport.outcomes.append('widget_refused')
+    sent = core.send_settings_panel(client)
+    return core, transport, clock, client, sent
+
+
+def press(transport, message_id, data, sender=OWNER, chat=None, chat_type='private'):
+    number = max((u['update_id'] for u in transport.updates), default=0) + 1
+    transport.updates.append({'update_id': number, 'callback_query': {
+        'id': f'cb{number}', 'from': {'id': sender, 'is_bot': False}, 'data': settings_panel.MENU_PREFIX + data,
+        'message': {'message_id': message_id, 'chat': {'id': sender if chat is None else chat, 'type': chat_type}}}})
+    return f'cb{number}'
+
+
+def buttons(markup):
+    return [button for row in markup['inline_keyboard'] for button in row]
+
+
+def toast(transport, callback_id):
+    return next(a['text'] for a in transport.callback_answers if a['id'] == callback_id)
+
+
+def test_a_refused_widget_falls_back_to_a_button_menu(menu):
+    core, transport, clock, client, sent = menu
+    assert sent['kind'] == 'menu' and not transport.widgets
+    message = transport.sent[-1]
+    assert message['chat']['id'] == OWNER and message['message_id'] == sent['message_id']
+    assert 'Settings for Alpha in Test group' in message['text'] and settings_panel.MENU_NOTE in message['text']
+    labels = [b['text'] for b in buttons(message['reply_markup'])]
+    assert 'Deliver: All' in labels and 'Media: On' in labels and 'Auto-allow: Off' in labels and labels[-1] == 'Close'
+    # Every button fits Telegram's 64-byte callback data.
+    assert all(len(b['callback_data'].encode()) <= 64 for b in buttons(message['reply_markup']))
+    assert rows(core, 'SELECT owner_id,message_id FROM settings_panels') == [(OWNER, sent['message_id'])]
+
+
+def test_a_menu_tap_saves_the_next_value_and_redraws_the_menu(menu):
+    core, transport, clock, client, sent = menu
+    callback = press(transport, sent['message_id'], f's:{k(client)}:0:1')  # Deliver: Addressed
+    core.collect()
+    assert core.delivery_settings(client)['delivery_filter'] == 'addressed'
+    assert toast(transport, callback) == 'Saved.'
+    edit = transport.edits[-1]
+    assert edit['chat_id'] == OWNER and edit['message_id'] == sent['message_id']
+    assert 'Deliver: Addressed' in [b['text'] for b in buttons(edit['reply_markup'])]
+    assert rows(core, 'SELECT count(*) FROM callback_answers')[0][0] == 0
+
+
+@pytest.mark.parametrize('setting', sorted(settings_panel.WARNINGS))
+def test_menu_settings_that_warn_need_confirm(menu, setting):
+    core, transport, clock, client, sent = menu
+    index = [name for name, *_ in settings_panel.SETTINGS].index(setting)
+    press(transport, sent['message_id'], f's:{k(client)}:{index}:1')
+    core.collect()
+    assert core.delivery_settings(client)[setting] is False
+    edit = transport.edits[-1]
+    assert settings_panel.WARNINGS[setting] in edit['text']
+    confirm = next(b for b in buttons(edit['reply_markup']) if b['text'].startswith('Turn on'))
+    assert confirm['callback_data'] == f'{settings_panel.MENU_PREFIX}c:{k(client)}:{index}:1'
+    press(transport, sent['message_id'], f'c:{k(client)}:{index}:1')
+    core.collect()
+    assert core.delivery_settings(client)[setting] is True
+
+
+def test_the_menu_picks_between_the_owners_agents(menu):
+    core, transport, clock, client, sent = menu
+    other, _ = bind(core, transport, 'Beta', -200)
+    press(transport, sent['message_id'], f'v:{k(other)}')
+    core.collect()
+    edit = transport.edits[-1]
+    assert 'Settings for Beta' in edit['text']
+    labels = [b['text'] for b in buttons(edit['reply_markup'])]
+    assert '• Beta' in labels and 'Alpha' in labels
+
+
+@pytest.mark.parametrize('case', ['stranger', 'group', 'old_menu', 'bad_data'])
+def test_menu_presses_that_are_not_the_owners_change_nothing(menu, case):
+    core, transport, clock, client, sent = menu
+    data = f's:{k(client)}:0:1'
+    if case == 'stranger':
+        callback = press(transport, sent['message_id'], data, sender=202)
+    elif case == 'group':
+        callback = press(transport, sent['message_id'], data, chat=-100, chat_type='supergroup')
+    elif case == 'old_menu':
+        callback = press(transport, sent['message_id'] - 1, data)
+    else:
+        callback = press(transport, sent['message_id'], f's:{k(client)}:0:9')
+    core.collect()
+    assert core.delivery_settings(client)['delivery_filter'] == 'all'
+    assert toast(transport, callback) in ('This menu is out of date. Send /settings for a new one.', 'Unknown request.')
+
+
+def test_close_deletes_the_menu_and_retires_it(menu):
+    core, transport, clock, client, sent = menu
+    press(transport, sent['message_id'], 'x')
+    core.collect()
+    assert transport.deleted[-1] == {'chat_id': OWNER, 'message_id': sent['message_id']}
+    assert rows(core, 'SELECT count(*) FROM settings_panels')[0][0] == 0
+    callback = press(transport, sent['message_id'], f's:{k(client)}:0:1')
+    core.collect()
+    assert toast(transport, callback) == 'This menu is out of date. Send /settings for a new one.'
+
+
+def test_the_settings_command_sends_the_menu_when_widgets_are_refused(env):
+    core, transport, clock = env
+    client, _ = bind(core, transport)
+    transport.outcomes.append('widget_refused')
+    number = max(u['update_id'] for u in transport.updates) + 1
+    transport.updates.append({'update_id': number, 'message': {
+        'message_id': number, 'chat': {'id': OWNER, 'type': 'private'},
+        'from': {'id': OWNER, 'is_bot': False}, 'text': '/settings'}})
+    core.collect()
+    assert 'Settings for Alpha' in transport.sent[-1]['text']
+    assert core.activity()[-2]['outcome'] == 'sent'
+
+
+@pytest.mark.parametrize('data', ['v', 'cancel'])
+def test_a_tap_that_changes_nothing_skips_the_edit(menu, data):
+    core, transport, clock, client, sent = menu
+    if data == 'cancel':
+        # Cancel on the warning redraws the menu once; a second Cancel changes nothing.
+        press(transport, sent['message_id'], f's:{k(client)}:8:1')
+        core.collect()
+        press(transport, sent['message_id'], f'v:{k(client)}')
+        core.collect()
+    edits = len(transport.edits)
+    callback = press(transport, sent['message_id'], f'v:{k(client)}')
+    core.collect()
+    assert len(transport.edits) == edits and toast(transport, callback) == ''
+    assert 'edit_error' not in core.activity()[-1]
+    # A real change still redraws.
+    press(transport, sent['message_id'], f's:{k(client)}:0:1')
+    core.collect()
+    assert len(transport.edits) == edits + 1

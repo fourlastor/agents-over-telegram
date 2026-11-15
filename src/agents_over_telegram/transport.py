@@ -198,12 +198,14 @@ class TelegramTransport:
         return self._call("editMessageWidgetData", {"chat_id": chat_id, "message_id": message_id,
                                                     "chat_data": chat_data}, timeout=OWNER_ANSWER_TIMEOUT)
 
-    def edit_message_text(self, chat_id, message_id, text, parse_mode=None):
+    def edit_message_text(self, chat_id, message_id, text, parse_mode=None, reply_markup=None):
         # Without reply_markup, Telegram removes the message's inline buttons.
         params = {"chat_id": chat_id, "message_id": message_id, "text": text,
                   "link_preview_options": {"is_disabled": True}}
         if parse_mode is not None:
             params["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            params["reply_markup"] = reply_markup
         return self._call("editMessageText", params)
 
     def edit_ephemeral_message_text(self, chat_id, receiver_user_id, ephemeral_message_id, text):
@@ -435,7 +437,7 @@ class FakeTransport:
             self.callback_answers.append({"id": callback_query_id, "text": text})
             return True
 
-    def edit_message_text(self, chat_id, message_id, text, parse_mode=None):
+    def edit_message_text(self, chat_id, message_id, text, parse_mode=None, reply_markup=None):
         with self._lock:
             outcome = self._outcome(parse_mode) if self.outcomes and self.outcomes[0] == "bad_entities" else None
             if isinstance(outcome, BaseException):
@@ -443,6 +445,8 @@ class FakeTransport:
             edit = {"chat_id": chat_id, "message_id": message_id, "text": text}
             if parse_mode is not None:
                 edit["parse_mode"] = parse_mode
+            if reply_markup is not None:
+                edit["reply_markup"] = copy.deepcopy(reply_markup)
             self.edits.append(edit)
             return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
 
@@ -461,6 +465,9 @@ class FakeTransport:
             outcome = self.outcomes.pop(0) if self.outcomes else "sent"
             if outcome == "reject":
                 raise TransportError(403)
+            if outcome == "widget_refused":
+                # Telegram's INPUT_MEDIA_WIDGET_NOT_ALLOWED for bots it doesn't let send widgets.
+                raise TransportError(400)
             message = {"message_id": len(self.sent) + 1, "chat": {"id": chat_id},
                        "widget": {"html": html, "chat_data": chat_data, "allow_queries": allow_queries}}
             self.sent.append(message)
@@ -619,9 +626,12 @@ class FileFakeTransport:
             data.setdefault("callback_answers", []).append({"id": callback_query_id, "text": text})
         return True
 
-    def edit_message_text(self, chat_id, message_id, text, parse_mode=None):
+    def edit_message_text(self, chat_id, message_id, text, parse_mode=None, reply_markup=None):
         with self._data() as data:
-            data.setdefault("edits", []).append({"chat_id": chat_id, "message_id": message_id, "text": text})
+            edit = {"chat_id": chat_id, "message_id": message_id, "text": text}
+            if reply_markup is not None:
+                edit["reply_markup"] = reply_markup
+            data.setdefault("edits", []).append(edit)
         return {"message_id": message_id, "chat": {"id": chat_id}, "text": text}
 
     def delete_message(self, chat_id, message_id):
@@ -639,10 +649,12 @@ class FileFakeTransport:
             outcome = data["outcomes"].pop(0) if data["outcomes"] else "sent"
             result = {"message_id": len(data["sent"]) + 1, "chat": {"id": chat_id},
                       "widget": {"html": html, "chat_data": chat_data, "allow_queries": allow_queries}}
-            if outcome != "reject":
+            if outcome not in ("reject", "widget_refused"):
                 data["sent"].append(result)
         if outcome == "reject":
             raise TransportError(403)
+        if outcome == "widget_refused":
+            raise TransportError(400)
         if outcome == "unknown":
             raise UnknownSend()
         return result

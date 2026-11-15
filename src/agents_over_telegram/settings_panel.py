@@ -103,6 +103,64 @@ def parse(data):
     return match.group(1), match.group(2), name, options[j]
 
 
+# The button menu: the same settings as an ordinary message with inline
+# buttons, sent when Telegram refuses the widget (since November 2026 it
+# refuses widgets from most bots). Each button's data is a widget request
+# behind this prefix, so the bot checks it exactly like a widget request.
+MENU_PREFIX = 'aot:p:'
+MENU_NOTE = 'Telegram has turned off settings panels for bots for now, so these are buttons instead.'
+
+
+def _button(text, request):
+    return {'text': text, 'callback_data': MENU_PREFIX + request}
+
+
+def menu(connections, client_id, settings, confirm=None):
+    """(text, reply_markup) for the button menu of one selected connection.
+
+    A tap on a setting moves it to its next value. ``confirm`` is the
+    (setting index, value index) of a change that warns: the menu then shows
+    the warning with Confirm and Cancel instead of the settings.
+    """
+    listed = connections[:MAX_CONNECTIONS]
+    selected = next(c for c in listed if c['client_id'] == client_id)
+    k = key(client_id)
+    lines = [f"Settings for {_line(selected['label'], 40)} in {_line(selected['title'], 60)}"]
+    rows = []
+    if len(listed) > 1:
+        pickers = [_button(('• ' if c['client_id'] == client_id else '') + _line(c['label'], 20),
+                           f"v:{key(c['client_id'])}") for c in listed]
+        rows += [pickers[n:n + 2] for n in range(0, len(pickers), 2)]
+    if confirm is not None:
+        i, j = confirm
+        name, label = SETTINGS[i][0], SETTINGS[i][1]
+        lines += ['', WARNINGS[name], '', f'Turn on {label}?']
+        rows.append([_button(f'Turn on {label}', f'c:{k}:{i}:{j}'), _button('Cancel', f'v:{k}')])
+    else:
+        lines += ['Tap a setting to switch it to its next value.', '', MENU_NOTE]
+        current = values(settings)
+        for _, indexes in SECTIONS:
+            for i in indexes:
+                name, label, options, shown = SETTINGS[i]
+                now = current[i]
+                if now >= 0:
+                    value = shown[now]
+                elif name == 'wake_interval' and isinstance(settings.get(name), int):
+                    value = f'{settings[name]}s'
+                else:
+                    value = str(settings.get(name))
+                rows.append([_button(f'{label}: {value}', f's:{k}:{i}:{(now + 1) % len(options)}')])
+    rows.append([_button('Close', 'x')])
+    return '\n'.join(lines), {'inline_keyboard': rows}
+
+
+def parse_menu(data):
+    """parse() for a menu button's data, or None when it is not a menu button."""
+    if not isinstance(data, str) or not data.startswith(MENU_PREFIX):
+        return None
+    return parse(data[len(MENU_PREFIX):])
+
+
 # The widget only draws its state and sends requests; the bot decides.
 HTML = '''<style>
 body{margin:0;padding:8px 10px 10px;font-size:13px}
