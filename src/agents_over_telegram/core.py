@@ -742,6 +742,12 @@ class Core:
             for column in ('receiver_id', 'ephemeral_id', 'edit_format'):
                 if column not in answer_columns:
                     db.execute(f'ALTER TABLE callback_answers ADD COLUMN {column} INTEGER')
+            # A settings menu press edits the menu with new buttons (edit_markup,
+            # JSON) or deletes it (remove).
+            if 'edit_markup' not in answer_columns:
+                db.execute('ALTER TABLE callback_answers ADD COLUMN edit_markup TEXT')
+            if 'remove' not in answer_columns:
+                db.execute('ALTER TABLE callback_answers ADD COLUMN remove INTEGER')
             # When auto-allow added a sender (NULL for an explicit grant), and the
             # username it saw then, so status can show who joined this way.
             sender_columns = {row['name'] for row in db.execute('PRAGMA table_info(allowed_senders)')}
@@ -3446,16 +3452,21 @@ class Core:
                      and _integer(ephemeral_id) and ephemeral_id > 0
                      and _mapping(message.get('receiver_user')).get('id') == sender.get('id'))
 
-        def answer(text, edit=None, formatted=False):
+        def answer(text, edit=None, formatted=False, markup=None, remove=False):
             # The private chat id is kept only until the answer goes out, so the
             # message can be edited; _answer_callbacks deletes the row first.
             db.execute('INSERT OR IGNORE INTO callback_answers(callback_id,text,chat_id,message_id,edit_text,created,'
-                       'receiver_id,ephemeral_id,edit_format) VALUES(?,?,?,?,?,?,?,?,?)',
+                       'receiver_id,ephemeral_id,edit_format,edit_markup,remove) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                        (callback_id, text, chat.get('id') if private or ephemeral else None,
                         message.get('message_id') if private else None, edit, now,
                         sender.get('id') if ephemeral else None, ephemeral_id if ephemeral else None,
-                        1 if formatted else None))
+                        1 if formatted else None,
+                        json.dumps(markup, separators=(',', ':'), ensure_ascii=False) if markup else None,
+                        1 if remove else None))
 
+        if isinstance(data, str) and data.startswith('aot:p:'):
+            self._route_menu_press(db, update_id, data, sender, message, private, answer, now)
+            return
         if choice is not None and private:
             self._route_choice(db, update_id, choice, sender, message, answer, now)
             return
@@ -3603,24 +3614,83 @@ class Core:
             selected = next((c for c in connections if c['client_id'] == client_id), connections[0] if connections else None)
             if selected is None:
                 raise CoreError('not_connected')
-            chat_data = settings_panel.state(connections, selected['client_id'], self._delivery_settings_view(selected))
+            settings = self._delivery_settings_view(selected)
+            chat_data = settings_panel.state(connections, selected['client_id'], settings)
             username = self._account(db)['username']
+
+        def refused(error):
+            if error.code == 403:
+                return CoreError('owner_chat_not_started', details={'bot_username': username})
+            if isinstance(error.code, int) and 400 <= error.code < 500:
+                return CoreError('telegram_rejected')
+            return CoreError('uncertain_send')
+
+        kind = 'widget'
         try:
             response = self.transport.send_widget(owner_id, settings_panel.html(), chat_data=chat_data,
                                                   allow_queries=True)
         except TransportError as error:
-            if error.code == 403:
-                raise CoreError('owner_chat_not_started', details={'bot_username': username}) from None
-            if isinstance(error.code, int) and 400 <= error.code < 500:
-                raise CoreError('telegram_rejected') from None
-            raise CoreError('uncertain_send') from None
+            if error.code != 400:
+                raise refused(error) from None
+            # Telegram refuses widgets from most bots since November 2026
+            # (INPUT_MEDIA_WIDGET_NOT_ALLOWED). The button menu does the same
+            # job; the widget is tried first every time, so it comes back on
+            # its own once Telegram allows it again.
+            kind = 'menu'
+            text, markup = settings_panel.menu(connections, selected['client_id'], settings)
+            try:
+                response = self.transport.send_message(owner_id, text, reply_markup=markup)
+            except TransportError as error:
+                raise refused(error) from None
         if not isinstance(response, dict) or not _integer(response.get('message_id')):
             raise CoreError('uncertain_send')
         with self._tx() as db:
             db.execute('INSERT INTO settings_panels(owner_id,message_id,created) VALUES(?,?,?) '
                        'ON CONFLICT(owner_id) DO UPDATE SET message_id=excluded.message_id,created=excluded.created',
                        (owner_id, response['message_id'], self.clock()))
-        return {'status': 'sent', 'message_id': response['message_id'], 'connections': len(connections)}
+        return {'status': 'sent', 'kind': kind, 'message_id': response['message_id'], 'connections': len(connections)}
+
+    def _route_menu_press(self, db, update_id, data, sender, message, private, answer, now):
+        """A tap on the settings button menu; the same checks as a widget request.
+
+        Only the owner, in their private chat, on the latest menu or panel AOT
+        sent them, for a connection they still own, can change a setting, and
+        only to one of the listed values. Settings that warn need the Confirm
+        button the first tap shows.
+        """
+        from . import settings_panel
+        panel = db.execute('SELECT 1 FROM settings_panels WHERE owner_id=? AND message_id=?',
+                           (sender.get('id'), message.get('message_id'))).fetchone() if private else None
+        if panel is None:
+            self._unmatched(db, update_id, None, 'private_chat' if private else 'unsupported_update', now)
+            answer('This menu is out of date. Send /settings for a new one.')
+            return
+        request = settings_panel.parse_menu(data)
+        if request is None:
+            answer('Unknown request.')
+            return
+        if request[0] == 'x':
+            # Closing retires the menu and deletes its message.
+            db.execute('DELETE FROM settings_panels WHERE owner_id=?', (sender.get('id'),))
+            answer('Closed.', remove=True)
+            return
+        connections = self._owner_connections(db, sender.get('id'))[:settings_panel.MAX_CONNECTIONS]
+        target = next((c for c in connections if settings_panel.key(c['client_id']) == request[1]), None)
+        if target is None:
+            answer('This agent is no longer connected to you.')
+            return
+        kind, _, name, value = request
+        confirm, toast = None, ''
+        if kind != 'v':
+            index = next(i for i, setting in enumerate(settings_panel.SETTINGS) if setting[0] == name)
+            if value is True and name in settings_panel.WARNINGS and kind != 'c':
+                confirm, toast = (index, settings_panel.SETTINGS[index][2].index(value)), 'Confirm below.'
+            else:
+                self._write_delivery_settings(db, target['client_id'], {name: value})
+                toast = 'Saved.'
+        settings = self._delivery_settings_view(self._binding(db, target['client_id']))
+        text, markup = settings_panel.menu(connections, target['client_id'], settings, confirm)
+        answer(toast, edit=text, markup=markup)
 
     def _route_widget_query(self, db, update_id, query, now):
         """One request from a settings panel; only the owner's latest panel changes their own connections."""
@@ -3705,7 +3775,13 @@ class Core:
                     continue
             calls = {}
             _owner_call(calls, 'answer', lambda: self.transport.answer_callback_query(row['callback_id'], row['text']))
-            if row['edit_text'] and row['chat_id'] and row['ephemeral_id'] and row['receiver_id']:
+            if row['remove'] and row['chat_id'] and row['message_id']:
+                _owner_call(calls, 'delete', lambda: self.transport.delete_message(row['chat_id'], row['message_id']))
+            elif row['edit_markup'] and row['edit_text'] and row['chat_id'] and row['message_id']:
+                # A settings menu keeps its buttons, redrawn with the new values.
+                _owner_call(calls, 'edit', lambda: self.transport.edit_message_text(
+                    row['chat_id'], row['message_id'], row['edit_text'], reply_markup=json.loads(row['edit_markup'])))
+            elif row['edit_text'] and row['chat_id'] and row['ephemeral_id'] and row['receiver_id']:
                 _owner_call(calls, 'edit', lambda: self.transport.edit_ephemeral_message_text(
                     row['chat_id'], row['receiver_id'], row['ephemeral_id'], row['edit_text']))
             elif row['edit_text'] and row['chat_id'] and row['message_id'] and row['edit_format']:

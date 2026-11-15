@@ -249,6 +249,13 @@ The owner can change their agents' settings from a panel in their private chat w
 - **Close** deletes the panel message and retires the panel. Send /settings for a new one.
 - Bot-wide send limits and conversation budget grants aren't in the panel.
 
+**Button menu.** Since about November 13, 2026, Telegram refuses widgets from ordinary bots (`INPUT_MEDIA_WIDGET_NOT_ALLOWED`) and has given no date for lifting that. When the widget is refused, /settings and `settings-panel` send the same settings as an ordinary message with buttons instead, and the result says `kind: "menu"`. AOT tries the widget first every time, so the panel comes back by itself once Telegram allows it again.
+
+- With more than one agent, the top rows pick the agent; the selected one is marked with •.
+- Each setting is one button showing its current value. A tap switches it to the next value, saves it at once and redraws the menu. A value set from the terminal that isn't one of the presets shows as it is, and the next tap moves it to the first preset.
+- Turning on a setting with a warning first shows the warning with **Turn on** and **Cancel**.
+- **Close** deletes the menu. The same rules as for the panel apply: only the owner's taps on their latest menu or panel, in their private chat, for agents they own at that moment.
+
 For an external bot already present in the same bound destination, the owner can configure its addressed command convention. This prefixes normal publications in that destination; it does not choose another Telegram chat or grant the external sender access:
 
 ```sh
