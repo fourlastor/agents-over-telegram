@@ -192,10 +192,11 @@ def test_stop_asks_again_after_the_waiter_ran_for_the_same_prompt(tmp_path):
 
 def test_waiter_prints_the_notice_and_how_to_restart_it(tmp_path):
     result = connected(tmp_path, 'antigravity')
+    # Waiting work is announced at once. Collecting from the test while the
+    # waiter also collects made this test time out on a slow CI runner.
+    receive(result, 'secret message body')
     waiter = start_waiter(result)
     try:
-        wait_for_owner(result, SESSION, waiter)
-        receive(result, 'secret message body')
         out, err = waiter.communicate(timeout=60)
     finally:
         if waiter.poll() is None:
