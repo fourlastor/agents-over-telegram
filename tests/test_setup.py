@@ -590,18 +590,23 @@ def test_setup_moves_the_same_client_to_this_runtime_in_codex_config(tmp_path):
     config = Path(result['config_file'])
     text = config.read_text(encoding='utf-8')
     old = json.dumps(str(compat.own_aot()))
-    config.write_text('# mine\n' + text.replace(old, json.dumps('/old/runtime/bin/aot')), encoding='utf-8')
+    # An absolute path on every platform: a POSIX-style path has no drive on Windows.
+    retired = str(tmp_path / 'old-runtime' / 'aot')
+    config.write_text('# mine\n' + text.replace(old, json.dumps(retired)), encoding='utf-8')
     prepare(tmp_path)
     moved = config.read_text(encoding='utf-8')
-    assert moved.startswith('# mine\n') and '/old/runtime' not in moved
+    assert moved.startswith('# mine\n') and 'old-runtime' not in moved
     assert tomllib.loads(moved)['mcp_servers']['telegram']['command'] == str(compat.own_aot())
 
 
 def test_setup_still_refuses_another_clients_codex_entry(tmp_path):
     result = prepare(tmp_path)
     config = Path(result['config_file'])
-    config.write_text(config.read_text(encoding='utf-8').replace(result['client_file'], '/elsewhere/other.json'),
-                      encoding='utf-8')
+    # TOML stores the path escaped, as JSON does (backslashes on Windows).
+    other = json.dumps(str(tmp_path / 'elsewhere' / 'other.json'))
+    text = config.read_text(encoding='utf-8')
+    assert json.dumps(result['client_file']) in text
+    config.write_text(text.replace(json.dumps(result['client_file']), other), encoding='utf-8')
     with pytest.raises(Exception, match='project_mcp_config_conflict'):
         prepare(tmp_path)
 
@@ -615,7 +620,7 @@ def test_setup_moves_the_same_client_to_this_runtime_in_json_config(tmp_path, ho
     invoke(*args)
     path = project / relative
     value = json.loads(path.read_text(encoding='utf-8'))
-    value[key]['telegram']['command'] = '/old/runtime/bin/aot'
+    value[key]['telegram']['command'] = str(tmp_path / 'old-runtime' / 'aot')
     path.write_text(json.dumps(value), encoding='utf-8')
     invoke(*args)
     assert json.loads(path.read_text(encoding='utf-8'))[key]['telegram']['command'] == str(compat.own_aot())
