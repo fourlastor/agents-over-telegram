@@ -199,6 +199,11 @@ def _attachment(kind, media):
     return item
 
 
+def _menu_digest(text, markup):
+    """A short digest of what a settings button menu shows."""
+    return _digest(json.dumps([text, markup], separators=(',', ':'), sort_keys=True, ensure_ascii=False))
+
+
 def _send_formatted(send, text, field='text', **params):
     """Send agent text with its Markdown rendered, or plain when that is not possible.
 
@@ -725,6 +730,10 @@ class Core:
                 db.execute('DROP TABLE settings_panels')
                 db.execute('CREATE TABLE settings_panels (owner_id INTEGER PRIMARY KEY, '
                            'message_id INTEGER NOT NULL, created REAL NOT NULL)')
+            # A digest of what a button menu shows now, so a tap that would
+            # redraw the same menu skips the edit Telegram would refuse.
+            if 'shown' not in {row['name'] for row in db.execute('PRAGMA table_info(settings_panels)')}:
+                db.execute('ALTER TABLE settings_panels ADD COLUMN shown TEXT')
             if 'keep_alive' not in binding_columns:
                 db.execute('ALTER TABLE bindings ADD COLUMN keep_alive INTEGER NOT NULL DEFAULT 0')
             # Where owner approvals are asked: the owner's private chat (the
@@ -3625,7 +3634,7 @@ class Core:
                 return CoreError('telegram_rejected')
             return CoreError('uncertain_send')
 
-        kind = 'widget'
+        kind, shown = 'widget', None
         try:
             response = self.transport.send_widget(owner_id, settings_panel.html(), chat_data=chat_data,
                                                   allow_queries=True)
@@ -3638,6 +3647,7 @@ class Core:
             # its own once Telegram allows it again.
             kind = 'menu'
             text, markup = settings_panel.menu(connections, selected['client_id'], settings)
+            shown = _menu_digest(text, markup)
             try:
                 response = self.transport.send_message(owner_id, text, reply_markup=markup)
             except TransportError as error:
@@ -3645,9 +3655,9 @@ class Core:
         if not isinstance(response, dict) or not _integer(response.get('message_id')):
             raise CoreError('uncertain_send')
         with self._tx() as db:
-            db.execute('INSERT INTO settings_panels(owner_id,message_id,created) VALUES(?,?,?) '
-                       'ON CONFLICT(owner_id) DO UPDATE SET message_id=excluded.message_id,created=excluded.created',
-                       (owner_id, response['message_id'], self.clock()))
+            db.execute('INSERT INTO settings_panels(owner_id,message_id,created,shown) VALUES(?,?,?,?) '
+                       'ON CONFLICT(owner_id) DO UPDATE SET message_id=excluded.message_id,created=excluded.created,'
+                       'shown=excluded.shown', (owner_id, response['message_id'], self.clock(), shown))
         return {'status': 'sent', 'kind': kind, 'message_id': response['message_id'], 'connections': len(connections)}
 
     def _route_menu_press(self, db, update_id, data, sender, message, private, answer, now):
@@ -3659,7 +3669,7 @@ class Core:
         button the first tap shows.
         """
         from . import settings_panel
-        panel = db.execute('SELECT 1 FROM settings_panels WHERE owner_id=? AND message_id=?',
+        panel = db.execute('SELECT shown FROM settings_panels WHERE owner_id=? AND message_id=?',
                            (sender.get('id'), message.get('message_id'))).fetchone() if private else None
         if panel is None:
             self._unmatched(db, update_id, None, 'private_chat' if private else 'unsupported_update', now)
@@ -3690,6 +3700,13 @@ class Core:
                 toast = 'Saved.'
         settings = self._delivery_settings_view(self._binding(db, target['client_id']))
         text, markup = settings_panel.menu(connections, target['client_id'], settings, confirm)
+        shown = _menu_digest(text, markup)
+        if shown == panel['shown']:
+            # Telegram refuses an edit that changes nothing ("message is not
+            # modified"), for example a tap on the agent already selected.
+            answer(toast)
+            return
+        db.execute('UPDATE settings_panels SET shown=? WHERE owner_id=?', (shown, sender.get('id')))
         answer(toast, edit=text, markup=markup)
 
     def _route_widget_query(self, db, update_id, query, now):

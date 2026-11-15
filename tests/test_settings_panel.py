@@ -451,3 +451,23 @@ def test_the_settings_command_sends_the_menu_when_widgets_are_refused(env):
     core.collect()
     assert 'Settings for Alpha' in transport.sent[-1]['text']
     assert core.activity()[-2]['outcome'] == 'sent'
+
+
+@pytest.mark.parametrize('data', ['v', 'cancel'])
+def test_a_tap_that_changes_nothing_skips_the_edit(menu, data):
+    core, transport, clock, client, sent = menu
+    if data == 'cancel':
+        # Cancel on the warning redraws the menu once; a second Cancel changes nothing.
+        press(transport, sent['message_id'], f's:{k(client)}:8:1')
+        core.collect()
+        press(transport, sent['message_id'], f'v:{k(client)}')
+        core.collect()
+    edits = len(transport.edits)
+    callback = press(transport, sent['message_id'], f'v:{k(client)}')
+    core.collect()
+    assert len(transport.edits) == edits and toast(transport, callback) == ''
+    assert 'edit_error' not in core.activity()[-1]
+    # A real change still redraws.
+    press(transport, sent['message_id'], f's:{k(client)}:0:1')
+    core.collect()
+    assert len(transport.edits) == edits + 1
