@@ -119,7 +119,7 @@ Antigravity is Google's agent host: the `agy` CLI and the Antigravity desktop ap
 - The `SessionStart` hook gives the agent the exact waiter command for this session: `aot wake --host antigravity --project-dir <project> --session <conversation id>`. The agent starts it as a background task.
 - The waiter collects from Telegram and waits. When a message arrives, it prints the usual notice, plus the same command to start it again, and exits. Antigravity wakes the agent, which handles the message and starts the waiter again.
 - When the agent ends a turn and no waiter is running for its session, the `Stop` hook asks it once to start one. Antigravity 1.5.9 never sets `continuationActive` in the `Stop` hook input, so AOT guards the loop itself: it asks again only after a new prompt from the user, or after a waiter has run since the last request.
-- The waiter has no time limit. It stops when its host shell is gone or a newer waiter for the same session takes over. When `.aot-runtime.json` names a new runtime, the waiter continues in that runtime without waking the agent.
+- The waiter has no time limit. It stops when its host shell is gone or a newer waiter for the same session takes over. When `.aot-runtime.json` names a new runtime, the waiter continues in that runtime without waking the agent. On Windows, where `execv` starts a new process and the old one exits, Antigravity wakes the agent once with no output after such an update.
 
 The agent must start the waiter itself, because hooks cannot start a tool call (`injectSteps` rejects `toolCall`). The waiter command needs the user's normal approval for terminal commands, unless the user allows it. A sandboxed terminal (`agy --sandbox`) must allow the waiter to reach the AOT state folder and Telegram, or the relay socket.
 
@@ -196,7 +196,7 @@ The Claude Code and Amp interactive rows come from a final run of the hosts at t
 
 ### Antigravity checks
 
-On 2026-11-15, these checks ran on macOS with `agy` 1.5.9, model Gemini 3.8 Flash (Low), and the fake Telegram transport. `scripts/e2e_fake.py prepare --host antigravity` set up each project, so the plugin was the one setup writes.
+On 2026-11-15, these checks ran on macOS with the fake Telegram transport. The CLI checks used `agy` 1.5.9 with Gemini 3.8 Flash (Low). `scripts/e2e_fake.py prepare --host antigravity` set up each project, so the plugin was the one setup writes.
 
 | Scenario | Result |
 |---|---|
@@ -204,8 +204,7 @@ On 2026-11-15, these checks ran on macOS with `agy` 1.5.9, model Gemini 3.8 Flas
 | Interactive `agy`: a background `sleep 25` command started by the agent, the agent idle, then a typed prompt | Pass. The typed prompt was answered at once, and the agent woke by itself when the command ended. This is the behaviour the waiter relies on. |
 | Interactive `agy` with a `Stop` hook that waits 25 seconds | The session stayed open, but a prompt typed meanwhile waited until the hook returned. So AOT does not wait in a hook. |
 | `agy -p` with a `Stop` hook that always returns `continue` | The agent looped until the run was stopped: `continuationActive` stayed `false`. So AOT guards the loop itself (see [Antigravity](#antigravity)). |
-
-The Antigravity desktop app was not tested yet. Its built-in documentation describes the same `.agents/plugins/<name>/` folder, `hooks.json` and `mcp_config.json`, and its agent reports `fullyIdle` for background tasks in the same way, but no session ran there.
+| Antigravity desktop app 2.32.1, project opened with Create Project, model Gemini 4 Carbon (Medium); one message waiting at start, a second injected after the agent had started the waiter | Pass. The app loaded the project plugin by itself: its `SessionStart` hook ran, and the agent used the plugin's MCP tools. It answered the first message and started the waiter. The waiter woke it for the second message, which it answered 20 seconds after it arrived and acknowledged (zero pending). Archiving the conversation stopped the waiter. |
 
 ### Claude Code desktop app
 
