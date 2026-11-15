@@ -174,7 +174,7 @@ def parser():
                               help="Install the always-on collector (aot serve) as a login service; ask the human first")
     serve_choice.add_argument("--no-serve", action="store_true",
                               help="Do not install the always-on collector, and do not ask")
-    setup.add_argument("--host", choices=["codex", "claude", "pi", "amp", "grok-bot"], default="codex",
+    setup.add_argument("--host", choices=["codex", "claude", "pi", "amp", "antigravity", "grok-bot"], default="codex",
                        help="Agent host to prepare; codex writes .codex/config.toml, plugin hosts use the runtime pointer, "
                             "grok-bot prints the custom connector to add in Grok Bot")
     register = sub.add_parser("account-register", help="Prompt privately for one bot token, validate without polling")
@@ -363,16 +363,18 @@ def parser():
     desktop.add_argument("--duration", type=float, default=55, help="Listening seconds; 0 continues until explicitly stopped")
     desktop.add_argument("--collect", action="store_true", help="Also collect Telegram updates; never flush or acknowledge work")
     hook = sub.add_parser("hook", help="Answer one Claude Code or Codex hook event from stdin; never sends or acknowledges")
-    hook.add_argument("--host", choices=["claude", "codex"], required=True)
+    hook.add_argument("--host", choices=["claude", "codex", "antigravity"], required=True)
     hook.add_argument("--project-dir", type=Path, help="Exact project directory; defaults to the host's project or cwd")
     hook.add_argument("--collect-interval", type=float, default=0,
                       help="Also collect Telegram updates when the last attempt is older than this many seconds (0 = never)")
-    wake = sub.add_parser("wake", help="Claude Code asyncRewake hook: wait for new deliveries, then exit 2 to wake the session")
-    wake.add_argument("--host", choices=["claude"], required=True)
+    wake = sub.add_parser("wake", help="Wait for new deliveries, then wake the session: exit 2 for a Claude Code "
+                                       "asyncRewake hook, or print the notice and exit for an Antigravity background command")
+    wake.add_argument("--host", choices=["claude", "antigravity"], required=True)
     wake.add_argument("--project-dir", type=Path, help="Exact project directory; defaults to the host's project or cwd")
     wake.add_argument("--session", default="", help="Host session id; one waiter runs per client and session")
     wake.add_argument("--host-pid", type=int, help="Host process; the waiter stops when it is gone")
-    wake.add_argument("--duration", type=float, default=82800, help="Seconds to wait before exiting quietly")
+    wake.add_argument("--duration", type=float, default=None,
+                      help="Seconds to wait before exiting quietly (Claude Code: 82800; Antigravity: 0, no limit)")
     sub.add_parser("demo", help="Run a standalone temporary two-agent offline demonstration")
     return p
 

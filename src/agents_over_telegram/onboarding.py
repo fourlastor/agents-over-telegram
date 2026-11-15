@@ -42,6 +42,11 @@ HOST_NEXT_STEPS = {
         'Configure the Agents over Telegram Amp integration for this project (see docs/HOSTS.md), start Amp in this '
         'exact folder and ask "Telegram status".'
     ),
+    'antigravity': (
+        'Setup wrote an Antigravity plugin to .agents/plugins/agents-over-telegram in this folder. Open this exact '
+        'folder in Antigravity (the agy CLI or the desktop app), trust it, and ask "Telegram status". The plugin '
+        'hooks add notices, and the agent keeps a background waiter running that wakes it when a message arrives.'
+    ),
     'grok-bot': (
         'In Grok Bot, add a custom connector of type Command with the command and arguments under "connector" in '
         'this result (Connect apps, or ask the Bot to add it), then ask "Telegram status". For wakeups, create a '
@@ -280,12 +285,17 @@ def setup(args):
     host = getattr(args, 'host', None) or 'codex'
     if host not in HOST_NEXT_STEPS:
         raise CredentialError('unsupported_host')
+    plugin_plan = []
     if host == 'codex':
         expected = _entry(state, client, fake)
         config_path, old_config, new_config = _config_plan(project, expected)
     elif host in ('pi', 'amp'):
         from .host_config import json_config_plan
         config_path, old_config, new_config = json_config_plan(project, host, _entry(state, client, fake))
+    elif host == 'antigravity':
+        from .host_config import antigravity_plugin_plan
+        plugin_plan = antigravity_plugin_plan(project, _entry(state, client, fake))
+        config_path = old_config = new_config = None
     else:
         # The Claude Code plugin starts the runtime through the project runtime pointer.
         _check_directory(project)
@@ -340,6 +350,8 @@ def setup(args):
     _write_local(project / PROFILE_NAME, json.dumps(new_profile, indent=2) + '\n', old_profile)
     if config_path is not None:
         _write_local(config_path, new_config, old_config)
+    for path, old_text, new_text in plugin_plan:
+        _write_local(path, new_text, old_text)
     _write_local(pointer_path, new_pointer, old_pointer)
     from . import serve
     collector = None
@@ -353,7 +365,8 @@ def setup(args):
     status = core.connection_status(client_id)
     next_setup = _next_setup(args, state, fake, project, client)
     result = {'project_dir': str(project), 'profile_file': str(project / PROFILE_NAME),
-              'config_file': str(config_path) if config_path is not None else None,
+              'config_file': str(config_path) if config_path is not None else
+                  (str(plugin_plan[0][0].parent) if plugin_plan else None),
               'runtime_pointer': str(pointer_path), 'host': host,
               'client_id': client_id, 'label': args.label,
               'mode': new_profile['mode'], 'state_dir': str(state), 'client_file': str(client), 'connected': status['connected'],

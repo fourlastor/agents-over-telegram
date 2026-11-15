@@ -57,3 +57,45 @@ def json_config_plan(project: Path, host: str, entry: dict):
     proposed = dict(current)
     proposed[key] = {**servers, SERVER: expected}
     return path, raw, json.dumps(proposed, indent=2) + '\n'
+
+
+# Antigravity (the agy CLI and the desktop app) loads a plugin from the
+# project's .agents/plugins/<name>/ folder: its hooks.json and mcp_config.json.
+# Setup writes a small plugin there that names this project's runtime and
+# client directly, like the Codex, Pi and Amp entries. The folder belongs to
+# AOT, so a rerun of setup replaces the three files, for example after an update.
+ANTIGRAVITY_PLUGIN = Path('.agents') / 'plugins' / 'agents-over-telegram'
+ANTIGRAVITY_EVENTS = ('SessionStart', 'PreInvocation', 'Stop')
+
+
+def antigravity_plugin_files(project: Path, entry: dict) -> dict:
+    """The plugin's files, relative path -> text."""
+    import shlex
+    hook = ' '.join(shlex.quote(part) for part in
+                    [entry['command'], 'hook', '--host', 'antigravity', '--project-dir', str(project)])
+    manifest = {'name': 'agents-over-telegram', 'displayName': 'Agents over Telegram',
+                'description': 'Telegram inbox, replies and wake-ups for this project. Written by "aot setup '
+                               '--host antigravity"; run setup again to update it.',
+                'homepage': 'https://github.com/fourlastor/agents-over-telegram', 'license': 'Apache-2.0'}
+    hooks = {'agents-over-telegram': {event: [{'type': 'command', 'command': hook, 'timeout': 20}]
+                                      for event in ANTIGRAVITY_EVENTS}}
+    servers = {'mcpServers': {SERVER: expected_entry('antigravity', entry)}}
+    dump = lambda value: json.dumps(value, indent=2) + '\n'
+    return {ANTIGRAVITY_PLUGIN / 'plugin.json': dump(manifest), ANTIGRAVITY_PLUGIN / 'hooks.json': dump(hooks),
+            ANTIGRAVITY_PLUGIN / 'mcp_config.json': dump(servers)}
+
+
+def antigravity_plugin_plan(project: Path, entry: dict):
+    """Return [(path, current_text, proposed_text)] without writing anything."""
+    from .onboarding import _check_directory, _read_local
+    _check_directory(project)
+    folder = project
+    for part in ANTIGRAVITY_PLUGIN.parts:
+        folder = folder / part
+        _check_directory(folder)
+    plan = []
+    for relative, text in antigravity_plugin_files(project, entry).items():
+        path = project / relative
+        current = _read_local(path) if path.exists() or path.is_symlink() else None
+        plan.append((path, current, text))
+    return plan

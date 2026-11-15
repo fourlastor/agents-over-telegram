@@ -91,6 +91,8 @@ def hook_answer(args, raw: str) -> dict | None:
     payload = json.loads(raw) if raw.strip() else {}
     if not isinstance(payload, dict):
         return None
+    if args.host == 'antigravity':
+        return antigravity_answer(args, payload)
     event = payload.get('hook_event_name')
     if not isinstance(event, str):
         return None
@@ -116,6 +118,136 @@ def hook_answer(args, raw: str) -> dict | None:
 
 
 _NO_RELAY = object()
+
+
+# Antigravity (the agy CLI and the desktop app) runs plugin hooks with its own
+# event names and output. Each event is answered like the Claude Code event
+# with the same job: PreInvocation runs before every model call, so it
+# announces only new deliveries, like PostToolUse.
+ANTIGRAVITY_EVENTS = {'SessionStart': 'SessionStart', 'PreInvocation': 'PostToolUse', 'Stop': 'Stop'}
+ANTIGRAVITY_ASKS = 'antigravity-asks'
+_SESSION_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_')
+
+
+def _session_id(value) -> str | None:
+    if isinstance(value, str) and 0 < len(value) <= 128 and set(value) <= _SESSION_CHARS:
+        return value
+    return None
+
+
+def waiter_command(project: Path, session: str) -> str:
+    """The exact background command that keeps an idle Antigravity agent listening."""
+    import shlex
+    parts = [str(compat.own_aot()), 'wake', '--host', 'antigravity', '--project-dir', str(project),
+             '--session', session]
+    return ' '.join(shlex.quote(part) for part in parts)
+
+
+def waiter_instruction(project: Path, session: str) -> str:
+    return ('[Agents over Telegram] To hear new Telegram messages while this agent is idle, start this '
+            'command now as a background task: use run_command with WaitMsBeforeAsync 500, do not wait for it, '
+            'and do not change it: ' + waiter_command(project, session) + ' . It prints a notice and exits '
+            'when a message arrives. Then continue with your work, or end your turn if there is nothing else to do.')
+
+
+def _waiter_running(state: Path, key: str) -> bool:
+    """True when a waiter for this client and session holds its lock."""
+    path = state / 'wake-locks' / f'{key}.lock'
+    try:
+        fd = os.open(path, os.O_RDWR | compat.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        compat.lock(fd)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
+def _prompt_hash(payload: dict) -> str:
+    import hashlib
+    prompt = payload.get('lastUserInput')
+    return hashlib.sha256(prompt.encode('utf-8', 'replace')).hexdigest() if isinstance(prompt, str) else ''
+
+
+def _record_ask(state: Path, key: str, payload: dict) -> None:
+    asks = state / ANTIGRAVITY_ASKS
+    asks.mkdir(mode=0o700, exist_ok=True)
+    _write_owner(asks / key, json.dumps({'at': time.time(), 'prompt': _prompt_hash(payload)}))
+
+
+def _may_ask(state: Path, key: str, payload: dict) -> bool:
+    """Whether a Stop hook may ask again for the waiter, without looping.
+
+    Antigravity 1.5.9 never sets continuationActive, so a Stop hook that keeps
+    answering "continue" runs the agent forever. Ask once, then again only
+    after a new user prompt or after a waiter started (and has since ended).
+    """
+    path = state / ANTIGRAVITY_ASKS / key
+    prompt = _prompt_hash(payload)
+    try:
+        previous = json.loads(path.read_text(encoding='utf-8'))
+        asked, asked_prompt = float(previous['at']), previous['prompt']
+    except (OSError, ValueError, TypeError, KeyError):
+        asked, asked_prompt = None, None
+    if asked is not None and asked_prompt == prompt:
+        try:
+            started = (state / 'wake-locks' / f'{key}.owner').stat().st_mtime
+        except OSError:
+            started = 0
+        if started <= asked:
+            return False
+    return True
+
+
+def antigravity_answer(args, payload: dict) -> dict | None:
+    """Answer one Antigravity hook event in its own output format."""
+    from .onboarding import read_profile
+    event = payload.get('hookEventName')
+    mapped = ANTIGRAVITY_EVENTS.get(event) if isinstance(event, str) else None
+    if mapped is None:
+        return None
+    project = _hook_project(args, payload).resolve()
+    profile = read_profile(project)
+    if profile is None:
+        return None
+    state = Path(profile['state_dir'])
+    if not state.is_dir():
+        return None
+    answer = _inbox_answer(args, state, profile, mapped, {'hook_event_name': mapped})
+    notice = None
+    if isinstance(answer, dict):
+        notice = answer.get('reason') or (answer.get('hookSpecificOutput') or {}).get('additionalContext')
+    notices = [notice] if isinstance(notice, str) and notice else []
+    session = _session_id(payload.get('conversationId'))
+    key = wake_key(profile['client_id'], session) if session else None
+    if key and event in ('SessionStart', 'Stop') and not _waiter_running(state, key):
+        # SessionStart always names the waiter; Stop only within the loop guard.
+        if event == 'SessionStart' or _may_ask(state, key, payload):
+            _record_ask(state, key, payload)
+            notices.append(waiter_instruction(project, session))
+    if not notices:
+        return None
+    text = '\n'.join(notices)
+    if event == 'Stop':
+        return {'decision': 'continue', 'reason': text}
+    return {'injectSteps': [{'systemMessage': {'systemMessage': text}}]}
+
+
+def _inbox_answer(args, state: Path, profile: dict, event: str, payload: dict):
+    """The Claude Code shaped hook answer from the relay, or from this process."""
+    from .cli import _client
+    from .core import Core
+    from .push import hook_response
+    answer = _relayed_hook(state, Path(profile['client_file']), event, payload)
+    if answer is _NO_RELAY:
+        core = Core(state, _NoTransport(), recover_sends=False)
+        client_id = _client(core, Path(profile['client_file']), profile['client_id'])
+        _maybe_collect(core, state, profile['mode'] == 'fake', getattr(args, 'collect_interval', 0))
+        answer = hook_response(core, client_id, event, payload)
+    return answer
 # The hook input fields hook_response reads; the rest (prompts, tool output)
 # never leaves this process.
 _HOOK_FIELDS = ('tool_name', 'stop_hook_active')
@@ -180,6 +312,8 @@ REFRESH_NOTICE = ('[Agents over Telegram] No new Telegram messages. The backgrou
 # Claude Code stops the hook at its timeout (86400 seconds in claude/hooks.json).
 # End a little earlier so the waiter exits on its own terms.
 WAKE_DURATION = 82800
+ANTIGRAVITY_RESTART = ('After you handle them, start the same background command again so this agent keeps '
+                       'listening: {command}')
 
 
 def _write_owner(path: Path, token: str) -> None:
@@ -319,6 +453,18 @@ def _wake(args, log=None) -> int:
     profile = read_profile(project)
     if profile is None:
         return 0
+    antigravity = args.host == 'antigravity'
+    if antigravity:
+        if not _session_id(args.session):
+            return 0
+        # This waiter is the agent's own background command, with no launcher
+        # above it: it follows runtime updates itself (see the end).
+        os.environ['AOT_FOLLOW_RUNTIME'] = '1'
+    duration = args.duration
+    if duration is None:
+        # Claude Code stops the hook at its timeout; an Antigravity background
+        # command has none, so it waits until a message or its host is gone.
+        duration = 0 if antigravity else WAKE_DURATION
     state = Path(profile['state_dir'])
     if not state.is_dir():
         return 0
@@ -403,14 +549,29 @@ def _wake(args, log=None) -> int:
             raise _Woken()
 
     try:
-        result = watch(core, client_id, emit, collect=True, duration=args.duration, keep_running=keep_running,
+        result = watch(core, client_id, emit, collect=True, duration=duration, keep_running=keep_running,
                        remote=remote)
     except _Woken:
+        if antigravity:
+            # Antigravity wakes the agent when this background command ends
+            # and shows it the output, so the notice goes to stdout.
+            sys.stdout.write(notices[0] + ' ' + ANTIGRAVITY_RESTART.format(command=waiter_command(project, args.session))
+                             + '\n')
+            sys.stdout.flush()
+            return done(0, 'woken')
         from .push import with_shell_fallback
-        # The asyncRewake waiter runs only for Claude Code.
         sys.stderr.write(with_shell_fallback(notices[0]) + '\n')
         sys.stderr.flush()
         return done(WAKE_EXIT, 'woken')
+    if moved and antigravity:
+        # No launcher sits above this waiter: carry on in the new runtime, so
+        # the agent keeps listening without being woken for nothing.
+        done(0, 'runtime_moved')
+        new = read_runtime_pointer(project)
+        if new is not None:
+            sys.stdout.flush()
+            os.execv(str(new), [str(new)] + sys.argv[1:])
+        return 0
     if moved:
         return done(RUNTIME_MOVED_EXIT)
     # A new waiter starts only when a turn ends. Without this, a session idle

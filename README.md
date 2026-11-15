@@ -4,7 +4,7 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.10.7 supports **Codex**, **Claude Code**, **Pi** and **Amp**, and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.10.8 supports **Codex**, **Claude Code**, **Pi**, **Amp** and **Antigravity**, and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
 | Host | Integration | Push delivery |
 |---|---|---|
@@ -12,8 +12,9 @@ Version 0.10.7 supports **Codex**, **Claude Code**, **Pi** and **Amp**, and, unt
 | Codex | Codex plugin (skills and hooks) | The optional `relay-desktop` listener wakes idle desktop chats. Hooks reach busy turns. |
 | Pi | Pi extension and `.pi/mcp.json` | The extension starts a turn or steers a busy agent. |
 | Amp | Amp plugin and `.amp/settings.json` | The plugin appends a steering message and opens a thread if needed. |
+| Antigravity | Project plugin in `.agents/plugins/`, written by setup (CLI and desktop app) | A background waiter command wakes the idle agent when it exits. Hooks reach busy turns. |
 
-Setup takes `--host claude|codex|pi|amp`. [Agent hosts](docs/HOSTS.md) has the setup steps for each host and lists exactly what was tested. Most host checks used real host processes with a fake Telegram transport, not live Telegram. That page says which checks used live Telegram.
+Setup takes `--host claude|codex|pi|amp|antigravity`. [Agent hosts](docs/HOSTS.md) has the setup steps for each host and lists exactly what was tested. Most host checks used real host processes with a fake Telegram transport, not live Telegram. That page says which checks used live Telegram.
 
 ## Before you start
 
