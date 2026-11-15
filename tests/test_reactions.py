@@ -415,6 +415,10 @@ def test_reaction_history_covers_context_and_deliveries(env):
 def test_admin_capability_is_tracked_and_reported(env):
     core, transport, clock = env
     client = bind(core, transport)
+    # The pairing connected during a collection, which already probed; start
+    # from an unprobed connection.
+    with sqlite3.connect(core.database) as db:
+        db.execute('UPDATE bindings SET bot_admin=NULL,bot_admin_probed=NULL')
     status = core.connection_status(client)
     assert status['reactions']['receive']['available'] is None
     assert status['reactions']['wake'] == 'own_messages'

@@ -82,15 +82,21 @@ def test_unpaired_status_explains_shared_bot_and_on_demand_delivery(environment)
 
 def test_pairing_status_explains_send_then_private_confirmation_without_collecting(environment):
     core, transport, _ = environment
+    # The bot already has an owner, and someone else posts this code, so the
+    # pairing waits for a local decision.
+    owner = core.create_client('Owner')['client_id']
+    append(transport, core.connection_begin(owner)['command'], sender=555, chat=-555)
+    core.collect()
     client = core.create_client('Alpha')['client_id']
     pairing = core.connection_begin(client)
     append(transport, pairing['command'])
     before = snapshot(core)
+    polls = list(transport.poll_offsets)
     unobserved = core.connection_status(client)
     assert unobserved['state'] == 'pair_pending'
     assert unobserved['next_action']['code'] == 'send_pairing_command'
     assert unobserved['pairing']['sender_id'] is None
-    assert transport.poll_offsets == []
+    assert transport.poll_offsets == polls
     assert snapshot(core) == before
     core.collect()
     observed = core.connection_status(client)

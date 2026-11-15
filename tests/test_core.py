@@ -102,24 +102,61 @@ def test_account_once_many_clients_private_hashes(env):
     assert core.database.stat().st_mode & 0o777 == 0o600
 
 
-def test_pairing_requires_observed_human_and_local_confirmation(env):
+def test_a_first_pairing_connects_when_a_human_posts_the_code(env):
     core, transport, clock = env
     client = core.create_client('Alpha')['client_id']
     pairing = core.connection_begin(client)
     with pytest.raises(CoreError, match='pairing_not_observed'):
         core.confirm_pairing(pairing['pairing_id'])
+    # A bot, or a command for another bot, never pairs.
     append(transport, pairing['command'], sender=202, bot=True)
     append(transport, pairing['command'].replace('@aot_test_bot', '@other_bot'), sender=202)
     core.collect()
     assert core.pairing_status(pairing['pairing_id'])['sender_id'] is None
+    # The bot has no connection yet, so the first human post connects at once;
+    # a later post of the same single-use code changes nothing.
     append(transport, pairing['command'], sender=101, topic=7)
     append(transport, pairing['command'], sender=999, chat=-200)
     core.collect()
-    observed = core.pairing_status(pairing['pairing_id'])
-    assert (observed['sender_id'], observed['chat_id'], observed['thread_id']) == (101, -100, 7)
-    assert core.connection_status(client)['connected'] is False
+    status = core.connection_status(client)
+    assert status['connected'] is True and status['destination']['owner_id'] == 101
+    assert (status['destination']['chat_id'], status['destination']['thread_id']) == (-100, 7)
+    # A local confirmation of a pairing that already connected reports the connection.
     assert core.confirm_pairing(pairing['pairing_id'])['destination']['owner_id'] == 101
-    with pytest.raises(CoreError, match='pairing_unavailable'):
+
+
+def test_later_pairings_connect_only_for_an_existing_owner(env):
+    core, transport, clock = env
+    first = core.create_client('Alpha')['client_id']
+    append(transport, core.connection_begin(first)['command'], sender=101)
+    core.collect()
+    assert core.connection_status(first)['connected'] is True
+    # Someone else posts a leaked code: it stays pending for a local decision.
+    second = core.create_client('Beta')['client_id']
+    leaked = core.connection_begin(second)
+    append(transport, leaked['command'], sender=999, chat=-200)
+    core.collect()
+    assert core.connection_status(second)['connected'] is False
+    assert core.pairing_status(leaked['pairing_id'])['sender_id'] == 999
+    assert core.confirm_pairing(leaked['pairing_id'])['destination']['owner_id'] == 999
+    # The owner of an existing connection pairs without any local step.
+    third = core.create_client('Gamma')['client_id']
+    append(transport, core.connection_begin(third)['command'], sender=101, chat=-300)
+    core.collect()
+    assert core.connection_status(third)['connected'] is True
+
+
+def test_a_pairing_for_a_taken_destination_stays_pending(env):
+    core, transport, clock = env
+    first = core.create_client('Alpha')['client_id']
+    append(transport, core.connection_begin(first)['command'], sender=101)
+    core.collect()
+    second = core.create_client('Beta')['client_id']
+    pairing = core.connection_begin(second)
+    append(transport, pairing['command'], sender=101)
+    core.collect()
+    assert core.connection_status(second)['connected'] is False
+    with pytest.raises(CoreError, match='destination_already_bound'):
         core.confirm_pairing(pairing['pairing_id'])
 
 

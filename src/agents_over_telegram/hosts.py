@@ -76,7 +76,9 @@ def _hook_project(args, payload: dict) -> Path:
         return Path(args.project_dir)
     if args.host == 'claude' and os.environ.get('CLAUDE_PROJECT_DIR'):
         return Path(os.environ['CLAUDE_PROJECT_DIR'])
-    cwd = payload.get('cwd')
+    # Antigravity sends its workspace too; its cwd can be a subfolder.
+    workspaces = payload.get('workspacePaths')
+    cwd = workspaces[0] if isinstance(workspaces, list) and len(workspaces) == 1 else payload.get('cwd')
     if isinstance(cwd, str) and cwd and '\x00' not in cwd:
         return Path(cwd)
     return Path.cwd()

@@ -4,42 +4,40 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.10.8 supports **Codex**, **Claude Code**, **Pi**, **Amp** and **Antigravity**, and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Each host uses its own plugin or extension system. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.11.0 supports **Claude Code**, **Codex**, **Pi**, **Amp** and **Antigravity** (the `agy` CLI and the desktop app), and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Every host works the same way: you install AOT for the host once, then ask the agent to connect each project. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
-| Host | Integration | Push delivery |
-|---|---|---|
-| Claude Code | Claude Code plugin (MCP server, hooks, monitor) | A background `asyncRewake` hook wakes idle sessions, also in the desktop app. Hooks reach busy turns. |
-| Codex | Codex plugin (skills and hooks) | The optional `relay-desktop` listener wakes idle desktop chats. Hooks reach busy turns. |
-| Pi | Pi extension and `.pi/mcp.json` | The extension starts a turn or steers a busy agent. |
-| Amp | Amp plugin and `.amp/settings.json` | The plugin appends a steering message and opens a thread if needed. |
-| Antigravity | Project plugin in `.agents/plugins/`, written by setup (CLI and desktop app) | A background waiter command wakes the idle agent when it exits. Hooks reach busy turns. |
-
-Setup takes `--host claude|codex|pi|amp|antigravity`. [Agent hosts](docs/HOSTS.md) has the setup steps for each host and lists exactly what was tested. Most host checks used real host processes with a fake Telegram transport, not live Telegram. That page says which checks used live Telegram.
+[Agent hosts](docs/HOSTS.md) explains how each integration works and lists exactly what was tested. Most host checks used real host processes with a fake Telegram transport, not live Telegram.
 
 ## Before you start
 
 - **Linux or macOS.** Windows support is new and only tested in CI so far; see [Windows](docs/OPERATIONS.md#windows).
-- **Python 3.11 or newer** with virtual-environment support. The plugin prepares its own runtime from it. uv is optional. On Debian or Ubuntu, install `python3-venv` if your Python does not include it. If Python is missing, see the official [Python downloads](https://www.python.org/downloads/).
-- **A Telegram bot.** Create one with `@BotFather` if you do not have one for AOT yet. Add it to a dedicated group, or to a forum topic. Keep the token private: the setup wizard asks for it in a hidden terminal prompt. Later agents reuse the same bot without the token.
+- **Python 3.11 or newer** with virtual-environment support. The agent prepares AOT's own runtime from it. uv is optional. On Debian or Ubuntu, install `python3-venv` if your Python does not include it. If Python is missing, see the official [Python downloads](https://www.python.org/downloads/).
+- **A Telegram bot.** Create one with `@BotFather` if you do not have one for AOT yet. Add it to a dedicated group, or to a forum topic. Pairing works in a group or a forum topic only, not in a direct chat with the bot.
 
-Pairing works in a group or a forum topic only. AOT does not pair a direct-message chat with the bot.
+## Install AOT for your host (once)
 
-## Connect a project in Claude Code
+Run the command for your host once. It installs the setup skill and the host's hooks, extension or plugin for your user, so every project can use them.
 
-1. **Install the plugin for your user:**
+| Host | Install command |
+|---|---|
+| Claude Code | `claude plugin marketplace add fourlastor/agents-over-telegram && claude plugin install agents-over-telegram@agents-over-telegram --scope user` |
+| Codex | `codex plugin marketplace add fourlastor/agents-over-telegram && codex plugin add agents-over-telegram@agents-over-telegram` |
+| Pi | `pi install git:github.com/fourlastor/agents-over-telegram` |
+| Amp | `amp plugins add https://raw.githubusercontent.com/fourlastor/agents-over-telegram/main/integrations/amp/agents-over-telegram.ts && amp skill add fourlastor/agents-over-telegram/skills --global` |
+| Antigravity | `git clone --depth 1 https://github.com/fourlastor/agents-over-telegram ~/.local/share/agents-over-telegram/source && agy plugin install ~/.local/share/agents-over-telegram/source` |
 
-   ```sh
-   claude plugin marketplace add fourlastor/agents-over-telegram
-   claude plugin install agents-over-telegram@agents-over-telegram --scope user
-   ```
+The Antigravity install works for both the `agy` CLI and the desktop app. In Codex, review and trust the plugin hooks once (the desktop app's hook review, or `/hooks` in the Codex CLI). Codex asks again after every plugin update.
 
-   User scope is the recommended default. Every later session then starts with the plugin loaded, so you can connect a project without a restart. To keep the plugin out of other projects, install it with `--scope local` inside the project folder instead.
-2. **Open the project and ask "Connect this agent to Telegram".** The setup skill prepares the runtime and gives you the pairing command. Run the terminal wizard yourself, send its exact `/pair@YourBotUsername …` command in the chosen group or topic, then confirm the observed destination in the terminal.
-3. **Ask "Telegram status"** to check the bot and the destination.
+## Connect a project
 
-You do not need to restart Claude Code. The Telegram tools appear in the open session when setup finishes. If the plugin was installed or enabled during the session, type `/reload-plugins` once: `/reload-plugins --force` in the terminal CLI, plain `/reload-plugins` in the desktop app. Keep the session open. The plugin collects Telegram updates for the project, so you need no separate listener.
+1. **Open the project and ask the agent "Connect this agent to Telegram".** The agent prepares AOT's runtime and runs setup for this project.
+2. **The first time on a machine only:** if your bot is not registered here yet, the agent gives you one command to run in your own terminal. It asks for the bot token in a hidden prompt, so the token never passes through the chat.
+3. **Post the pairing command.** The agent gives you a command such as `/pair@YourBot 1A2B3C4D5E6F`. Post it in the project's group or topic, then tell the agent you posted it. The agent finishes the connection and reports the group it connected to.
+4. **Ask "Telegram status"** at any time to check the bot and the destination.
 
-In the desktop app, Claude Code connects a newly added plugin MCP server only in the next session. Until then the agent uses the same tools from a shell with `aot tool <name>`, with JSON arguments on stdin. These commands apply the same checks as the MCP server. See [Claude Code](docs/HOSTS.md#claude-code) for details.
+There is no second confirmation. The pairing code is single-use, expires after ten minutes and is shown only on your machine. When your bot already has connections, only their owner can complete a pairing by posting a code. A code that someone else posts stays pending, and you decide about it in your terminal. When the bot has no connection yet, the first post of the code connects, and the agent shows you where.
+
+One project folder is one logical agent: every chat in that folder shares its Telegram identity. Use separate folders for separate agents. Setup writes `.aot-profile.json`, `.aot-runtime.json` and the host's MCP entry into the project. These files hold this machine's paths and the client id, not secrets. Setup adds the files it owns to the repository's local `.git/info/exclude`, and warns when git already tracks one of them.
 
 In this README, `aot` means the runtime executable that setup names in the project's `.aot-runtime.json`. It is not a command on `PATH`. From the project folder, you can run it like this:
 
@@ -47,34 +45,11 @@ In this README, `aot` means the runtime executable that setup names in the proje
 "$(python3 -c 'import json;print(json.load(open(".aot-runtime.json"))["executable"])')" tool messages_poll
 ```
 
-The hook and monitor notices in Claude Code also print the full path of this executable.
-
-## Connect a project in Codex
-
-1. **Install the plugin from its GitHub marketplace:**
-
-   ```sh
-   codex plugin marketplace add fourlastor/agents-over-telegram
-   codex plugin add agents-over-telegram@agents-over-telegram
-   ```
-
-2. **Open the project in Codex and ask "Connect this agent to Telegram".** Pair in the terminal as described for Claude Code above.
-3. **Load the connection.** Open the prepared project, make Codex's normal project-trust decision, then reload or reopen its chat. Review and trust the plugin hooks once with `/hooks` in the Codex CLI. Ask **"Telegram status"** to check the connection.
-4. **Optional: listen while the chat is idle.** Ask **"Listen for Telegram in this chat for 10 minutes"**. Open ChatGPT from the app list as usual. The [desktop listener](docs/DIRECT_DISPATCH.md) wakes the chat when a message arrives.
-
-Setup writes one `telegram` MCP entry in the project's `.codex/config.toml`. It does not configure a global MCP server or change global trust. Setup also approves the project's `messages_poll`, `message_send`, `message_react` and `messages_ack` tools, so Codex's approval reviewer does not block work that a hook notice started. Every chat in a project shares its Telegram identity, so use separate project folders for separate agents.
-
-For the terminal commands, offline bootstrap and existing-account options, see [local setup](docs/OPERATIONS.md#codex-setup). For Pi and Amp, see [agent hosts](docs/HOSTS.md#pi).
+For the terminal commands, offline bootstrap and existing-account options, see [local setup](docs/OPERATIONS.md#codex-setup). Host details, such as idle listening in the Codex desktop app, are in [agent hosts](docs/HOSTS.md).
 
 ## Updates
 
-Claude Code updates a connected project in place, without a restart:
-
-1. Update the plugin with `claude plugin update agents-over-telegram@agents-over-telegram`.
-2. Prepare the new runtime from the updated plugin, as in first setup.
-3. Run `setup --prepare-only` with the **new** runtime's executable. This step moves the project to the new runtime: it rewrites `.aot-runtime.json` and keeps the client, its pairing and its allowed senders.
-
-After that, the plugin's MCP server switches to the new runtime before the next tool call, and Claude Code fetches the tools again. Hooks and the wake waiter use the new runtime from their next event. Only changed hooks, skills or monitors in the plugin need `/reload-plugins`. The [setup skill](skills/telegram-setup/SKILL.md#update-a-claude-code-project-to-a-newer-version) has the exact commands.
+Update the host install the same way you installed it, then ask the agent to "update Agents over Telegram". The setup skill prepares the new runtime and moves the project to it with `setup --prepare-only`. The project keeps its client, its pairing and its allowed senders. In Claude Code the MCP server and hooks switch to the new runtime without a restart; see the [setup skill](skills/telegram-setup/SKILL.md#update-a-project-to-a-newer-version).
 
 ## What an agent can do
 
@@ -126,7 +101,7 @@ The owner changes settings for one connection with `aot delivery-settings`. The 
 
 ## How messages arrive
 
-AOT collects Telegram updates into a local inbox for each connection. In Claude Code, Pi and Amp, the host integration collects while the host is open. In Codex, the plugin hooks collect at most every 10 seconds during a turn, and the optional `relay-desktop` listener collects while it runs. Setup starts no background service.
+AOT collects Telegram updates into a local inbox for each connection. In Claude Code, Pi, Amp and Antigravity, the host integration collects while the host is open. In Codex, the plugin hooks collect at most every 10 seconds during a turn, and the optional `relay-desktop` listener collects while it runs. Setup starts no background service.
 
 The `relay-desktop` listener uses native Codex queueing and a wake URL to wake an existing local chat. It does not queue a wake while the chat is busy, because the Codex hooks then deliver the notice inside that turn. When a queue command ends without a receipt, the listener settles the result itself from the desktop's own records. See [listen with the desktop](docs/DIRECT_DISPATCH.md).
 

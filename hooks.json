@@ -1,0 +1,13 @@
+{
+  "agents-over-telegram": {
+    "SessionStart": [
+      {"type": "command", "command": "python3 ./scripts/aot_host_launch.py hook --host antigravity", "timeout": 20}
+    ],
+    "PreInvocation": [
+      {"type": "command", "command": "python3 ./scripts/aot_host_launch.py hook --host antigravity", "timeout": 20}
+    ],
+    "Stop": [
+      {"type": "command", "command": "python3 ./scripts/aot_host_launch.py hook --host antigravity", "timeout": 20}
+    ]
+  }
+}

@@ -43,9 +43,10 @@ HOST_NEXT_STEPS = {
         'exact folder and ask "Telegram status".'
     ),
     'antigravity': (
-        'Setup wrote an Antigravity plugin to .agents/plugins/agents-over-telegram in this folder. Open this exact '
-        'folder in Antigravity (the agy CLI or the desktop app), trust it, and ask "Telegram status". The plugin '
-        'hooks add notices, and the agent keeps a background waiter running that wakes it when a message arrives.'
+        'Setup wrote this project\'s Telegram tools to .agents/plugins/agents-over-telegram-project. The Agents over '
+        'Telegram plugin installed for the user adds the hooks. Open this exact folder in Antigravity (the agy CLI '
+        'or the desktop app), trust it, and ask "Telegram status". The agent keeps a background waiter running that '
+        'wakes it when a message arrives.'
     ),
     'grok-bot': (
         'In Grok Bot, add a custom connector of type Command with the command and arguments under "connector" in '
@@ -157,6 +158,26 @@ def _approvals_toml():
                    for name in CODEX_APPROVED_TOOLS)
 
 
+def _moved_runtime(selected, expected):
+    """A rewrite of the Codex config that moves the same client to this runtime, or None.
+
+    It applies only when the existing entry has exactly this client's
+    arguments and another absolute command, written once in the file.
+    """
+    if not isinstance(selected, dict) or selected.get('args') != expected['args']:
+        return None
+    old = selected.get('command')
+    if not isinstance(old, str) or old == expected['command'] or not Path(old).is_absolute():
+        return None
+    needle = 'command = ' + json.dumps(old)
+
+    def rewrite(raw):
+        if raw.count(needle) != 1:
+            raise CredentialError('project_mcp_config_conflict')
+        return raw.replace(needle, 'command = ' + json.dumps(expected['command']))
+    return rewrite
+
+
 def _config_plan(project, expected, approvals=True):
     """Plan the project's Codex config.
 
@@ -176,6 +197,13 @@ def _config_plan(project, expected, approvals=True):
             raise ValueError()
         if 'telegram' in servers:
             selected = servers['telegram']
+            moved = _moved_runtime(selected, expected)
+            if moved is not None:
+                # The same client on another runtime (an update): point the
+                # entry at this runtime and keep everything else as written.
+                raw = moved(raw)
+                parsed = tomllib.loads(raw)
+                selected = parsed['mcp_servers']['telegram']
             if not isinstance(selected, dict) or any(selected.get(key) != value for key, value in expected.items()):
                 raise CredentialError('project_mcp_config_conflict')
             extras = set(selected) - set(expected) - {'tools'}
@@ -185,7 +213,7 @@ def _config_plan(project, expected, approvals=True):
             if tools is not None and (not isinstance(tools, dict) or not all(isinstance(value, dict) for value in tools.values())):
                 raise CredentialError('project_mcp_config_conflict')
             if tools is not None or not approvals:
-                return path, raw, raw
+                return path, (_read_local(path) if path.exists() or path.is_symlink() else None), raw
             proposed = raw + _approvals_toml()
         else:
             suffix = '\n[mcp_servers.telegram]\ncommand = ' + json.dumps(expected['command']) + '\nargs = ' + json.dumps(expected['args']) + '\n'
@@ -193,7 +221,7 @@ def _config_plan(project, expected, approvals=True):
         selected = tomllib.loads(proposed)['mcp_servers']['telegram']
         if {key: selected[key] for key in expected} != expected:
             raise ValueError()
-        return path, raw, proposed
+        return path, (_read_local(path) if path.exists() or path.is_symlink() else None), proposed
     except (ValueError, TypeError, KeyError):
         raise CredentialError('invalid_project_config') from None
 
@@ -352,7 +380,12 @@ def setup(args):
         _write_local(config_path, new_config, old_config)
     for path, old_text, new_text in plugin_plan:
         _write_local(path, new_text, old_text)
+    if plugin_plan:
+        from .host_config import remove_old_antigravity_plugin
+        remove_old_antigravity_plugin(project)
     _write_local(pointer_path, new_pointer, old_pointer)
+    owned = [project / PROFILE_NAME, pointer_path] + ([plugin_plan[0][0].parent] if plugin_plan else [])
+    git = keep_out_of_git(project, owned, [config_path] if config_path is not None else [])
     from . import serve
     collector = None
     if not fake:
@@ -370,15 +403,25 @@ def setup(args):
               'runtime_pointer': str(pointer_path), 'host': host,
               'client_id': client_id, 'label': args.label,
               'mode': new_profile['mode'], 'state_dir': str(state), 'client_file': str(client), 'connected': status['connected'],
-              'host_trust_changed': False, 'automatic_delivery': False}
+              'host_trust_changed': False, 'automatic_delivery': False, 'git': git}
     if collector is not None:
         result['always_on_collector'] = collector
     if host == 'grok-bot':
         # Grok Bot keeps its connectors in its app, not in a project file.
         result['connector'] = {'type': 'Command', **_entry(state, client, fake)}
+    if not status['connected'] and args.prepare_only and (status.get('pairing') or {}).get('sender_id') is None \
+            and status.get('pairing'):
+        # A rerun after the human posted the pairing command: collect once, so
+        # the pairing connects without a terminal (see Core._pairing_trusted).
+        try:
+            core.collect(timeout=0)
+        except CoreError:
+            pass
+        status = core.connection_status(client_id)
     if status['connected']:
         result['connection'] = status
-        result['next_step'] = HOST_NEXT_STEPS[host]
+        result['next_step'] = HOST_NEXT_STEPS[host] + ' ' + _owner_start_step(core)
+        result['connected'] = True
         return result
     cache_path = state / 'setup' / (client_id + '.json')
     pairing = status.get('pairing')
@@ -399,8 +442,17 @@ def setup(args):
     bot_name = '@' + bot_username if bot_username else 'the bot'
     destination_step = f'Create or choose this agent\'s dedicated Telegram group or topic and add {bot_name} to its group if it is not already there. '
     if args.prepare_only:
-        result['next_step'] = (destination_step + 'Send the pairing_command there, then run: ' + next_setup
-                               if command else 'Complete the existing pairing locally, then run: ' + next_setup)
+        if pairing.get('sender_id') is not None:
+            result['next_step'] = ('The pairing command was posted by someone who does not own this bot\'s '
+                                   'connections, or its destination is taken. Review it locally with: ' + next_setup)
+        elif command:
+            result['next_step'] = (destination_step + 'Send the pairing_command there. It connects as soon as AOT '
+                                   'collects it, with no second confirmation. To finish, the agent runs this setup '
+                                   'again with --prepare-only, or the human can then run: ' + next_setup)
+        else:
+            result['next_step'] = ('A pairing is waiting for its command. If the human still has it, they send it; '
+                                   'then run this setup command again with --prepare-only. Otherwise start a new '
+                                   'pairing with: ' + next_setup)
         return result
     _say(f'Setting up {args.label}. The bot registration is shared; this project selects one agent.')
     if pairing.get('sender_id') is None:
@@ -411,6 +463,14 @@ def setup(args):
         if _answer('Press Enter after sending it, or type cancel to stop:').lower() in {'cancel', 'q', 'quit'}:
             raise KeyboardInterrupt()
         intake = core.collect()
+        status = core.connection_status(client_id)
+        if status['connected']:
+            # The owner posted it (or the bot has no owner yet): no second confirmation.
+            _say('Connected: ' + json.dumps({key: (status.get('destination') or {}).get(key)
+                                             for key in ('chat_id', 'thread_id', 'owner_id', 'title')}, ensure_ascii=True))
+            result.update(connected=True, connection=status,
+                          next_step=HOST_NEXT_STEPS[host] + ' ' + _owner_start_step(core))
+            return result
         pairing = core.pairing_status(pairing['id'])
         if pairing.get('sender_id') is None:
             result['intake'] = intake
@@ -422,6 +482,72 @@ def setup(args):
         return result
     status = core.confirm_pairing(pairing['id'])
     result.update(connected=True, connection=status, next_step=HOST_NEXT_STEPS[host] + ' ' + _owner_start_step(core))
+    return result
+
+
+GIT_EXCLUDE_HEADER = '# Agents over Telegram: machine-specific files written by aot setup'
+
+
+def _git(project, *args):
+    """Run git in the project; None when git is missing or this is not a repository."""
+    import shutil
+    import subprocess
+    if shutil.which('git') is None:
+        return None
+    try:
+        done = subprocess.run(['git', '-C', str(project), *args], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done if done.returncode == 0 else None
+
+
+def keep_out_of_git(project, owned, shared):
+    """Keep AOT's machine-specific project files out of version control.
+
+    ``owned`` files and folders belong to AOT: they go into the repository's
+    local .git/info/exclude, which ignores them on this machine without
+    changing the project's tracked .gitignore. ``shared`` files (a host's own
+    settings file that holds the telegram entry) may hold the project's other
+    settings, so they are only reported when git tracks them. Nothing in git
+    history changes. The files hold paths and the client id, not secrets.
+    """
+    top = _git(project, 'rev-parse', '--show-toplevel')
+    if top is None:
+        return {'repository': False}
+    root = Path(top.stdout.strip()).resolve()
+    exclude = _git(project, 'rev-parse', '--git-path', 'info/exclude')
+    tracked = [str(path) for path in [*owned, *shared]
+               if _git(project, 'ls-files', '--error-unmatch', '--', str(path)) is not None]
+    excluded = []
+    if exclude is not None:
+        path = Path(exclude.stdout.strip())
+        path = path if path.is_absolute() else Path(project) / path
+        try:
+            current = path.read_text(encoding='utf-8') if path.exists() else ''
+            lines = set(current.splitlines())
+            entries = []
+            for item in owned:
+                relative = Path(item).resolve().relative_to(root).as_posix()
+                entry = '/' + relative + ('/' if Path(item).is_dir() else '')
+                excluded.append(entry)
+                if entry not in lines:
+                    entries.append(entry)
+            if entries:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                block = ('' if not current or current.endswith('\n') else '\n')
+                if GIT_EXCLUDE_HEADER not in lines:
+                    block += GIT_EXCLUDE_HEADER + '\n'
+                with open(path, 'a', encoding='utf-8') as stream:
+                    stream.write(block + '\n'.join(entries) + '\n')
+        except (OSError, ValueError):
+            excluded = []
+    result = {'repository': True, 'excluded': excluded}
+    if tracked:
+        result['tracked'] = tracked
+        result['warning'] = ('Git tracks these files. They hold this machine\'s paths and AOT client id, so other '
+                             'clones cannot use them. Untrack AOT\'s own files with git rm --cached; for a shared '
+                             'settings file, keep the telegram entry out of commits.')
     return result
 
 

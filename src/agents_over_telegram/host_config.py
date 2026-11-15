@@ -51,37 +51,42 @@ def json_config_plan(project: Path, host: str, entry: dict):
     except ValueError:
         raise CredentialError('invalid_project_config') from None
     if SERVER in servers:
-        if servers[SERVER] != expected:
+        current_entry = servers[SERVER]
+        if current_entry == expected:
+            return path, raw, raw
+        # The same client on another runtime (an update) moves to this one;
+        # anything else is someone else's entry.
+        if not (isinstance(current_entry, dict) and {**current_entry, 'command': expected['command']} == expected
+                and isinstance(current_entry.get('command'), str) and Path(current_entry['command']).is_absolute()):
             raise CredentialError('project_mcp_config_conflict')
-        return path, raw, raw
     proposed = dict(current)
     proposed[key] = {**servers, SERVER: expected}
     return path, raw, json.dumps(proposed, indent=2) + '\n'
 
 
-# Antigravity (the agy CLI and the desktop app) loads a plugin from the
-# project's .agents/plugins/<name>/ folder: its hooks.json and mcp_config.json.
-# Setup writes a small plugin there that names this project's runtime and
-# client directly, like the Codex, Pi and Amp entries. The folder belongs to
-# AOT, so a rerun of setup replaces the three files, for example after an update.
-ANTIGRAVITY_PLUGIN = Path('.agents') / 'plugins' / 'agents-over-telegram'
-ANTIGRAVITY_EVENTS = ('SessionStart', 'PreInvocation', 'Stop')
+# Antigravity (the agy CLI and the desktop app) loads plugins from the
+# project's .agents/plugins/<name>/ folder. Its hooks and skills come from the
+# Agents over Telegram plugin installed once for the user (the repository root,
+# through .antigravity-plugin/plugin.json). That plugin's MCP server cannot
+# tell which project it serves, so setup writes a small project plugin with
+# only the scoped telegram server, naming this project's runtime and client
+# like the Codex, Pi and Amp entries. A rerun of setup replaces its files.
+ANTIGRAVITY_PLUGIN = Path('.agents') / 'plugins' / 'agents-over-telegram-project'
+# 0.10.8 wrote the hooks into the project as well, under this name. With the
+# user plugin installed they would run twice, so setup removes that folder.
+ANTIGRAVITY_OLD_PLUGIN = Path('.agents') / 'plugins' / 'agents-over-telegram'
+ANTIGRAVITY_OLD_FILES = ('plugin.json', 'hooks.json', 'mcp_config.json')
 
 
 def antigravity_plugin_files(project: Path, entry: dict) -> dict:
-    """The plugin's files, relative path -> text."""
-    import shlex
-    hook = ' '.join(shlex.quote(part) for part in
-                    [entry['command'], 'hook', '--host', 'antigravity', '--project-dir', str(project)])
-    manifest = {'name': 'agents-over-telegram', 'displayName': 'Agents over Telegram',
-                'description': 'Telegram inbox, replies and wake-ups for this project. Written by "aot setup '
-                               '--host antigravity"; run setup again to update it.',
+    """The project plugin's files, relative path -> text."""
+    manifest = {'name': 'agents-over-telegram-project', 'displayName': 'Agents over Telegram (this project)',
+                'description': "This project's Telegram tools. Written by \"aot setup --host antigravity\"; "
+                               'run setup again to update it.',
                 'homepage': 'https://github.com/fourlastor/agents-over-telegram', 'license': 'Apache-2.0'}
-    hooks = {'agents-over-telegram': {event: [{'type': 'command', 'command': hook, 'timeout': 20}]
-                                      for event in ANTIGRAVITY_EVENTS}}
     servers = {'mcpServers': {SERVER: expected_entry('antigravity', entry)}}
     dump = lambda value: json.dumps(value, indent=2) + '\n'
-    return {ANTIGRAVITY_PLUGIN / 'plugin.json': dump(manifest), ANTIGRAVITY_PLUGIN / 'hooks.json': dump(hooks),
+    return {ANTIGRAVITY_PLUGIN / 'plugin.json': dump(manifest),
             ANTIGRAVITY_PLUGIN / 'mcp_config.json': dump(servers)}
 
 
@@ -99,3 +104,22 @@ def antigravity_plugin_plan(project: Path, entry: dict):
         current = _read_local(path) if path.exists() or path.is_symlink() else None
         plan.append((path, current, text))
     return plan
+
+
+def remove_old_antigravity_plugin(project: Path) -> bool:
+    """Remove the project plugin 0.10.8 wrote, only when it is exactly that."""
+    folder = project / ANTIGRAVITY_OLD_PLUGIN
+    try:
+        if folder.is_symlink() or not folder.is_dir():
+            return False
+        if sorted(child.name for child in folder.iterdir()) != sorted(ANTIGRAVITY_OLD_FILES):
+            return False
+        manifest = json.loads((folder / 'plugin.json').read_text(encoding='utf-8'))
+        if manifest.get('name') != 'agents-over-telegram' or '--host antigravity' not in manifest.get('description', ''):
+            return False
+        for name in ANTIGRAVITY_OLD_FILES:
+            (folder / name).unlink()
+        folder.rmdir()
+        return True
+    except (OSError, ValueError, AttributeError):
+        return False
