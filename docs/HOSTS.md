@@ -1,6 +1,6 @@
 # Agent hosts and push delivery
 
-Agents over Telegram (AOT) works with four agent hosts: **Codex**, **Claude Code**, **Pi** and **Amp**, plus **Grok Bot**, which is untested. Each host uses its own plugin or extension system; Grok Bot has none and is woken through a webhook. In every host, a new Telegram message reaches the running agent without anyone typing a prompt. An idle agent wakes up. A busy agent gets the message at its next safe point, usually after the current tool call.
+Agents over Telegram (AOT) works with five agent hosts: **Codex**, **Claude Code**, **Pi**, **Amp** and **Antigravity**, plus **Grok Bot**, which is untested. Each host uses its own plugin or extension system; Grok Bot has none and is woken through a webhook. In every host, a new Telegram message reaches the running agent without anyone typing a prompt. An idle agent wakes up. A busy agent gets the message at its next safe point, usually after the current tool call.
 
 This page explains how each integration works, how to set it up, and what was tested. The [evidence section](#what-was-tested) says exactly which checks used a real agent host and which were only offline tests.
 
@@ -22,6 +22,7 @@ All hosts share the same parts:
 | Codex | Codex plugin hooks (`codex/hooks.json`) | The existing `relay-desktop` listener wakes a desktop chat ([details](DIRECT_DISPATCH.md)) | `PostToolUse` and `Stop` hooks add the notice | `.codex/config.toml` written by setup |
 | Pi | Pi extension (`integrations/pi/`) | The extension calls `pi.sendMessage(..., {triggerTurn: true})` and Pi starts a turn | Pi delivers the same message as a steering message after the current tool call | `.pi/mcp.json` written by setup |
 | Amp | Amp plugin (`integrations/amp/`) | The plugin appends the notice to the current thread; it opens a thread if none exists | `appendUserMessage(..., {steer: true})` queues it as a steering message | `.amp/settings.json` written by setup |
+| Antigravity (the `agy` CLI and the desktop app) | Project plugin written by setup (`.agents/plugins/agents-over-telegram/`) | The agent runs `aot wake --host antigravity` as a background command. When a message arrives, the command prints the notice and exits, and Antigravity wakes the agent with its output | A `PreInvocation` hook adds the notice before the next model call; a `Stop` hook catches messages that arrive during the final answer | The plugin's `mcp_config.json`, written by setup |
 | Grok Bot (untested) | None: Grok Bot has no hooks | `aot watch --webhook-file` POSTs to a routine's webhook, which starts a run | The next routine run (at most one POST every 30 s) | A custom **Command** connector added in Grok Bot |
 
 ## Set up a project
@@ -32,7 +33,7 @@ Register the bot and pair the project once, as described in [local setup](OPERAT
 aot setup --label Alpha --project-dir /absolute/path/to/project --host claude
 ```
 
-`--host` accepts `codex` (the default), `claude`, `pi` and `amp`. Setup always writes `.aot-profile.json` and `.aot-runtime.json`. It also writes the host's MCP configuration: `.codex/config.toml` for Codex, `.pi/mcp.json` for Pi and `.amp/settings.json` for Amp. Claude Code gets its MCP server from the plugin. Setup keeps unrelated settings and refuses to replace a different `telegram` entry. You can run setup again with another `--host` to use the same project from a second host.
+`--host` accepts `codex` (the default), `claude`, `pi`, `amp` and `antigravity`. Setup always writes `.aot-profile.json` and `.aot-runtime.json`. It also writes the host's MCP configuration: `.codex/config.toml` for Codex, `.pi/mcp.json` for Pi, `.amp/settings.json` for Amp and a project plugin for Antigravity. Claude Code gets its MCP server from the plugin. Setup keeps unrelated settings and refuses to replace a different `telegram` entry. You can run setup again with another `--host` to use the same project from a second host.
 
 ### Claude Code
 
@@ -106,6 +107,24 @@ Setup also approves four tools of the project's scoped `telegram` server in `.co
 2. Approve the workspace server once: `amp mcp approve telegram`.
 3. Copy or link `integrations/amp/agents-over-telegram.ts` into the project's `.amp/plugins/` folder. Amp loads project plugins from there. Reload with the command palette action `plugins: reload`, or restart Amp.
 
+### Antigravity
+
+Antigravity is Google's agent host: the `agy` CLI and the Antigravity desktop app run the same agent, and both load plugins from a project's `.agents/plugins/` folder.
+
+1. Run setup with `--host antigravity`. It writes a small plugin to `.agents/plugins/agents-over-telegram/`: `plugin.json`, `hooks.json` and `mcp_config.json`. The hooks and the MCP server name this project's runtime and client directly, like the Codex, Pi and Amp entries. The folder belongs to AOT: running setup again replaces its three files, for example after an update, and leaves other plugins alone.
+2. Open the exact project folder in Antigravity and trust it when Antigravity asks. Ask "Telegram status".
+
+**How an idle agent wakes up.** Antigravity hooks cannot run in the background, and a `Stop` hook that waits blocks the session: anything the user types waits until the hook returns. Antigravity does wake an idle agent when a **background command** the agent started finishes, and it shows the agent that command's output. AOT uses this:
+
+- The `SessionStart` hook gives the agent the exact waiter command for this session: `aot wake --host antigravity --project-dir <project> --session <conversation id>`. The agent starts it as a background task.
+- The waiter collects from Telegram and waits. When a message arrives, it prints the usual notice, plus the same command to start it again, and exits. Antigravity wakes the agent, which handles the message and starts the waiter again.
+- When the agent ends a turn and no waiter is running for its session, the `Stop` hook asks it once to start one. Antigravity 1.5.9 never sets `continuationActive` in the `Stop` hook input, so AOT guards the loop itself: it asks again only after a new prompt from the user, or after a waiter has run since the last request.
+- The waiter has no time limit. It stops when its host shell is gone or a newer waiter for the same session takes over. When `.aot-runtime.json` names a new runtime, the waiter continues in that runtime without waking the agent.
+
+The agent must start the waiter itself, because hooks cannot start a tool call (`injectSteps` rejects `toolCall`). The waiter command needs the user's normal approval for terminal commands, unless the user allows it. A sandboxed terminal (`agy --sandbox`) must allow the waiter to reach the AOT state folder and Telegram, or the relay socket.
+
+**Busy agents.** The `PreInvocation` hook runs before every model call and adds a notice for each new message, once. The `Stop` hook returns `decision: continue` with the notice when a message arrived during the final answer. `PostToolUse` cannot add text in Antigravity, so AOT does not use it.
+
 ### Grok Bot (untested)
 
 xAI's Grok Bot is a hosted agent with its own cloud computer and terminal. It has no hooks, so AOT wakes it through a **routine** with a webhook trigger: when new messages wait, `aot watch` POSTs a fixed notice to the routine, and the routine handles them. **None of this has run on Grok Bot yet**; it is tested only against a local webhook server. Please report what works and what does not.
@@ -174,6 +193,19 @@ The Claude Code and Amp interactive rows come from a final run of the hosts at t
 - **The Claude Code desktop app** installed from the marketplace. The live check (see [below](#claude-code-desktop-app)) copied this branch's hook file and launcher into an installed plugin.
 - **An interactive terminal session with `aot wake`**, where the monitor and the waiter both run. Both use the same claim, so each delivery is still announced once.
 - **Linux** for the new integrations.
+
+### Antigravity checks
+
+On 2026-11-15, these checks ran on macOS with `agy` 1.5.9, model Gemini 3.8 Flash (Low), and the fake Telegram transport. `scripts/e2e_fake.py prepare --host antigravity` set up each project, so the plugin was the one setup writes.
+
+| Scenario | Result |
+|---|---|
+| `agy -p` started with one message waiting; a second message injected 80 seconds later, while the agent was idle and only the waiter ran | Pass. The agent answered the first message and started the waiter. The waiter woke it for the second message; it answered and started the waiter again. The fake Telegram recorded exactly one reply per message. |
+| Interactive `agy`: a background `sleep 25` command started by the agent, the agent idle, then a typed prompt | Pass. The typed prompt was answered at once, and the agent woke by itself when the command ended. This is the behaviour the waiter relies on. |
+| Interactive `agy` with a `Stop` hook that waits 25 seconds | The session stayed open, but a prompt typed meanwhile waited until the hook returned. So AOT does not wait in a hook. |
+| `agy -p` with a `Stop` hook that always returns `continue` | The agent looped until the run was stopped: `continuationActive` stayed `false`. So AOT guards the loop itself (see [Antigravity](#antigravity)). |
+
+The Antigravity desktop app was not tested yet. Its built-in documentation describes the same `.agents/plugins/<name>/` folder, `hooks.json` and `mcp_config.json`, and its agent reports `fullyIdle` for background tasks in the same way, but no session ran there.
 
 ### Claude Code desktop app
 

@@ -100,7 +100,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("prepare")
     p.add_argument("--root", required=True)
-    p.add_argument("--host", required=True, choices=["codex", "claude", "pi", "amp"])
+    p.add_argument("--host", required=True, choices=["codex", "claude", "pi", "amp", "antigravity"])
     p.add_argument("--label", default="E2E Agent")
     i = sub.add_parser("inject")
     i.add_argument("--root", required=True)
