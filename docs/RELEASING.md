@@ -36,10 +36,9 @@ npm trusted publishing lets the workflow publish without a stored token. npm can
 
 ### Protect the release tags
 
-Anyone who can push a `v*` tag can publish. Limit that in the repository settings:
+Anyone who can push a `v*` tag can publish. While only the maintainers have push access, that is the intended group, so no tag ruleset is needed. If more people get push access later, add a tag ruleset for `v*` with the maintainers in its bypass list.
 
-1. Add a tag ruleset for `v*` that allows only the maintainers to create, update or delete these tags.
-2. The workflow publishes from the GitHub environment `npm`, which GitHub creates on the first run. In its settings, limit deployments to tags that match `v*`. You can also add a required reviewer.
+The workflow publishes from the GitHub environment `npm`, which GitHub creates on the first run. In its settings, limit deployments to tags that match `v*`, so a workflow run from a branch cannot publish.
 
 ### Official plugin directories
 
