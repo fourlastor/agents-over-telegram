@@ -23,7 +23,8 @@ def test_a_malformed_tag_is_refused(tag):
 
 
 def test_a_version_file_that_differs_is_named(tmp_path):
-    for name in [*release_check.JSON_FILES, 'pyproject.toml', 'src/agents_over_telegram/__init__.py']:
+    for name in [*release_check.JSON_FILES, 'pyproject.toml', 'src/agents_over_telegram/__init__.py', 'uv.lock',
+                 'README.md']:
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, tmp_path / name)
     manifest = tmp_path / '.codex-plugin' / 'plugin.json'
@@ -33,6 +34,10 @@ def test_a_version_file_that_differs_is_named(tmp_path):
     manifest.write_text(json.dumps(value), encoding='utf-8')
     [problem] = release_check.problems(f'v{__version__}', tmp_path)
     assert problem.startswith('.codex-plugin/plugin.json has version')
+
+
+def test_the_lock_file_and_the_readme_are_checked():
+    assert {'uv.lock', 'README.md'} <= set(release_check.versions())
 
 
 def test_the_npm_package_carries_what_the_bootstrap_and_pi_need():

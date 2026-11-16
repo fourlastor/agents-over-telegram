@@ -48,6 +48,16 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
+      - name: npm supports trusted publishing
+        # OIDC publishing needs npm 11.5.1 or newer.
+        run: |
+          node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            if (a < 11 || (a === 11 && (b < 5 || (b === 5 && c < 1)))) {
+              console.error(`npm ${process.argv[1]} is too old for trusted publishing; 11.5.1 or newer is needed`);
+              process.exit(1);
+            }' "$(npm --version)"
+
       - name: Publish with provenance
         run: npm publish
 

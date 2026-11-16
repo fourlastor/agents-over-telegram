@@ -34,7 +34,12 @@ npm trusted publishing lets the workflow publish without a stored token. npm can
    - Environment name: `npm`
 3. In the same settings, set publishing access to require two-factor authentication and disallow tokens. The workflow does not need a token.
 
-The workflow publishes from the GitHub environment `npm`. GitHub creates it on the first run. You can add protection rules to it, for example a required reviewer.
+### Protect the release tags
+
+Anyone who can push a `v*` tag can publish. Limit that in the repository settings:
+
+1. Add a tag ruleset for `v*` that allows only the maintainers to create, update or delete these tags.
+2. The workflow publishes from the GitHub environment `npm`, which GitHub creates on the first run. In its settings, limit deployments to tags that match `v*`. You can also add a required reviewer.
 
 ### Official plugin directories
 

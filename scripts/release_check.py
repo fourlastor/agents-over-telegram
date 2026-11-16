@@ -23,6 +23,11 @@ def versions(root=ROOT):
     init = (root / 'src' / 'agents_over_telegram' / '__init__.py').read_text(encoding='utf-8')
     match = re.search(r'^__version__ = "([^"]+)"$', init, re.MULTILINE)
     found['src/agents_over_telegram/__init__.py'] = match.group(1) if match else None
+    lock = tomllib.loads((root / 'uv.lock').read_text(encoding='utf-8'))
+    found['uv.lock'] = next((item.get('version') for item in lock.get('package', [])
+                             if item.get('name') == 'agents-over-telegram'), None)
+    readme = re.search(r'^Version (\S+) supports ', (root / 'README.md').read_text(encoding='utf-8'), re.MULTILINE)
+    found['README.md'] = readme.group(1) if readme else None
     return found
 
 
