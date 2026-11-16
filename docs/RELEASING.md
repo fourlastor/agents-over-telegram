@@ -26,7 +26,7 @@ The repository owner does these steps once.
 
 npm trusted publishing lets the workflow publish without a stored token. npm can link a trusted publisher only to a package that already exists, so the first version is published by hand:
 
-1. Sign in to npm and publish the current version from a clean checkout of the tag: `npm publish`. The package `files` list selects what is published; check it first with `npm pack --dry-run`.
+1. Sign in to npm and publish the current version from a clean checkout: `npm publish --provenance=false`. npm can only create provenance inside CI, so the manual publish turns it off; the workflow publishes with provenance. The package `files` list selects what is published; check it first with `npm pack --dry-run`. Do not push a tag for this version afterwards: npm refuses to publish the same version twice, so the workflow's npm job would fail.
 2. On npmjs.com, open the package settings and add a trusted publisher of type GitHub Actions:
    - Organization or user: `fourlastor`
    - Repository: `agents-over-telegram`
