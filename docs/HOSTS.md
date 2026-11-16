@@ -99,7 +99,7 @@ Setup also approves four tools of the project's scoped `telegram` server in `.co
 
 ### Pi
 
-1. Install once for your user: `pi install git:github.com/fourlastor/agents-over-telegram`. The repository's root `package.json` names the push extension and the skills.
+1. Install once for your user: `pi install npm:agents-over-telegram`. The package's `package.json` names the push extension and the skills. To follow the `main` branch instead of releases, install from GitHub: `pi install git:github.com/fourlastor/agents-over-telegram`.
 2. In the project, ask "Connect this agent to Telegram". Setup writes `.pi/mcp.json` with `exposure: direct`, so the tools appear as `telegram/messages_poll` and so on.
 3. Start Pi in the project folder and trust the project when Pi asks. Pi ignores `.pi/mcp.json` in untrusted projects.
 
