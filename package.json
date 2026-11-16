@@ -1,15 +1,41 @@
 {
   "name": "agents-over-telegram",
   "version": "0.11.0",
-  "private": true,
   "description": "Coordinate logical agents through one human-owned Telegram bot. Pi package: the push extension and the setup skills.",
   "license": "Apache-2.0",
+  "keywords": [
+    "pi-package",
+    "telegram",
+    "agents",
+    "mcp"
+  ],
   "repository": "https://github.com/fourlastor/agents-over-telegram",
+  "files": [
+    "integrations/pi/agents-over-telegram.ts",
+    "skills/",
+    "scripts/bootstrap_runtime.py",
+    "docs/",
+    "src/agents_over_telegram/**/*.py",
+    "pyproject.toml",
+    "uv.lock",
+    "requirements/runtime.txt",
+    "requirements/build.txt",
+    "LICENSE",
+    "README.md"
+  ],
   "pi": {
-    "extensions": ["./integrations/pi/agents-over-telegram.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./integrations/pi/agents-over-telegram.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }

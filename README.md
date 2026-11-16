@@ -136,4 +136,6 @@ uv sync --frozen --extra dev
 
 The demo and the tests use isolated fake state. They need no token and do not call Telegram. `scripts/e2e_fake.py` prepares an isolated fake-Telegram project for any host and injects test messages, so you can check a real Claude Code, Codex, Pi or Amp process end to end without a token. See [what was tested](docs/HOSTS.md#what-was-tested).
 
+A release is a version tag: pushing `vX.Y.Z` publishes the npm package and creates the GitHub release. See [releasing](docs/RELEASING.md).
+
 Licensed under [Apache 2.0](LICENSE).
