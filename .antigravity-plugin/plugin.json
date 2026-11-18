@@ -3,11 +3,21 @@
   "displayName": "Agents over Telegram",
   "version": "0.11.1",
   "description": "Connect this agent to a Telegram group or topic: ask \"Connect this agent to Telegram\". New messages wake the running agent.",
+  "logo": "assets/logo.svg",
   "author": {
     "name": "Daniele Conti"
   },
   "homepage": "https://github.com/fourlastor/agents-over-telegram",
   "repository": "https://github.com/fourlastor/agents-over-telegram",
   "license": "Apache-2.0",
-  "keywords": ["telegram", "multi-agent", "notifications"]
+  "keywords": [
+    "telegram",
+    "multi-agent",
+    "notifications"
+  ],
+  "suggestedPrompts": [
+    "Connect this agent to Telegram",
+    "Check the Telegram connection status",
+    "Send a message to the Telegram group"
+  ]
 }
