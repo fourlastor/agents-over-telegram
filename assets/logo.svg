@@ -7,9 +7,9 @@
 <rect x="102" y="102" width="820" height="820" rx="190" fill="url(#bg)"/>
 <g transform="translate(5,45)">
 <path d="M232 650 C 300 690, 360 700, 430 690" stroke="#ffffff" stroke-opacity="0.35" stroke-width="14" fill="none" stroke-linecap="round" stroke-dasharray="2 34"/>
-<polygon points="830,300 200,560 505,600" fill="#ffffff"/>
-<polygon points="830,300 505,600 575,760" fill="#d7e3f4"/>
-<polygon points="505,600 575,760 455,650" fill="#aebfdc"/>
+<polygon points="830,300 470,610 590,770" fill="#d7e3f4"/>
+<polygon points="470,610 578,517 590,770" fill="#b4c5e2"/>
+<polygon points="830,300 200,560 470,610" fill="#ffffff"/>
 <g transform="translate(340.0,502.2) rotate(-7.8)">
   <line x1="0" y1="-91.8" x2="0" y2="-123.2" stroke="#ffb547" stroke-width="7.8" stroke-linecap="round"/>
   <circle cx="0" cy="-127.7" r="11.2" fill="#ffe08a"/>
