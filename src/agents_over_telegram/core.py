@@ -164,6 +164,14 @@ _MEDIA_KINDS = ('document', 'photo', 'video', 'audio', 'voice', 'animation')
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # The Bot API getFile limit.
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # The Bot API sendPhoto size limit.
 MAX_IMAGE_CAPTION = 1024  # The Bot API caption length limit, label header included.
+# What an agent reads next to an unknown send. An unknown send often did reach
+# the chat (issue 144), and a second send under a new key posts it twice.
+UNKNOWN_SEND_ACTION = (
+    'This message may already be in the chat: AOT sent it but never got Telegram\'s answer. Do not send it '
+    'again, with this or a new idempotency key, and do not treat it as failed. Ask a human to look in the chat. '
+    'Another agent in the same group can also see this bot\'s messages and their ids. The operator then '
+    'records the outcome with "aot resolve" (accepted with the message id, or retry); see uncertain sends in '
+    'docs/OPERATIONS.md.')
 
 def _image_type(data):
     """Classify image bytes as (send_as, extension, mime), or (None, None, None).
@@ -3946,7 +3954,10 @@ class Core:
                 'retry_at': row['due'] if row['status'] == 'queued' else None}
 
     def _outbox_status(self, row):
-        return {'outbox_id': row['id'], 'status': row['status'], 'error': row['error'], 'message_id': row['message_id'], 'recipient': row['recipient'], 'conversation_id': row['conversation_id'], 'created_at': row['created'], 'updated_at': row['updated'], 'retry_at': row['due'] if row['status'] == 'queued' else None}
+        status = {'outbox_id': row['id'], 'status': row['status'], 'error': row['error'], 'message_id': row['message_id'], 'recipient': row['recipient'], 'conversation_id': row['conversation_id'], 'created_at': row['created'], 'updated_at': row['updated'], 'retry_at': row['due'] if row['status'] == 'queued' else None}
+        if row['status'] == 'unknown':
+            status['next_action'] = UNKNOWN_SEND_ACTION
+        return status
 
     def delivery_status(self, client_id, outbox_id):
         """Inspect an outgoing message or reaction delivery; never resends it."""

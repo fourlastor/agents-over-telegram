@@ -871,6 +871,18 @@ def test_rejected_and_unknown_never_automatically_resend(env, outcome, status, e
     assert core.send(a, 'message', 'key')['status'] == status
     assert len(transport.sent) == calls
     assert 'FAKE_SECRET' not in json.dumps(result)
+    # An unknown send tells the agent it may already be in the chat (issue 144).
+    if status == 'unknown':
+        assert 'may already be in the chat' in result['next_action']
+        assert core.delivery_status(a, result['outbox_id'])['next_action'] == result['next_action']
+    else:
+        assert 'next_action' not in result
+
+
+def test_a_sent_message_has_no_next_action(env):
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    assert 'next_action' not in core.send(a, 'message', 'sent-key')
 
 
 def test_429_retries_only_when_due_and_gates_whole_bot(env):
