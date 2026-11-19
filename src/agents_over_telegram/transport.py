@@ -60,8 +60,10 @@ OWNER_ANSWER_TIMEOUT = 5
 # A photo or document upload waits this long, per socket operation, for
 # Telegram's answer. Telegram can take well over the 15 s of a text send to
 # process an upload of a few megabytes, and a send that times out has an
-# uncertain outcome: it may already be in the chat (issue 144).
-MEDIA_SEND_TIMEOUT = 120
+# uncertain outcome: it may already be in the chat (issue 144). It stays
+# below the hosts' MCP tool timeouts (60 s by default in Codex) and the
+# relay's 90 s call timeout, so the agent still gets the send's outcome.
+MEDIA_SEND_TIMEOUT = 45
 
 
 class TelegramTransport:

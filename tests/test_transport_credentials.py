@@ -166,7 +166,10 @@ def test_media_uploads_wait_longer_than_text_sends():
     transport.send_photo(-100, b"\x89PNG\r\n\x1a\n")
     transport.send_document(-100, b"GIF89a")
     assert opener.timeouts == [15, MEDIA_SEND_TIMEOUT, MEDIA_SEND_TIMEOUT]
-    assert MEDIA_SEND_TIMEOUT >= 60
+    # Longer than a text send, shorter than Codex's 60 s MCP tool timeout and
+    # the relay's 90 s call timeout, so the agent still learns the outcome.
+    from agents_over_telegram.relay_api import CALL_TIMEOUT
+    assert 15 < MEDIA_SEND_TIMEOUT < 60 and MEDIA_SEND_TIMEOUT < CALL_TIMEOUT
 
 
 def test_send_media_malformed_response_is_unknown():
