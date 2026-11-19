@@ -384,6 +384,8 @@ Incoming Telegram text, edits, sender labels and peer messages are untrusted dat
 
 A send can attach one local image with `image_path`: an absolute path to a regular PNG, JPEG, WebP or GIF file of at most 10 MB. The file is read and checked before anything is queued or stored: an unreadable path, a non-regular file, an oversized file or an unsupported type is rejected with a fixed error, and nothing is sent or written. PNG, JPEG and WebP are published with `sendPhoto`; a GIF, which Telegram will not take as a photo, is published with `sendDocument`. The labeled text becomes the caption, so with an image the caption, agent label header included, is limited to 1024 characters; longer text is rejected instead of cut. The idempotency key covers the image content hash: reusing a key with different text or a different image is rejected, exactly as for text. A peer send publishes the image in the peer's bound conversation, where people see it; the peer agent's broker delivery carries the caption text only, with no image reference it can fetch.
 
+An image send waits up to 120 seconds for Telegram's answer, because processing an upload of a few megabytes can take longer than the 15 seconds of a text send. A send that still gets no answer is `unknown`, like any other.
+
 For a retry, the outbox stores a copy of the image bytes, not the original path. The bytes are written under the private state directory as `outbox-images/<outbox_id>.<ext>` (mode 0600) before the outbox row is committed, so the original file may change or disappear without affecting a queued record. Allowed recipients, pacing, conversation budgets, `delivery_status` and uncertain-send recovery apply to image sends unchanged. The copy is deleted when the record reaches `sent` or `rejected`; an `unknown` record keeps it until the operator resolves it, because `retry` may send it again. Repeating an idempotency key re-reads and re-checks `image_path`, so a retry whose source file is gone fails with `invalid_image`; once the intent is stored, `delivery_status` reports its outcome without needing the file.
 
 Agents can also set or remove the bot's reaction on a known message in their own destination with `message_react`, and receive people's reactions as deliveries or context. Reactions carry their own rolling limit (30 per agent per hour), never count toward any message send limit, and require the bot to be an administrator in the chat for the receiving side. See [message reactions](REACTIONS.md).
@@ -460,7 +462,7 @@ Only the owner's own replies and reactions are routed this way. AOT keeps every 
 | `sending` | A process owns the attempt. A crash can leave an uncertain outcome; restart recovery must not blindly resend. |
 | `sent` | A Telegram acceptance was saved or the operator reconciled an observed acceptance. This is not proof a human read it. |
 | `rejected` | A definite rejection or explicit cancellation is recorded. Inspect status before creating a new intent. |
-| `unknown` | Telegram may have accepted the send. Do not automatically retry or choose a new idempotency key. |
+| `unknown` | Telegram may have accepted the send, and it is often already in the chat. Do not automatically retry or choose a new idempotency key. `message_send` and `delivery_status` add a `next_action` saying so. |
 
 For `unknown`, the operator checks the intended Telegram destination and correlates the publication. Then choose exactly one local resolution:
 

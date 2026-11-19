@@ -21,9 +21,11 @@ class Opener:
     def __init__(self, value):
         self.value = value
         self.requests = []
+        self.timeouts = []
 
     def open(self, request, timeout):
         self.requests.append(request)
+        self.timeouts.append(timeout)
         if isinstance(self.value, BaseException):
             raise self.value
         return Response(self.value)
@@ -152,6 +154,19 @@ def test_send_media_uploads_multipart(method, field, filename, mime):
     assert f"Content-Type: {mime}\r\n\r\n".encode() in body
     assert data in body
     assert SECRET not in body.decode("latin-1")
+
+
+def test_media_uploads_wait_longer_than_text_sends():
+    # Telegram can take more than 15 s to process an upload of a few MB; a
+    # timeout then leaves a send that did reach the chat unknown (issue 144).
+    from agents_over_telegram.transport import MEDIA_SEND_TIMEOUT
+    opener = Opener(b'{"ok":true,"result":{"message_id":9}}')
+    transport = TelegramTransport(SECRET, opener=opener)
+    transport.send_message(-100, "text")
+    transport.send_photo(-100, b"\x89PNG\r\n\x1a\n")
+    transport.send_document(-100, b"GIF89a")
+    assert opener.timeouts == [15, MEDIA_SEND_TIMEOUT, MEDIA_SEND_TIMEOUT]
+    assert MEDIA_SEND_TIMEOUT >= 60
 
 
 def test_send_media_malformed_response_is_unknown():
