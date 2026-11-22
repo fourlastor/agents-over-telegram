@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from agents_over_telegram import cli, hosts, mcp_server, push, relay_api
-from agents_over_telegram.core import Core
+from agents_over_telegram.core import Core, CoreError
 from agents_over_telegram.transport import make_transport
 from test_hosts import connected, receive
 
@@ -201,6 +201,7 @@ def test_the_lost_claim_notice_is_sent_once_until_a_claim_succeeds(project, monk
             raise relay_api.Lost('claim')
         return outcome
     monkeypatch.setattr(node, 'claim', claim)
+    monkeypatch.setattr(node, 'status', lambda: {'pending_messages': 1})
     events, rounds = [], [0]
 
     def keep_running():
@@ -209,3 +210,40 @@ def test_the_lost_claim_notice_is_sent_once_until_a_claim_succeeds(project, monk
     push.watch(relay_api.LazyCore(lambda: None), result['client_id'], events.append, duration=0,
                keep_running=keep_running, remote=node)
     assert events == [push.LOST_CLAIM_EVENT, push.LOST_CLAIM_EVENT]
+
+
+def test_a_lost_claim_wakes_nobody_when_nothing_is_pending(project, monkeypatch):
+    # A slow relay loses claim answers. Each new waiter used to announce at
+    # once, so every turn end woke the agent again for nothing.
+    result, relay = project
+    node = relay_api.Node(result['state_dir'], secret(result))
+    monkeypatch.setattr(node, 'prepare_watch', lambda announce_backlog: None)
+    monkeypatch.setattr(node, 'wait', lambda timeout: True)
+
+    def lost(surface):
+        raise relay_api.Lost('claim')
+    monkeypatch.setattr(node, 'claim', lost)
+    answers = iter([relay_api.Unavailable('no_relay'), 'no_answer', {'pending_messages': 0},
+                    {'pending_messages': 2}])
+    asked = []
+
+    def status():
+        asked.append(1)
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        if answer == 'no_answer':
+            raise CoreError('relay_no_answer')
+        return answer
+    monkeypatch.setattr(node, 'status', status)
+    events, rounds = [], [0]
+
+    def keep_running():
+        rounds[0] += 1
+        return rounds[0] <= 4
+    push.watch(relay_api.LazyCore(lambda: None), result['client_id'], events.append, duration=0,
+               keep_running=keep_running, remote=node)
+    # Unanswered checks are retried; an answer of 0 wakes nobody; the next
+    # lost claim with work waiting does.
+    assert len(asked) == 4
+    assert events == [push.LOST_CLAIM_EVENT]
