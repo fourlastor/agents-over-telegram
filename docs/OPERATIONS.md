@@ -458,7 +458,7 @@ Only the owner's own replies and reactions are routed this way. AOT keeps every 
 
 | Outcome | Meaning and action |
 | --- | --- |
-| `queued` | Intent is durable, but has not been confirmed as sent. Inspect the reason and retry/backoff state. |
+| `queued` | Intent is durable, but has not been confirmed as sent. Inspect the reason and retry/backoff state. With error `not_connected`, the connection to Telegram failed before the request was sent (for example, the network was not back yet after sleep), so nothing reached the chat; AOT tries again after 30 seconds. |
 | `sending` | A process owns the attempt. A crash can leave an uncertain outcome; restart recovery must not blindly resend. |
 | `sent` | A Telegram acceptance was saved or the operator reconciled an observed acceptance. This is not proof a human read it. |
 | `rejected` | A definite rejection or explicit cancellation is recorded. Inspect status before creating a new intent. |
