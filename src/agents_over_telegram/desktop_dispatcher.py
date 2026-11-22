@@ -232,7 +232,8 @@ class NativeDesktopQueue:
             return None
         mains, backends = {}, []
         try:
-            for pid, parent, start, executable, args, routing in MacOSProcesses().candidates(
+            processes = MacOSProcesses()
+            for pid, parent, start, executable, args, routing in processes.candidates(
                     {self.desktop.resolve(), self.binary.resolve()}):
                 if executable == self.desktop.resolve():
                     if not any(re.search(rb'(?:^|\s)--type=', arg) for arg in args):
@@ -241,10 +242,20 @@ class NativeDesktopQueue:
                         arg.startswith((b'--listen', b'--remote')) for arg in args)
                         and self._routing_matches(routing)):
                     backends.append((pid, parent, start))
+            # Since Codex Framework 158 the main process starts a utility
+            # helper inside the app's Frameworks folder, and that helper starts
+            # the app-server (issue 146). Accept that one extra level only.
+            frameworks = (self.bundle / 'Contents' / 'Frameworks').resolve()
+            identities = []
+            for pid, parent, start in backends:
+                if parent not in mains:
+                    helper = processes.utility_parent(parent, frameworks)
+                    if helper is None or helper[0] not in mains:
+                        continue
+                    parent = helper[0]
+                identities.append((parent, mains[parent], pid, start))
         except (OSError, ValueError, UnicodeError, RuntimeError):
             return None
-        identities = [(parent, mains[parent], pid, start) for pid, parent, start in backends
-                      if parent in mains]
         return identities[0] if len(identities) == 1 else None
 
     def desktop_running(self):

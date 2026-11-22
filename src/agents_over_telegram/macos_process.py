@@ -109,6 +109,26 @@ class MacOSProcesses:
         count = self.proc.proc_listpids(2, pgid, pids, ctypes.sizeof(pids))
         return count == 0 and ctypes.get_errno() == 0
 
+    def utility_parent(self, pid, root):
+        """Return (parent, start) for an Electron utility helper under root, or None.
+
+        Newer desktop builds start the app-server from a utility helper inside
+        the app's Frameworks folder instead of from the main process.
+        """
+        try:
+            before = self._info(pid)
+            executable = self._path(pid)
+            if not executable.is_relative_to(root):
+                return None
+            args, _ = parse_procargs(self._sysctl(1, 49, pid))
+            if not any(arg == b'--type=utility' for arg in args):
+                return None
+            if self._info(pid) != before or self._path(pid) != executable:
+                return None
+            return before[1], before[2]
+        except (OSError, ValueError, UnicodeError, RuntimeError):
+            return None
+
     def candidates(self, executables):
         needed = self.proc.proc_listpids(1, 0, None, 0)
         if needed <= 0 or needed > 4 * 1024 * 1024:

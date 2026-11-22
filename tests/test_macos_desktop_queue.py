@@ -145,10 +145,16 @@ def mac_adapter(tmp_path, monkeypatch):
     records = [(100, 1, (123, 456), main.resolve(), [str(main).encode()], b''),
                (101, 100, (234, 567), binary.resolve(), [str(binary).encode(), b'app-server'],
                 b'CODEX_HOME=' + os.fsencode(home))]
+    helpers = {}
     class Processes:
         def candidates(self, executables):
             assert executables == {main.resolve(), binary.resolve()}
             yield from records
+
+        def utility_parent(self, pid, root):
+            assert root == (contents / 'Frameworks').resolve()
+            return helpers.get(pid)
+    q.test_helpers = helpers
     monkeypatch.setattr(macos, 'MacOSProcesses', Processes)
     return q, {'thread_id': ALPHA_THREAD, 'project_dir': str(project)}, records
 
@@ -178,6 +184,41 @@ def test_mac_identity_rejects_ambiguous_or_wrong_backend(mac_adapter, change):
                   'daemon': b'CODEX_APP_SERVER_USE_LOCAL_DAEMON=1'}
         records[1] = (*records[1][:-1], records[1][-1] + b'\0' + values[change])
     assert q.desktop_running() is False
+
+
+def test_mac_backend_under_utility_helper_is_accepted(mac_adapter):
+    # Codex Framework 158: main -> utility helper -> app-server (issue 146).
+    q, _, records = mac_adapter
+    records[1] = (101, 150, *records[1][2:])
+    q.test_helpers[150] = (100, (200, 0))
+    assert q._desktop_identity() == (100, (123, 456), 101, (234, 567))
+
+
+@pytest.mark.parametrize('parent', [999, 1])
+def test_mac_backend_under_helper_of_another_process_is_rejected(mac_adapter, parent):
+    q, _, records = mac_adapter
+    records[1] = (101, 150, *records[1][2:])
+    q.test_helpers[150] = (parent, (200, 0))
+    assert q.desktop_running() is False
+
+
+@pytest.mark.parametrize('case', ['outside', 'renderer', 'race'])
+def test_darwin_utility_parent_requires_helper_inside_the_app(monkeypatch, tmp_path, case):
+    reader = object.__new__(macos.MacOSProcesses)
+    root = tmp_path / 'App.app/Contents/Frameworks'
+    helper = root / 'Codex Framework.framework/Helpers/Codex (Helper).app/Contents/MacOS/Codex (Helper)'
+    calls = {'info': 0}
+    def info(pid):
+        calls['info'] += 1
+        return pid, 100, (999 if case == 'race' and calls['info'] == 2 else 300, 0)
+    monkeypatch.setattr(reader, '_info', info)
+    monkeypatch.setattr(reader, '_path', lambda pid: tmp_path / 'elsewhere' if case == 'outside' else helper)
+    kind = b'--type=renderer' if case == 'renderer' else b'--type=utility'
+    monkeypatch.setattr(reader, '_sysctl', lambda *mib: procargs([os.fsencode(helper), kind], []))
+    assert reader.utility_parent(150, root) is None
+    if case == 'race':
+        calls['info'] = 10
+        assert reader.utility_parent(150, root) == (100, (300, 0))
 
 
 def test_mac_inspection_denied_is_not_desktop_running(mac_adapter, monkeypatch):
