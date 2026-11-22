@@ -47,6 +47,28 @@ def _project(hook_input=None):
     return os.getcwd()
 
 
+def _outside_claude_project(project, hook_input):
+    """True when a Claude Code hook runs for a session outside the project.
+
+    Claude Code gives a worktree session (and any session it starts from the
+    project, in another folder) the parent's CLAUDE_PROJECT_DIR. Its hooks then
+    found the parent's profile, so the session polled and woke for the
+    parent's client and could take the parent's wakes (issue 148). The hook
+    input's "cwd" is the session's own folder: a session working outside the
+    project is not that project's agent.
+    """
+    if os.environ.get("AOT_PROJECT_DIR") or not os.environ.get("CLAUDE_PROJECT_DIR"):
+        return False
+    try:
+        cwd = json.loads(hook_input).get("cwd")
+    except (ValueError, AttributeError, UnicodeError, TypeError):
+        return False
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or "\x00" in cwd:
+        return False
+    cwd = os.path.realpath(cwd)
+    return cwd != project and not cwd.startswith(project.rstrip(os.sep) + os.sep)
+
+
 NOTICE = b"[Agents over Telegram] "
 MAX_NOTICE = 4096
 
@@ -598,6 +620,8 @@ def main(argv):
         if len(hook_input) > MAX_HOOK_INPUT:
             return 0
     project = os.path.realpath(_project(hook_input))
+    if command in HOOK_COMMANDS and hook_input and _outside_claude_project(project, hook_input):
+        return 0
     if command == "mcp":
         # The relay also serves folders that are not set up yet, so the tools
         # can appear later in the same session.

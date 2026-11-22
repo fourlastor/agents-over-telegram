@@ -428,6 +428,43 @@ def test_launcher_idle_flag_is_stripped_and_hook_gets_project(tmp_path):
 
 
 @needs_system_python
+@pytest.mark.parametrize('command', ['hook', 'wake'])
+def test_launcher_ignores_a_claude_session_working_outside_the_project(tmp_path, command):
+    # A Claude Code worktree session inherits the parent's CLAUDE_PROJECT_DIR
+    # but works in its own folder; it must not act for the parent (issue 148).
+    result = prepare(tmp_path, 'claude')
+    project = Path(result['project_dir'])
+    # The wake launcher keeps the runtime's output to itself, so the stub
+    # records each start in a file.
+    marker = tmp_path / 'started'
+    stub = tmp_path / 'bin' / 'aot-marker'
+    stub.parent.mkdir(exist_ok=True)
+    stub.write_text(f'#!/bin/sh\necho "$PWD" >> "{marker}"\n', encoding='utf-8', newline='\n')
+    os.chmod(stub, 0o700)
+    write_pointer(project, {'version': 1, 'executable': str(stub)})
+    worktree = tmp_path / 'worktrees' / 'feature'
+    worktree.mkdir(parents=True)
+    (project / 'src').mkdir()
+
+    def run(cwd, **env):
+        return subprocess.run([SYSTEM_PYTHON, str(LAUNCHER), command, '--host', 'claude'],
+                              input=json.dumps({'hook_event_name': 'Stop', 'cwd': str(cwd)}),
+                              capture_output=True, text=True, cwd=tmp_path, timeout=60,
+                              env=clean_env(CLAUDE_PROJECT_DIR=str(project), **env))
+    def reached(done):
+        started = marker.read_text(encoding='utf-8').splitlines() if marker.exists() else []
+        marker.unlink(missing_ok=True)
+        return started == [str(project)]
+    outside = run(worktree)
+    assert outside.returncode == 0 and not reached(outside)
+    # The project itself and its subfolders still reach the runtime.
+    for cwd in (project, project / 'src'):
+        assert reached(run(cwd))
+    # An explicit AOT_PROJECT_DIR keeps its meaning.
+    assert reached(run(worktree, AOT_PROJECT_DIR=str(project)))
+
+
+@needs_system_python
 def test_launcher_uses_claude_project_dir_then_cwd(tmp_path):
     result = prepare(tmp_path, 'claude')
     project = Path(result['project_dir'])
