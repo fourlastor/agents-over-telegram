@@ -6,6 +6,7 @@ import urllib.error
 
 import pytest
 
+from agents_over_telegram.net import NotConnected
 from agents_over_telegram.credentials import CredentialError, load_token, private_directory, read_private_json, write_private_json
 from agents_over_telegram.transport import FakeTransport, FileFakeTransport, TelegramTransport, TransportError, UnknownSend
 from conftest import posix_only
@@ -170,6 +171,34 @@ def test_media_uploads_wait_longer_than_text_sends():
     # the relay's 90 s call timeout, so the agent still learns the outcome.
     from agents_over_telegram.relay_api import CALL_TIMEOUT
     assert 15 < MEDIA_SEND_TIMEOUT < 60 and MEDIA_SEND_TIMEOUT < CALL_TIMEOUT
+
+
+@pytest.mark.parametrize('failure,code', [
+    (urllib.error.URLError(NotConnected('no route')), 'not_connected'),
+    (NotConnected('handshake'), 'not_connected'),
+    (urllib.error.URLError(ConnectionResetError('reset')), None),
+    (TimeoutError('read'), None)])
+def test_only_a_failed_connect_makes_a_send_definitely_unsent(failure, code):
+    # Before connect returns no request byte has left (issue 150); any later
+    # failure may follow Telegram's acceptance and stays unknown.
+    transport = TelegramTransport(SECRET, opener=Opener(failure))
+    if code is None:
+        with pytest.raises(UnknownSend):
+            transport.send_message(-100, "text")
+    else:
+        with pytest.raises(TransportError) as raised:
+            transport.send_message(-100, "text")
+        assert not isinstance(raised.value, UnknownSend) and raised.value.code == code
+
+
+def test_racing_connection_marks_connect_failures(monkeypatch):
+    import http.client
+    from agents_over_telegram.net import _RacingHTTPSConnection
+    def refused(self):
+        raise ConnectionRefusedError('refused')
+    monkeypatch.setattr(http.client.HTTPSConnection, 'connect', refused)
+    with pytest.raises(NotConnected):
+        _RacingHTTPSConnection('api.telegram.org').connect()
 
 
 def test_send_media_malformed_response_is_unknown():

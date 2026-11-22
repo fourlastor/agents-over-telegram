@@ -117,10 +117,23 @@ def racing_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_ad
     return winner
 
 
+class NotConnected(OSError):
+    """The TCP connect or TLS handshake failed: no request byte was sent."""
+
+
 class _RacingHTTPSConnection(http.client.HTTPSConnection):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._create_connection = racing_connection
+
+    def connect(self):
+        # http.client sends the request only after connect returns. A failure
+        # here (no network after sleep, DNS, refused, TLS handshake) means
+        # Telegram never received this request, so a send may safely retry.
+        try:
+            super().connect()
+        except Exception as error:
+            raise NotConnected(str(error)) from error
 
 
 class RacingHTTPSHandler(urllib.request.HTTPSHandler):

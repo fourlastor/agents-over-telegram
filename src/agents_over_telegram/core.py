@@ -21,7 +21,7 @@ import time
 from typing import Any
 
 from . import compat
-from .transport import TransportError, UnknownSend
+from .transport import NOT_CONNECTED, TransportError, UnknownSend
 from .credentials import CredentialError, private_directory
 from . import judge as judge_module
 from . import markdown
@@ -161,6 +161,10 @@ def _choice_buttons(notify_id, choices):
 
 
 _MEDIA_KINDS = ('document', 'photo', 'video', 'audio', 'voice', 'animation')
+# A send whose connection failed before the request went out waits this long
+# before the next attempt (issue 150): typically the network is still coming
+# back after sleep.
+NOT_CONNECTED_RETRY = 30
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # The Bot API getFile limit.
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # The Bot API sendPhoto size limit.
 MAX_IMAGE_CAPTION = 1024  # The Bot API caption length limit, label header included.
@@ -4061,6 +4065,9 @@ class Core:
                             # Nothing was sent, so the message waits for the new chat.
                             status, error, message_id, due = 'queued', 'group_migrated', None, self.clock()
                             migrated_to = exc.migrate_to_chat_id
+                        elif exc.code == NOT_CONNECTED:
+                            # Nothing reached Telegram, so a later attempt cannot duplicate it.
+                            status, error, message_id, due = 'queued', NOT_CONNECTED, None, self.clock() + NOT_CONNECTED_RETRY
                         elif isinstance(exc.code, int) and 400 <= exc.code < 500:
                             status, error, message_id, due = 'rejected', 'telegram_rejected', None, self.clock()
                         else:
@@ -4129,6 +4136,8 @@ class Core:
                     # deactivated group, so this reaction cannot follow them.
                     status, error, due = 'rejected', 'group_migrated', self.clock()
                     migrated_to = exc.migrate_to_chat_id
+                elif exc.code == NOT_CONNECTED:
+                    status, error, due = 'queued', NOT_CONNECTED, self.clock() + NOT_CONNECTED_RETRY
                 elif isinstance(exc.code, int) and 400 <= exc.code < 500:
                     status, error, due = 'rejected', 'telegram_rejected', self.clock()
                 else:
@@ -4202,6 +4211,8 @@ class Core:
                     wait = exc.retry_after if isinstance(exc.retry_after, (int, float)) and not isinstance(exc.retry_after, bool) and math.isfinite(exc.retry_after) and exc.retry_after > 0 else 60
                     due = self.clock() + min(wait, 86400)
                     status, error = 'queued', 'rate_limited'
+                elif exc.code == NOT_CONNECTED and step != 'forward':
+                    status, error, due = 'queued', NOT_CONNECTED, self.clock() + NOT_CONNECTED_RETRY
                 elif step == 'forward' and isinstance(exc.code, int) and 400 <= exc.code < 500:
                     # The owner already has the text; only the copy of the
                     # group message failed, for example because it was deleted.

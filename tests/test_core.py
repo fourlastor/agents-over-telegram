@@ -879,6 +879,25 @@ def test_rejected_and_unknown_never_automatically_resend(env, outcome, status, e
         assert 'next_action' not in result
 
 
+def test_send_that_never_connected_is_retried(env):
+    # A failed connect or TLS handshake sent nothing, so AOT retries it
+    # instead of leaving it unknown (issue 150).
+    core, transport, clock = env
+    a, _ = bind(core, transport)
+    transport.outcomes = [TransportError('not_connected')]
+    result = core.send(a, 'message', 'key')
+    assert (result['status'], result['error']) == ('queued', 'not_connected')
+    assert 'next_action' not in result
+    calls = len(transport.sent)
+    clock.advance(10)
+    core.flush()
+    assert len(transport.sent) == calls
+    clock.advance(25)
+    core.flush()
+    retried = core.send(a, 'message', 'key')
+    assert retried['status'] == 'sent' and isinstance(retried['message_id'], int)
+
+
 def test_a_sent_message_has_no_next_action(env):
     core, transport, clock = env
     a, _ = bind(core, transport)

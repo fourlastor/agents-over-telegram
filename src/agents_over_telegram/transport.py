@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 
 from . import compat
-from .net import RacingHTTPSHandler
+from .net import NotConnected, RacingHTTPSHandler
 from .credentials import load_token, private_directory, read_private_json, validate_token, write_private_json
 
 
@@ -41,6 +41,10 @@ def _migrate_to(parameters):
     """The new chat id a rejection names after a group became a supergroup, or None."""
     target = parameters.get("migrate_to_chat_id") if isinstance(parameters, dict) else None
     return target if type(target) is int and target < 0 else None
+
+
+# The connection to Telegram failed before the request was sent (issue 150).
+NOT_CONNECTED = "not_connected"
 
 
 class UnknownSend(TransportError):
@@ -133,6 +137,10 @@ class TelegramTransport:
         except TransportError:
             raise
         except Exception as error:
+            if sending and (isinstance(error, NotConnected)
+                            or isinstance(getattr(error, "reason", None), NotConnected)):
+                # Nothing reached Telegram: a definite failure, even for a send.
+                raise TransportError(NOT_CONNECTED) from None
             if sending:
                 raise UnknownSend() from None
             # Named apart, so a call that hung until its timeout can be told
