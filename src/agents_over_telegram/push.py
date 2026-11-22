@@ -219,6 +219,15 @@ LOST_CLAIM_EVENT = {
 RELAY_WAIT = 10.0
 
 
+def _pending_on_relay(remote) -> int | None:
+    """The agent's unacknowledged deliveries as the relay counts them, or None when it does not answer."""
+    try:
+        pending = remote.status().get('pending_messages')
+    except (Lost, Unavailable, CoreError, AttributeError):
+        return None
+    return pending if isinstance(pending, int) and not isinstance(pending, bool) else None
+
+
 def prepare_watch(core, client_id: str, announce_backlog: bool = True) -> None:
     """Set a watcher up: the push tables, and without announce_backlog, the waiting work marked as known."""
     ensure_tables(core)
@@ -277,7 +286,7 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
                 return stopped(error.code)
             raise
     local_ready = False
-    lost_announced = False
+    lost_announced = unsure = False
 
     def ready_locally():
         nonlocal local_ready
@@ -310,11 +319,10 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
                 event = remote.claim('watch')
                 lost_announced = False
             except Lost:
-                # The relay may have recorded the claim already; a local claim
-                # would find nothing. Announce that work may be waiting, once
-                # until a claim gets through again.
-                event = None if lost_announced else LOST_CLAIM_EVENT
-                lost_announced = True
+                # The relay may have recorded the claim already, so a local claim
+                # would find nothing. Below, the relay is asked whether work waits
+                # before the agent is woken: a slow relay must not wake it for nothing.
+                event, unsure = None, True
             except Unavailable:
                 event = _NO_RELAY
             except CoreError as error:
@@ -322,6 +330,15 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
                     return stopped(error.code)
                 event = None
             if event is not _NO_RELAY:
+                if event is not None:
+                    unsure = False
+                elif unsure and not lost_announced:
+                    pending = _pending_on_relay(remote)
+                    if pending is not None:
+                        # Announce once until a claim gets through again.
+                        unsure = False
+                        if pending:
+                            event, lost_announced = LOST_CLAIM_EVENT, True
                 if event is not None:
                     emit(event)
                     events += 1
