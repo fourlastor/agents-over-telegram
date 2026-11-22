@@ -165,6 +165,9 @@ _MEDIA_KINDS = ('document', 'photo', 'video', 'audio', 'voice', 'animation')
 # before the next attempt (issue 150): typically the network is still coming
 # back after sleep.
 NOT_CONNECTED_RETRY = 30
+NOT_CONNECTED_ACTION = (
+    'Nothing reached Telegram: the connection failed before the message was sent. AOT sends it again by '
+    'itself. Do not send it again; check delivery_status later.')
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # The Bot API getFile limit.
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # The Bot API sendPhoto size limit.
 MAX_IMAGE_CAPTION = 1024  # The Bot API caption length limit, label header included.
@@ -3961,6 +3964,8 @@ class Core:
         status = {'outbox_id': row['id'], 'status': row['status'], 'error': row['error'], 'message_id': row['message_id'], 'recipient': row['recipient'], 'conversation_id': row['conversation_id'], 'created_at': row['created'], 'updated_at': row['updated'], 'retry_at': row['due'] if row['status'] == 'queued' else None}
         if row['status'] == 'unknown':
             status['next_action'] = UNKNOWN_SEND_ACTION
+        elif row['status'] == 'queued' and row['error'] == NOT_CONNECTED:
+            status['next_action'] = NOT_CONNECTED_ACTION
         return status
 
     def delivery_status(self, client_id, outbox_id):

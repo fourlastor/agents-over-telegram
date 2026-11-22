@@ -66,7 +66,18 @@ def _outside_claude_project(project, hook_input):
     if not isinstance(cwd, str) or not os.path.isabs(cwd) or "\x00" in cwd:
         return False
     cwd = os.path.realpath(cwd)
-    return cwd != project and not cwd.startswith(project.rstrip(os.sep) + os.sep)
+    if cwd == project:
+        return False
+    if not cwd.startswith(project.rstrip(os.sep) + os.sep):
+        return True
+    # A git checkout inside the project, such as a Claude Code CLI worktree
+    # in <project>/.claude/worktrees/<name>, is a separate session folder.
+    folder = cwd
+    while folder != project:
+        if os.path.lexists(os.path.join(folder, ".git")):
+            return True
+        folder = os.path.dirname(folder)
+    return False
 
 
 NOTICE = b"[Agents over Telegram] "

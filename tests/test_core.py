@@ -887,7 +887,7 @@ def test_send_that_never_connected_is_retried(env):
     transport.outcomes = [TransportError('not_connected')]
     result = core.send(a, 'message', 'key')
     assert (result['status'], result['error']) == ('queued', 'not_connected')
-    assert 'next_action' not in result
+    assert 'sends it again by itself' in result['next_action']
     calls = len(transport.sent)
     clock.advance(10)
     core.flush()
@@ -896,6 +896,7 @@ def test_send_that_never_connected_is_retried(env):
     core.flush()
     retried = core.send(a, 'message', 'key')
     assert retried['status'] == 'sent' and isinstance(retried['message_id'], int)
+    assert 'next_action' not in retried
 
 
 def test_a_sent_message_has_no_next_action(env):

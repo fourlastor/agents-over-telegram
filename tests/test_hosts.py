@@ -457,6 +457,11 @@ def test_launcher_ignores_a_claude_session_working_outside_the_project(tmp_path,
         return started == [str(project)]
     outside = run(worktree)
     assert outside.returncode == 0 and not reached(outside)
+    # A Claude Code CLI worktree sits inside the project, in its own checkout.
+    inner = project / '.claude' / 'worktrees' / 'feature'
+    (inner / 'src').mkdir(parents=True)
+    (inner / '.git').write_text('gitdir: elsewhere\n', encoding='utf-8')
+    assert not reached(run(inner)) and not reached(run(inner / 'src'))
     # The project itself and its subfolders still reach the runtime.
     for cwd in (project, project / 'src'):
         assert reached(run(cwd))
