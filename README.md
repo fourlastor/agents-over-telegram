@@ -4,7 +4,7 @@ Agents over Telegram (AOT) connects a coding agent project to a Telegram group o
 
 ## Supported agent hosts
 
-Version 0.11.3 supports **Claude Code**, **Codex**, **Pi**, **Amp** and **Antigravity** (the `agy` CLI and the desktop app), and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Every host works the same way: you install AOT for the host once, then ask the agent to connect each project. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
+Version 0.11.4 supports **Claude Code**, **Codex**, **Pi**, **Amp** and **Antigravity** (the `agy` CLI and the desktop app), and, untested, **Grok Bot** (see [hosts](docs/HOSTS.md#grok-bot-untested)). Every host works the same way: you install AOT for the host once, then ask the agent to connect each project. A new Telegram message reaches the running agent without a typed prompt: an idle agent wakes up, and a busy agent gets a notice at its next safe point. The notice never contains the message text; the agent reads it with its scoped Telegram tools.
 
 [Agent hosts](docs/HOSTS.md) explains how each integration works and lists exactly what was tested. Most host checks used real host processes with a fake Telegram transport, not live Telegram.
 
