@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import datetime
 import hashlib
 import hmac
 import json
@@ -132,6 +133,39 @@ def _mapping(value: Any) -> dict:
 
 def _bounded(value: Any, maximum: int = 128) -> str:
     return ''.join(c for c in str(value)[:maximum] if c.isprintable())
+
+
+def _waits(row, now):
+    """True for a queued send that is waiting for a later time with no error."""
+    return row['status'] == 'queued' and not row['error'] and row['due'] is not None and row['due'] > now
+
+
+# How far ahead send_at may schedule a message or owner notice.
+MAX_SEND_AHEAD = 7 * 24 * 3600
+SCHEDULED_ACTION = ('AOT sends it by itself at retry_at (Unix time), also when no agent session is running. '
+                    'Do not send it again.')
+
+
+def _send_at(value, now):
+    """The Unix time for an ISO 8601 send_at with a UTC offset; None when not given.
+
+    A time in the past sends at once. A time without an offset is refused, so a
+    host's local time zone never decides when a message goes out.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not 1 <= len(value) <= 64:
+        raise CoreError('invalid_send_at')
+    try:
+        moment = datetime.datetime.fromisoformat(value.strip().replace('Z', '+00:00').replace('z', '+00:00'))
+    except ValueError:
+        raise CoreError('invalid_send_at') from None
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise CoreError('invalid_send_at')
+    due = moment.timestamp()
+    if due > now + MAX_SEND_AHEAD:
+        raise CoreError('send_at_too_far')
+    return max(due, now)
 
 
 def _check_choices(choices):
@@ -3169,7 +3203,8 @@ class Core:
             with contextlib.suppress(OSError):
                 (self.state_dir / 'outbox-images' / name).unlink()
 
-    def send(self, client_id, text, idempotency_key, recipient=None, reply_to=None, conversation_id=None, image_path=None):
+    def send(self, client_id, text, idempotency_key, recipient=None, reply_to=None, conversation_id=None, image_path=None,
+             send_at=None):
         if not isinstance(text, str) or not 1 <= len(text) <= 3500:
             raise CoreError('invalid_text')
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 128:
@@ -3186,8 +3221,15 @@ class Core:
         parts = [text, recipient, reply_to, conversation_id]
         if image is not None:
             parts.append(image['sha256'])
-        request_hash = _digest(json.dumps(parts))
         now = self.clock()
+        due = _send_at(send_at, now)
+        if due is not None and recipient is not None:
+            # A peer gets its copy at once through the broker, so it cannot wait.
+            raise CoreError('send_at_with_recipient')
+        if send_at is not None:
+            # The time as given, so a retry with the same text and time matches.
+            parts.append(['send_at', send_at])
+        request_hash = _digest(json.dumps(parts))
         with self._tx() as db:
             client = self._client(db, client_id)
             existing = db.execute('SELECT * FROM outbox WHERE client_id=? AND idempotency_key=?', (client_id, idempotency_key)).fetchone()
@@ -3256,7 +3298,7 @@ class Core:
                     # or unknown record never depends on the agent's source file.
                     self._store_outbox_image(stored_image, image['data'])
                 try:
-                    db.execute('INSERT INTO outbox(id,client_id,recipient,chat_id,thread_id,idempotency_key,request_hash,text,reply_to,conversation_id,status,image,created,updated,due) VALUES(?,?,?,?,?,?,?,?,?,?,\'queued\',?,?,?,?)', (outbox_id, client_id, recipient, binding['chat_id'], binding['thread_id'], idempotency_key, request_hash, publication, reply_to, conversation, stored_image, now, now, now))
+                    db.execute('INSERT INTO outbox(id,client_id,recipient,chat_id,thread_id,idempotency_key,request_hash,text,reply_to,conversation_id,status,image,created,updated,due) VALUES(?,?,?,?,?,?,?,?,?,?,\'queued\',?,?,?,?)', (outbox_id, client_id, recipient, binding['chat_id'], binding['thread_id'], idempotency_key, request_hash, publication, reply_to, conversation, stored_image, now, now, now if due is None else due))
                     db.execute('UPDATE conversations SET send_count=send_count+1 WHERE id=?', (conversation,))
                     if recipient:
                         payload = {'origin': 'broker', 'kind': 'message', 'text': text, 'logical_sender': {'client_id': client_id, 'label': client['label']}, 'actual_bot': {'id': account['bot_id'], 'username': account['username']}, 'chat_id': binding['chat_id'], 'thread_id': binding['thread_id'] or None}
@@ -3862,7 +3904,8 @@ class Core:
                                            'routed_to_answered_ms': round((self.clock() - row['created']) * 1000),
                                            **calls})
 
-    def owner_notify(self, client_id, text, idempotency_key, forward_message_id=None, reply_to=None, choices=None):
+    def owner_notify(self, client_id, text, idempotency_key, forward_message_id=None, reply_to=None, choices=None,
+                     send_at=None):
         """Queue one low-volume notification to the owner's private chat with the bot.
 
         The owner is the person who paired this destination; in a private chat
@@ -3874,6 +3917,8 @@ class Core:
         in the owner's private chat that belongs to this agent. ``choices`` adds
         2-4 answer buttons; the owner's press arrives as an ``owner_choice``
         delivery, and a text reply to the notice still works as usual.
+        ``send_at`` queues the notice for a later time; the collector sends it
+        then. Limits count it when it is queued.
         """
         if not isinstance(text, str) or not 1 <= len(text) <= 3500:
             raise CoreError('invalid_text')
@@ -3887,8 +3932,12 @@ class Core:
         # Requests without reply_to or choices keep their earlier hash, so old keys still match.
         parts = [text, forward_message_id] + ([reply_to] if reply_to is not None or choices else [])
         parts += [choices] if choices else []
-        request_hash = _digest(json.dumps(parts))
         now = self.clock()
+        due = _send_at(send_at, now)
+        if send_at is not None:
+            parts.append(['send_at', send_at])
+        request_hash = _digest(json.dumps(parts))
+        due = now if due is None else due
         with self._tx() as db:
             client = self._client(db, client_id)
             existing = db.execute('SELECT * FROM owner_outbox WHERE client_id=? AND idempotency_key=?',
@@ -3929,9 +3978,9 @@ class Core:
                            "VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
                            (notify_id, client_id, binding['owner_id'], labelled,
                             binding['chat_id'] if forward_message_id is not None else None, forward_message_id,
-                            reply_to, int(answers_owner), idempotency_key, request_hash, now, now, now,
+                            reply_to, int(answers_owner), idempotency_key, request_hash, now, now, due,
                             json.dumps(choices) if choices else None,
-                            now + self.OWNER_CHOICE_SECONDS if choices else None))
+                            due + self.OWNER_CHOICE_SECONDS if choices else None))
             username = self._account(db)['username']
         self.flush(client_id=client_id, limit=20)
         status = self.delivery_status(client_id, notify_id)
@@ -3940,8 +3989,7 @@ class Core:
             raise CoreError('owner_chat_not_started', details={'bot_username': username})
         return status
 
-    @staticmethod
-    def _owner_status(row):
+    def _owner_status(self, row):
         return {'notify_id': row['id'], 'kind': 'owner_notify', 'status': row['status'],
                 'error': row['error'], 'message_id': row['message_id'],
                 'forward_message_id': row['forward_message_id'],
@@ -3950,7 +3998,8 @@ class Core:
                 **({'choices': json.loads(row['choices']), 'choice': row['choice'],
                     'choice_expires_at': row['choice_expires']} if row['choices'] else {}),
                 'created_at': row['created'], 'updated_at': row['updated'],
-                'retry_at': row['due'] if row['status'] == 'queued' else None}
+                'retry_at': row['due'] if row['status'] == 'queued' else None,
+                **({'next_action': SCHEDULED_ACTION} if _waits(row, self.clock()) else {})}
 
     @staticmethod
     def _reaction_status(row):
@@ -3966,6 +4015,8 @@ class Core:
             status['next_action'] = UNKNOWN_SEND_ACTION
         elif row['status'] == 'queued' and row['error'] == NOT_CONNECTED:
             status['next_action'] = NOT_CONNECTED_ACTION
+        elif _waits(row, self.clock()):
+            status['next_action'] = SCHEDULED_ACTION
         return status
 
     def delivery_status(self, client_id, outbox_id):
