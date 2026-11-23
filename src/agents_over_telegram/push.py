@@ -144,7 +144,8 @@ def last_notice(db, client_id: str, listener: str | None = None) -> float | None
     elif 'push_announcements' in tables:
         times.append(db.execute('SELECT max(announced) FROM push_announcements WHERE client_id=?',
                                 (client_id,)).fetchone()[0])
-    if 'relay_notifications' in tables:
+    if listener is None and 'relay_notifications' in tables:
+        # A desktop wake reaches another session, so it never paces a listener.
         times.append(db.execute("SELECT max(created) FROM relay_notifications WHERE client_id=? "
                                 "AND status='accepted'", (client_id,)).fetchone()[0])
     times = [value for value in times if value is not None]
