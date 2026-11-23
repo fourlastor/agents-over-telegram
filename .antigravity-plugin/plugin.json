@@ -1,7 +1,7 @@
 {
   "name": "agents-over-telegram",
   "displayName": "Agents over Telegram",
-  "version": "0.11.6",
+  "version": "0.11.7",
   "description": "Connect this agent to a Telegram group or topic: ask \"Connect this agent to Telegram\". New messages wake the running agent.",
   "logo": "assets/logo.svg",
   "author": {

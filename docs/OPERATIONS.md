@@ -444,6 +444,17 @@ Only the owner's own replies and reactions are routed this way. AOT keeps every 
 
 `owner_notify` uses the same idempotency rules as `message_send`. The same key with the same request returns the same outcome. The same key with a different request is refused. `delivery_status` shows the outcome. An `unknown` outcome follows [uncertain-send recovery](#uncertain-sends) with the `owner_…` id. A `retry` repeats only the step that has no recorded message: the notice text or the forward.
 
+### Send later with `send_at`
+
+`message_send` and `owner_notify` take an optional `send_at` to send at a later time. Use it for a reminder that must arrive even if no agent session is running then. It is an ISO 8601 time with a UTC offset, for example `2026-11-24T09:00:00+01:00`, at most 7 days ahead. The tool stores the send as `queued` with `retry_at` set to that time and returns at once. The always-on collector (`aot serve`) sends it when it is due. Without that service, the send goes out at the next poll, send or flush after that time.
+
+- A time in the past sends at once. A time without an offset is refused with `invalid_send_at`. A time more than 7 days ahead is refused with `send_at_too_far`.
+- The limits count the send when it is queued, not when it goes out.
+- Choice buttons on a scheduled notice expire 24 hours after the send time.
+- `message_send` with `recipient` cannot use `send_at` (`send_at_with_recipient`), because the peer gets its copy at once.
+- `send_at` is part of the request. The same key with the same text and time returns the same send. The same key with another time is refused.
+- `delivery_status` shows a waiting send as `queued` with a `next_action` that tells the agent not to send it again.
+
 | Error code | Meaning |
 | --- | --- |
 | `owner_notify_disabled` | The owner has not turned on `owner_notify` for this connection. Nothing was sent, and it does not count toward the limit. The agent asks the owner; only the owner runs `delivery-settings --owner-notify on`. |
