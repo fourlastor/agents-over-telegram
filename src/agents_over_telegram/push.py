@@ -71,6 +71,14 @@ def ensure_tables(core) -> None:
             client_id TEXT NOT NULL REFERENCES clients(id),
             surface TEXT NOT NULL, announced REAL NOT NULL)''')
         db.execute('CREATE INDEX IF NOT EXISTS push_announcements_client ON push_announcements(client_id)')
+        # One row per delivery and listening session (its wake key). Sessions
+        # that share a connection, such as a forked side session, each get
+        # their own notice, so one that leaves a message unread cannot use up
+        # the only wake.
+        db.execute('''CREATE TABLE IF NOT EXISTS push_listener_announcements (
+            inbox_id TEXT NOT NULL REFERENCES inbox(id),
+            listener TEXT NOT NULL, client_id TEXT NOT NULL REFERENCES clients(id),
+            announced REAL NOT NULL, PRIMARY KEY(inbox_id, listener))''')
 
 
 def _sender(payload: dict) -> str | None:
@@ -154,32 +162,56 @@ def held(db, binding, payloads, now) -> bool:
     return not any(_wakes_at_once(payload, binding, exempt) for payload in payloads)
 
 
-def claim_new(core, client_id: str, surface: str, *, limit: int = 50) -> dict[str, Any] | None:
+_LISTENER = re.compile(r'[0-9a-f]{24}')
+
+
+def _listener(value) -> str | None:
+    """A session's wake key, or None for a caller that names no session."""
+    return value if isinstance(value, str) and _LISTENER.fullmatch(value) else None
+
+
+def claim_new(core, client_id: str, surface: str, *, limit: int = 50, listener: str | None = None
+              ) -> dict[str, Any] | None:
     """Atomically record and summarize deliveries not yet announced to this client.
 
+    With a listener (a session's wake key), "not yet announced" counts for that
+    session only, so every session that shares the connection hears of each
+    delivery once. Without one, a delivery is announced once for the client.
     Paused or suspended connections announce nothing; their work stays queued.
     Deliveries already leased by a poll are skipped because a host is handling them.
     """
     if surface not in SURFACES:
         raise CoreError('invalid_push_surface')
+    listener = _listener(listener)
     now = core.clock()
     with core._tx() as db:
         binding = core._binding(db, client_id)
         if binding['paused'] or binding['suspended']:
             return None
-        rows = db.execute('''SELECT i.id,i.payload FROM inbox i
-            LEFT JOIN push_announcements p ON p.inbox_id=i.id
-            WHERE i.client_id=? AND i.acknowledged=0 AND p.inbox_id IS NULL
-            AND (i.lease_until IS NULL OR i.lease_until<=?)
-            ORDER BY i.created,i.rowid LIMIT ?''', (client_id, now, limit)).fetchall()
+        if listener is None:
+            rows = db.execute('''SELECT i.id,i.payload FROM inbox i
+                LEFT JOIN push_announcements p ON p.inbox_id=i.id
+                WHERE i.client_id=? AND i.acknowledged=0 AND p.inbox_id IS NULL
+                AND (i.lease_until IS NULL OR i.lease_until<=?)
+                ORDER BY i.created,i.rowid LIMIT ?''', (client_id, now, limit)).fetchall()
+        else:
+            rows = db.execute('''SELECT i.id,i.payload FROM inbox i
+                LEFT JOIN push_listener_announcements p ON p.inbox_id=i.id AND p.listener=?
+                WHERE i.client_id=? AND i.acknowledged=0 AND p.inbox_id IS NULL
+                AND (i.lease_until IS NULL OR i.lease_until<=?)
+                ORDER BY i.created,i.rowid LIMIT ?''', (listener, client_id, now, limit)).fetchall()
         if not rows:
             return None
         if held(db, binding, [json.loads(row['payload']) for row in rows], now):
             return None
         senders: list[str] = []
         for row in rows:
-            db.execute('INSERT INTO push_announcements(inbox_id,client_id,surface,announced) VALUES(?,?,?,?)',
-                       (row['id'], client_id, surface, now))
+            # The first announcement stays the record of when the client heard of it.
+            db.execute('INSERT OR IGNORE INTO push_announcements(inbox_id,client_id,surface,announced) '
+                       'VALUES(?,?,?,?)', (row['id'], client_id, surface, now))
+            if listener is not None:
+                db.execute('INSERT OR IGNORE INTO push_listener_announcements(inbox_id,listener,client_id,announced) '
+                           'VALUES(?,?,?,?)', (row['id'], listener, client_id, now))
             label = _sender(json.loads(row['payload']))
             if label and label not in senders and len(senders) < MAX_SENDERS:
                 senders.append(label)
@@ -228,16 +260,21 @@ def _pending_on_relay(remote) -> int | None:
     return pending if isinstance(pending, int) and not isinstance(pending, bool) else None
 
 
-def prepare_watch(core, client_id: str, announce_backlog: bool = True) -> None:
+def prepare_watch(core, client_id: str, announce_backlog: bool = True, listener: str | None = None) -> None:
     """Set a watcher up: the push tables, and without announce_backlog, the waiting work marked as known."""
     ensure_tables(core)
     if announce_backlog:
         return
+    listener = _listener(listener)
     with core._tx() as db:
         core._client(db, client_id)
         db.execute('''INSERT OR IGNORE INTO push_announcements(inbox_id,client_id,surface,announced)
             SELECT id,client_id,'watch',? FROM inbox WHERE client_id=? AND acknowledged=0''',
                    (core.clock(), client_id))
+        if listener is not None:
+            db.execute('''INSERT OR IGNORE INTO push_listener_announcements(inbox_id,listener,client_id,announced)
+                SELECT id,?,client_id,? FROM inbox WHERE client_id=? AND acknowledged=0''',
+                       (listener, core.clock(), client_id))
 
 
 def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool = False,
@@ -246,7 +283,7 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
           announce_backlog: bool = True,
           keep_running: Callable[[], bool] | None = None,
           wait_for_change: Callable[[float], bool] | None = None,
-          remote: Any = None) -> dict[str, Any]:
+          remote: Any = None, listener: str | None = None) -> dict[str, Any]:
     """Emit one event per batch of new deliveries until the duration ends.
 
     ``keep_running`` is checked once per cycle; the CLI uses it to stop when the
@@ -277,7 +314,7 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
     relay = remote is not None
     if relay:
         try:
-            remote.prepare_watch(announce_backlog)
+            remote.prepare_watch(announce_backlog, listener)
         except (Unavailable, Lost):
             # Setting up is idempotent, so a lost answer is safe to redo here.
             relay = False
@@ -293,7 +330,7 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
         if not local_ready:
             # Already waiting work stays announced once: a backlog the relay
             # marked is in the same table.
-            prepare_watch(core, client_id, announce_backlog or relay)
+            prepare_watch(core, client_id, announce_backlog or relay, listener)
             local_ready = True
 
     if not relay:
@@ -316,7 +353,7 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
             relayed = waiter(limit)
         if relayed and remote is not None:
             try:
-                event = remote.claim('watch')
+                event = remote.claim('watch', listener)
                 lost_announced = False
             except Lost:
                 # The relay may have recorded the claim already, so a local claim
@@ -374,7 +411,7 @@ def watch(core, client_id: str, emit: Callable[[dict], None], *, collect: bool =
                     break
                 core.judge()  # a "yes" becomes a delivery, announced right after
             try:
-                event = claim_new(core, client_id, 'watch')
+                event = claim_new(core, client_id, 'watch', listener=listener)
             except CoreError as error:
                 if error.code in FATAL_CODES:
                     return stopped(error.code)
@@ -424,7 +461,8 @@ def hook_response(core, client_id: str, event: str, payload: dict) -> dict[str, 
             return None
     if event == 'Stop' and payload.get('stop_hook_active') is True:
         return None
-    claimed = claim_new(core, client_id, 'hook')
+    # The host process names its session, so each session hears of a delivery once.
+    claimed = claim_new(core, client_id, 'hook', listener=payload.get('listener'))
     if claimed is None and event in ('SessionStart', 'UserPromptSubmit'):
         claimed = pending_summary(core, client_id)
     if event in ('SessionStart', 'UserPromptSubmit'):

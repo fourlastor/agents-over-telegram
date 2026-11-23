@@ -2135,7 +2135,7 @@ class Core:
         for start in range(0, len(stale), 500):
             chunk = stale[start:start + 500]
             marks = ','.join('?' * len(chunk))
-            for table in ('push_announcements', 'relay_deliveries'):
+            for table in ('push_announcements', 'push_listener_announcements', 'relay_deliveries'):
                 if table in tables:
                     db.execute(f'DELETE FROM {table} WHERE inbox_id IN ({marks})', chunk)
             db.execute(f'DELETE FROM inbox WHERE context=1 AND id IN ({marks})', chunk)

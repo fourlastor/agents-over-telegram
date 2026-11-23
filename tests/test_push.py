@@ -700,3 +700,53 @@ def test_watch_stops_when_keep_running_turns_false(env):
     result, events = run_watch(core, a, loop, interval=1, duration=0, keep_running=keep_running)
     assert result == {'events': 0, 'reason': 'parent_exited'}
     assert events == [] and len(checks) == 3
+
+
+# ---------------------------------------------------------------- sessions that share a connection
+
+MAIN, SIDE = 'a' * 24, 'b' * 24
+
+
+def test_each_listening_session_hears_of_a_delivery_once(env):
+    # A forked side session took the only wake and left the message unread;
+    # the main session never heard of it. Now each session gets its own notice.
+    core, transport, _ = env
+    a = bind(core, transport)
+    deliver(core, transport, 'remind me at half past ten')
+    side = push.claim_new(core, a, 'watch', listener=SIDE)
+    assert side['new'] == 1
+    assert push.claim_new(core, a, 'watch', listener=SIDE) is None
+    main = push.claim_new(core, a, 'watch', listener=MAIN)
+    assert main['delivery_ids'] == side['delivery_ids']
+    assert push.claim_new(core, a, 'watch', listener=MAIN) is None
+    # The client-wide record keeps the first announcement only.
+    assert len(announced(core)) == 1
+    assert push.claim_new(core, a, 'watch') is None
+
+
+def test_a_session_that_saw_a_delivery_in_a_hook_is_not_woken_for_it(env):
+    core, transport, _ = env
+    a = bind(core, transport)
+    deliver(core, transport)
+    answer = push.hook_response(core, a, 'PostToolUse', {'tool_name': 'Bash', 'listener': MAIN})
+    assert 'new Telegram message' in answer['hookSpecificOutput']['additionalContext']
+    assert push.claim_new(core, a, 'watch', listener=MAIN) is None
+    assert push.claim_new(core, a, 'watch', listener=SIDE)['new'] == 1
+
+
+def test_handled_deliveries_wake_no_other_session(env):
+    core, transport, _ = env
+    a = bind(core, transport)
+    deliver(core, transport)
+    assert push.claim_new(core, a, 'watch', listener=MAIN)['new'] == 1
+    polled = core.poll(a)
+    core.ack(a, [d['delivery_id'] for d in polled['deliveries']], polled['lease_token'])
+    assert push.claim_new(core, a, 'watch', listener=SIDE) is None
+
+
+def test_a_malformed_listener_counts_as_none(env):
+    core, transport, _ = env
+    a = bind(core, transport)
+    deliver(core, transport)
+    assert push.claim_new(core, a, 'watch', listener='not a wake key')['new'] == 1
+    assert push.claim_new(core, a, 'watch', listener='../../x') is None
