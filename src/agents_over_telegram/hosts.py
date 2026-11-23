@@ -104,6 +104,7 @@ def hook_answer(args, raw: str) -> dict | None:
     state = Path(profile['state_dir'])
     if not state.is_dir():
         return None
+    payload = _with_listener(payload, profile['client_id'], payload.get('session_id'))
     answer = _relayed_hook(state, Path(profile['client_file']), event, payload)
     if answer is _NO_RELAY:
         # No relay: this hook does the inbox work on its own database handle.
@@ -218,7 +219,9 @@ def antigravity_answer(args, payload: dict) -> dict | None:
     state = Path(profile['state_dir'])
     if not state.is_dir():
         return None
-    answer = _inbox_answer(args, state, profile, mapped, {'hook_event_name': mapped})
+    answer = _inbox_answer(args, state, profile, mapped,
+                           _with_listener({'hook_event_name': mapped}, profile['client_id'],
+                                          payload.get('conversationId')))
     notice = None
     if isinstance(answer, dict):
         notice = answer.get('reason') or (answer.get('hookSpecificOutput') or {}).get('additionalContext')
@@ -252,7 +255,19 @@ def _inbox_answer(args, state: Path, profile: dict, event: str, payload: dict):
     return answer
 # The hook input fields hook_response reads; the rest (prompts, tool output)
 # never leaves this process.
-_HOOK_FIELDS = ('tool_name', 'stop_hook_active')
+_HOOK_FIELDS = ('tool_name', 'stop_hook_active', 'listener')
+
+
+def _with_listener(payload: dict, client_id: str, session) -> dict:
+    """The hook input plus this session's wake key, so the session hears of each delivery once.
+
+    A host input never chooses the key itself: any listener field in it is replaced.
+    """
+    session = _session_id(session)
+    payload = {k: v for k, v in payload.items() if k != 'listener'}
+    if session:
+        payload['listener'] = wake_key(client_id, session)
+    return payload
 
 
 def _relayed_hook(state: Path, client_file: Path, event: str, payload: dict):
@@ -552,7 +567,7 @@ def _wake(args, log=None) -> int:
 
     try:
         result = watch(core, client_id, emit, collect=True, duration=duration, keep_running=keep_running,
-                       remote=remote)
+                       remote=remote, listener=key)
     except _Woken:
         if antigravity:
             # Antigravity wakes the agent when this background command ends

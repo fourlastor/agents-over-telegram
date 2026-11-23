@@ -140,7 +140,7 @@ def test_a_lost_claim_is_announced_not_claimed_again(project, monkeypatch):
     def keep_running():
         rounds[0] += 1
         return rounds[0] <= 1
-    monkeypatch.setattr(node, 'prepare_watch', lambda announce_backlog: None)
+    monkeypatch.setattr(node, 'prepare_watch', lambda announce_backlog, listener=None: None)
     push.watch(core, result['client_id'], events.append, collect=True, duration=0, keep_running=keep_running,
                remote=node)
     assert events == [push.LOST_CLAIM_EVENT] and opened == []
@@ -173,7 +173,7 @@ def test_a_lost_setup_answer_keeps_the_waiter_running(project, monkeypatch):
     result, relay = project
     node = relay_api.Node(result['state_dir'], secret(result))
 
-    def lost(announce_backlog):
+    def lost(announce_backlog, listener=None):
         raise relay_api.Lost('watch_prepare')
     monkeypatch.setattr(node, 'prepare_watch', lost)
     state = Path(result['state_dir'])
@@ -191,11 +191,11 @@ def test_a_lost_setup_answer_keeps_the_waiter_running(project, monkeypatch):
 def test_the_lost_claim_notice_is_sent_once_until_a_claim_succeeds(project, monkeypatch):
     result, relay = project
     node = relay_api.Node(result['state_dir'], secret(result))
-    monkeypatch.setattr(node, 'prepare_watch', lambda announce_backlog: None)
+    monkeypatch.setattr(node, 'prepare_watch', lambda announce_backlog, listener=None: None)
     monkeypatch.setattr(node, 'wait', lambda timeout: True)
     outcomes = iter(['lost', 'lost', None, 'lost'])
 
-    def claim(surface):
+    def claim(surface, listener=None):
         outcome = next(outcomes)
         if outcome == 'lost':
             raise relay_api.Lost('claim')
@@ -217,10 +217,10 @@ def test_a_lost_claim_wakes_nobody_when_nothing_is_pending(project, monkeypatch)
     # once, so every turn end woke the agent again for nothing.
     result, relay = project
     node = relay_api.Node(result['state_dir'], secret(result))
-    monkeypatch.setattr(node, 'prepare_watch', lambda announce_backlog: None)
+    monkeypatch.setattr(node, 'prepare_watch', lambda announce_backlog, listener=None: None)
     monkeypatch.setattr(node, 'wait', lambda timeout: True)
 
-    def lost(surface):
+    def lost(surface, listener=None):
         raise relay_api.Lost('claim')
     monkeypatch.setattr(node, 'claim', lost)
     answers = iter([relay_api.Unavailable('no_relay'), 'no_answer', {'pending_messages': 0},
@@ -247,3 +247,21 @@ def test_a_lost_claim_wakes_nobody_when_nothing_is_pending(project, monkeypatch)
     # lost claim with work waiting does.
     assert len(asked) == 4
     assert events == [push.LOST_CLAIM_EVENT]
+
+
+def test_sessions_that_share_a_connection_each_get_a_relayed_notice(project):
+    result, relay = project
+    receive(result, 'hello')
+    node = relay_api.Node(result['state_dir'], secret(result))
+    side = hosts.wake_key(result['client_id'], 'side-session')
+    main = hosts.wake_key(result['client_id'], 'main-session')
+    node.prepare_watch(True, side)
+    assert node.claim('watch', side)['new'] == 1
+    assert node.claim('watch', side) is None
+    assert node.claim('watch', main)['new'] == 1
+
+
+def test_a_hook_names_its_own_session_and_never_the_host_input_s():
+    payload = hosts._with_listener({'session_id': 'abc', 'listener': 'f' * 24, 'tool_name': 'Bash'}, 'agent_1', 'abc')
+    assert payload['listener'] == hosts.wake_key('agent_1', 'abc') and payload['tool_name'] == 'Bash'
+    assert 'listener' not in hosts._with_listener({'listener': 'f' * 24}, 'agent_1', None)

@@ -281,9 +281,11 @@ class Relay:
                     return {'protocol': PROTOCOL, 'ok': False, 'error': 'bad_request'}
                 result = push.hook_response(self.core, client_id, event, payload)
             elif op == 'claim':
-                result = push.claim_new(self.core, client_id, request.get('surface'))
+                result = push.claim_new(self.core, client_id, request.get('surface'),
+                                        listener=request.get('listener'))
             else:  # watch_prepare
-                push.prepare_watch(self.core, client_id, request.get('announce_backlog') is not False)
+                push.prepare_watch(self.core, client_id, request.get('announce_backlog') is not False,
+                                   request.get('listener'))
                 result = None
         except CoreError as error:
             return {'protocol': PROTOCOL, 'ok': True, 'error_code': error.code}
@@ -554,11 +556,11 @@ class Node:
     def hook(self, event, payload):
         return self._op('hook', event=event, payload=payload)
 
-    def claim(self, surface):
-        return self._op('claim', surface=surface)
+    def claim(self, surface, listener=None):
+        return self._op('claim', surface=surface, listener=listener)
 
-    def prepare_watch(self, announce_backlog):
-        self._op('watch_prepare', announce_backlog=announce_backlog)
+    def prepare_watch(self, announce_backlog, listener=None):
+        self._op('watch_prepare', announce_backlog=announce_backlog, listener=listener)
 
     def wait(self, timeout):
         return self.waiter(timeout)
