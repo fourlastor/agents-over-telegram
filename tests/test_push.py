@@ -750,3 +750,21 @@ def test_a_malformed_listener_counts_as_none(env):
     deliver(core, transport)
     assert push.claim_new(core, a, 'watch', listener='not a wake key')['new'] == 1
     assert push.claim_new(core, a, 'watch', listener='../../x') is None
+
+
+def test_a_notice_to_one_session_does_not_hold_back_another(env):
+    core, transport, clock, client = batching(env)
+    deliver(core, transport, 'first', sender=202)
+    assert push.claim_new(core, client, 'watch', listener=SIDE)['new'] == 1
+    # The side session's notice does not start the main session's interval.
+    clock.advance(30)
+    assert push.claim_new(core, client, 'watch', listener=MAIN)['new'] == 1
+    # Each session's own interval still batches what arrives next.
+    deliver(core, transport, 'second', sender=202)
+    assert push.claim_new(core, client, 'watch', listener=MAIN) is None
+    assert push.claim_new(core, client, 'watch', listener=SIDE) is None
+    clock.advance(570)
+    assert push.claim_new(core, client, 'watch', listener=SIDE)['new'] == 1
+    assert push.claim_new(core, client, 'watch', listener=MAIN) is None
+    clock.advance(30)
+    assert push.claim_new(core, client, 'watch', listener=MAIN)['new'] == 1

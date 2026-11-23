@@ -128,12 +128,20 @@ def _wakes_at_once(payload: dict, binding, exempt: set[str]) -> bool:
     return 'owner' in exempt and from_owner
 
 
-def last_notice(db, client_id: str) -> float | None:
-    """When this client was last told about new work, by a push notice or a desktop wake."""
-    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' "
-                                           "AND name IN ('push_announcements','relay_notifications')")}
+def last_notice(db, client_id: str, listener: str | None = None) -> float | None:
+    """When this client was last told about new work, by a push notice or a desktop wake.
+
+    With a listener, only that session's own push notices count, so a notice
+    to another session that shares the connection never holds this one back.
+    """
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+                                           "('push_announcements','push_listener_announcements','relay_notifications')")}
     times = []
-    if 'push_announcements' in tables:
+    if listener is not None:
+        if 'push_listener_announcements' in tables:
+            times.append(db.execute('SELECT max(announced) FROM push_listener_announcements WHERE client_id=? '
+                                    'AND listener=?', (client_id, listener)).fetchone()[0])
+    elif 'push_announcements' in tables:
         times.append(db.execute('SELECT max(announced) FROM push_announcements WHERE client_id=?',
                                 (client_id,)).fetchone()[0])
     if 'relay_notifications' in tables:
@@ -143,7 +151,7 @@ def last_notice(db, client_id: str) -> float | None:
     return max(times) if times else None
 
 
-def held(db, binding, payloads, now) -> bool:
+def held(db, binding, payloads, now, listener: str | None = None) -> bool:
     """Wake batching: hold a notice for these deliveries until the connection's interval has passed.
 
     After a notice (a push notice or a desktop wake), the next one waits
@@ -155,7 +163,7 @@ def held(db, binding, payloads, now) -> bool:
     interval = binding['wake_interval']
     if not interval:
         return False
-    last = last_notice(db, binding['client_id'])
+    last = last_notice(db, binding['client_id'], listener)
     if last is None or now - last >= interval:
         return False
     exempt = set() if binding['wake_exempt'] == 'none' else set(binding['wake_exempt'].split(','))
@@ -202,7 +210,7 @@ def claim_new(core, client_id: str, surface: str, *, limit: int = 50, listener: 
                 ORDER BY i.created,i.rowid LIMIT ?''', (listener, client_id, now, limit)).fetchall()
         if not rows:
             return None
-        if held(db, binding, [json.loads(row['payload']) for row in rows], now):
+        if held(db, binding, [json.loads(row['payload']) for row in rows], now, listener):
             return None
         senders: list[str] = []
         for row in rows:
